@@ -1,0 +1,6 @@
+{
+  "name": "LoanBazaar – AI Product Matching Engine",
+  "description": "Internal financial product matching platform for LoanBazaar supporting 19 configurable main product categories, unlimited sub-products, borrower intake assessments, deterministic baseline rule evaluation, and separated AI advisory explanations.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

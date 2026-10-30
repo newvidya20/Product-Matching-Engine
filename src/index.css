@@ -1,0 +1,112 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+@layer base {
+  :root {
+    color-scheme: light;
+    --surface-0: #f4f7fb;
+    --surface-1: #ffffff;
+    --surface-2: #eef3f9;
+    --brand-600: #f97316;
+    --brand-700: #ea580c;
+    --ink-900: #0f172a;
+    --ink-700: #334155;
+    --ink-500: #64748b;
+    --border: rgba(15, 23, 42, 0.09);
+    --shadow-soft: 0 12px 28px rgba(15, 23, 42, 0.06);
+  }
+
+  html[data-theme='dark'] {
+    color-scheme: dark;
+    --surface-0: #0f172a;
+    --surface-1: #111827;
+    --surface-2: #1f2937;
+    --brand-600: #f59e0b;
+    --brand-700: #d97706;
+    --ink-900: #f8fafc;
+    --ink-700: #e2e8f0;
+    --ink-500: #cbd5e1;
+    --border: rgba(148, 163, 184, 0.2);
+    --shadow-soft: 0 12px 28px rgba(2, 6, 23, 0.35);
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background: linear-gradient(180deg, #eef4fb 0%, #f8fafc 100%);
+    color: var(--ink-900);
+    min-height: 100vh;
+    transition: background 0.2s ease, color 0.2s ease;
+  }
+
+  html[data-theme='dark'] body {
+    background: linear-gradient(180deg, #020817 0%, #0f172a 100%);
+    color: var(--ink-900);
+  }
+
+  html[data-theme='dark'] .bg-white,
+  html[data-theme='dark'] .bg-stone-50,
+  html[data-theme='dark'] .bg-stone-100,
+  html[data-theme='dark'] .bg-stone-200,
+  html[data-theme='dark'] .border-stone-200,
+  html[data-theme='dark'] .border-stone-300,
+  html[data-theme='dark'] .divide-stone-200 > :not([hidden]) ~ :not([hidden]),
+  html[data-theme='dark'] .divide-stone-200 {
+    background-color: #111827 !important;
+    border-color: rgba(148, 163, 184, 0.22) !important;
+  }
+
+  html[data-theme='dark'] .text-stone-900,
+  html[data-theme='dark'] .text-stone-700,
+  html[data-theme='dark'] .text-stone-600,
+  html[data-theme='dark'] .text-stone-500,
+  html[data-theme='dark'] .text-stone-400 {
+    color: #e2e8f0 !important;
+  }
+
+  html[data-theme='dark'] input,
+  html[data-theme='dark'] select,
+  html[data-theme='dark'] textarea,
+  html[data-theme='dark'] button {
+    color: #e2e8f0;
+  }
+
+  h1, h2, h3, h4, .font-display {
+    font-family: var(--font-display);
+  }
+
+  ::selection {
+    background: rgba(249, 115, 22, 0.18);
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: #edf2f7;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: rgba(148, 163, 184, 0.8);
+    border-radius: 999px;
+    border: 2px solid #edf2f7;
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}

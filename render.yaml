@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: loanbazaar
+    env: node
+    plan: free
+    autoDeploy: true
+    healthCheckPath: /api/settings
+    buildCommand: npm install --legacy-peer-deps && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: GOOGLE_SHEETS_SPREADSHEET_ID
+        sync: false
