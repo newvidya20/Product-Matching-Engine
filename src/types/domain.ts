@@ -258,6 +258,58 @@ export type ProfitabilityStatus =
   | 'loss_making'
   | 'not_provided';
 
+export type FinancialDataSource = 'audited' | 'provisional' | 'management';
+export type GstComplianceStatus = 'compliant' | 'not_compliant' | 'not_applicable' | 'not_provided';
+export type CreditReportStatus = 'available' | 'pending' | 'not_applicable' | 'not_provided';
+
+export interface BorrowerFinancialProfile {
+  financialYearLabel?: string;
+  dataSource?: FinancialDataSource;
+  annualRevenue?: number | null;
+  previousAnnualRevenue?: number | null;
+  netProfitAfterTax?: number | null;
+  ebitda?: number | null;
+  ebit?: number | null;
+  depreciation?: number | null;
+  amortization?: number | null;
+  interestExpense?: number | null;
+  currentAssets?: number | null;
+  currentLiabilities?: number | null;
+  totalAssets?: number | null;
+  totalLiabilities?: number | null;
+  totalOutstandingBorrowings?: number | null;
+  totalOutsideLiabilities?: number | null;
+  tangibleNetWorth?: number | null;
+  shareholdersEquity?: number | null;
+  annualScheduledPrincipalRepayments?: number | null;
+  existingMonthlyEmi?: number | null;
+  operatingCashFlow?: number | null;
+  averageMonthlyBankingCredits?: number | null;
+  averageMonthlyBankingBalance?: number | null;
+  ccOdSanctionedLimit?: number | null;
+  ccOdUtilisation?: number | null;
+  gstAnnualTurnover?: number | null;
+  gstComplianceStatus?: GstComplianceStatus;
+  personalCibilScore?: number | null;
+  promoterCibilScore?: number | null;
+  personalCreditReportDate?: string;
+  commercialCmrRank?: number | null;
+  commercialCreditReportStatus?: CreditReportStatus;
+  existingCorporateBorrowingExposure?: number | null;
+  delinquencies?: string;
+  ratios?: {
+    netProfitMargin?: number | null;
+    ebitdaMargin?: number | null;
+    currentRatio?: number | null;
+    tolTnw?: number | null;
+    debtEquity?: number | null;
+    interestCoverage?: number | null;
+    dscr?: number | null;
+    revenueGrowth?: number | null;
+    bankingTurnoverRatio?: number | null;
+  };
+}
+
 export type AssessmentStatus = 'draft' | 'submitted' | 'evaluated';
 
 export interface RuleCheckDetail {
@@ -390,6 +442,7 @@ export interface BorrowerAssessment {
   statedPurpose: string;
   advisorNotes: string;
   customAttributes: KeyValueAttribute[];
+  financialProfile?: BorrowerFinancialProfile;
   status: AssessmentStatus;
   isFictionalDemo: boolean;
   createdAt: string;

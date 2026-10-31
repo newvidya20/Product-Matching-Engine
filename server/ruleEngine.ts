@@ -12,6 +12,7 @@ import type {
   SubProduct,
   SubProductEvaluationResult,
 } from '../src/types/domain.ts';
+import { calculateFinancialRatios } from '../src/utils/financialMetrics';
 
 function formatCurrency(val: number, currency: string): string {
   return `${currency} ${val.toLocaleString('en-IN')}`;
@@ -354,6 +355,196 @@ function checkListSemanticFit(
   return { matched, checked: true };
 }
 
+function evaluateFinancialSignals(assessment: BorrowerAssessment): {
+  reasons: string[];
+  missing: string[];
+  failed: string[];
+} {
+  const profile = assessment.financialProfile;
+  if (!profile) {
+    return { reasons: [], missing: [], failed: [] };
+  }
+
+  const ratios = {
+    ...calculateFinancialRatios(profile),
+    ...profile.ratios,
+  };
+
+  const policyThresholds: Record<
+    string,
+    {
+      dscrMin: number;
+      tolTnwMax: number;
+      debtEquityMax: number;
+      currentRatioMin: number;
+      cibilMin: number;
+      cmrMax: number;
+      revenueGrowthMin?: number;
+    }
+  > = {
+    working_capital: {
+      dscrMin: 1.1,
+      tolTnwMax: 2.5,
+      debtEquityMax: 2.5,
+      currentRatioMin: 1.0,
+      cibilMin: 650,
+      cmrMax: 6,
+    },
+    machinery_equipment: {
+      dscrMin: 1.2,
+      tolTnwMax: 2.0,
+      debtEquityMax: 1.8,
+      currentRatioMin: 1.1,
+      cibilMin: 680,
+      cmrMax: 5,
+    },
+    commercial_property: {
+      dscrMin: 1.25,
+      tolTnwMax: 1.8,
+      debtEquityMax: 1.6,
+      currentRatioMin: 1.1,
+      cibilMin: 680,
+      cmrMax: 5,
+    },
+    invoice_discounting: {
+      dscrMin: 1.0,
+      tolTnwMax: 2.2,
+      debtEquityMax: 1.5,
+      currentRatioMin: 1.0,
+      cibilMin: 650,
+      cmrMax: 6,
+      revenueGrowthMin: 0,
+    },
+    debt_consolidation: {
+      dscrMin: 1.0,
+      tolTnwMax: 2.0,
+      debtEquityMax: 1.8,
+      currentRatioMin: 1.0,
+      cibilMin: 620,
+      cmrMax: 7,
+    },
+    project_expansion: {
+      dscrMin: 1.2,
+      tolTnwMax: 1.8,
+      debtEquityMax: 1.7,
+      currentRatioMin: 1.2,
+      cibilMin: 680,
+      cmrMax: 5,
+    },
+    trade_import_export: {
+      dscrMin: 1.0,
+      tolTnwMax: 2.2,
+      debtEquityMax: 1.8,
+      currentRatioMin: 1.0,
+      cibilMin: 650,
+      cmrMax: 6,
+      revenueGrowthMin: 0,
+    },
+    general_business: {
+      dscrMin: 1.0,
+      tolTnwMax: 2.5,
+      debtEquityMax: 2.0,
+      currentRatioMin: 1.0,
+      cibilMin: 640,
+      cmrMax: 7,
+    },
+  };
+
+  const purposeKey = assessment.fundingPurpose || 'general_business';
+  const policy = policyThresholds[purposeKey] || policyThresholds.general_business;
+  const purposeLabel = purposeKey.replace(/_/g, ' ');
+
+  const reasons: string[] = [];
+  const missing: string[] = [];
+  const failed: string[] = [];
+
+  if (typeof ratios.netProfitMargin === 'number') {
+    reasons.push(`Latest FY net profit margin is ${ratios.netProfitMargin}%.`);
+  } else if (profile.annualRevenue || profile.netProfitAfterTax) {
+    missing.push('Latest FY net profit margin');
+  }
+
+  if (typeof ratios.currentRatio === 'number') {
+    reasons.push(`Current ratio is ${ratios.currentRatio}.`);
+    if (ratios.currentRatio < policy.currentRatioMin) {
+      failed.push(
+        `Current ratio ${ratios.currentRatio} is below the ${purposeLabel} policy minimum of ${policy.currentRatioMin}.`
+      );
+    }
+  }
+
+  if (typeof ratios.tolTnw === 'number') {
+    reasons.push(`TOL/TNW is ${ratios.tolTnw}.`);
+    if (ratios.tolTnw > policy.tolTnwMax) {
+      failed.push(
+        `TOL/TNW ${ratios.tolTnw} exceeds the ${purposeLabel} policy limit of ${policy.tolTnwMax}.`
+      );
+    }
+  }
+
+  if (typeof ratios.debtEquity === 'number') {
+    reasons.push(`Debt/Equity is ${ratios.debtEquity}.`);
+    if (ratios.debtEquity > policy.debtEquityMax) {
+      failed.push(
+        `Debt/Equity ${ratios.debtEquity} exceeds the ${purposeLabel} policy limit of ${policy.debtEquityMax}.`
+      );
+    }
+  }
+
+  if (typeof ratios.dscr === 'number') {
+    reasons.push(`DSCR is ${ratios.dscr}.`);
+    if (ratios.dscr < policy.dscrMin) {
+      failed.push(
+        `DSCR ${ratios.dscr} is below the ${purposeLabel} policy minimum of ${policy.dscrMin}.`
+      );
+    }
+  }
+
+  if (typeof ratios.interestCoverage === 'number') {
+    reasons.push(`Interest coverage is ${ratios.interestCoverage}x.`);
+  }
+
+  if (typeof ratios.revenueGrowth === 'number') {
+    reasons.push(`Revenue growth is ${ratios.revenueGrowth}% year on year.`);
+    if (
+      typeof policy.revenueGrowthMin === 'number' &&
+      ratios.revenueGrowth < policy.revenueGrowthMin
+    ) {
+      failed.push(
+        `Revenue growth ${ratios.revenueGrowth}% is below the ${purposeLabel} benchmark of ${policy.revenueGrowthMin}%.`
+      );
+    }
+  }
+
+  if (typeof profile.personalCibilScore === 'number') {
+    reasons.push(`Personal CIBIL score is ${profile.personalCibilScore}.`);
+    if (profile.personalCibilScore < policy.cibilMin) {
+      failed.push(
+        `Personal CIBIL score ${profile.personalCibilScore} is below the ${purposeLabel} policy threshold of ${policy.cibilMin}.`
+      );
+    }
+  }
+
+  if (typeof profile.commercialCmrRank === 'number') {
+    reasons.push(`Commercial CMR rank is ${profile.commercialCmrRank}.`);
+    if (profile.commercialCmrRank > policy.cmrMax) {
+      failed.push(
+        `Commercial CMR rank ${profile.commercialCmrRank} is weaker than the ${purposeLabel} policy ceiling of ${policy.cmrMax}.`
+      );
+    }
+  }
+
+  if (typeof ratios.bankingTurnoverRatio === 'number') {
+    reasons.push(`Banking turnover ratio is ${ratios.bankingTurnoverRatio}%.`);
+  }
+
+  if (!profile.personalCibilScore && !profile.commercialCmrRank && assessment.creditScore) {
+    reasons.push(`Application credit score is ${assessment.creditScore} as a general risk signal.`);
+  }
+
+  return { reasons, missing, failed };
+}
+
 /**
  * Two-Stage Intelligent Product Matching Engine:
  * - Stage 1: Requirement Matching (borrower need, funding purpose, entity fit, exclusions)
@@ -483,6 +674,10 @@ export function runTwoStageProductMatching(
       const reasons: string[] = [];
       const failed: string[] = [];
       const missing: string[] = [];
+      const financialSignals = evaluateFinancialSignals(assessment);
+      reasons.push(...financialSignals.reasons);
+      failed.push(...financialSignals.failed);
+      missing.push(...financialSignals.missing);
 
       // Stage 1 — Requirement Matching
       let stage1Score = 40;
@@ -782,14 +977,14 @@ export function runTwoStageProductMatching(
 
   const top3Ids = new Set(top3SubProducts.map((item) => item.subProductId));
 
-  const alternativeSubProducts = sortedCandidates
-    .filter(
-      (c) =>
-        !top3Ids.has(c.subProductId) &&
-        c.eligibilityStatus !== 'placeholder' &&
-        c.suitabilityScore >= 60
-    )
-    .slice(0, 5);
+  const alternativePool = sortedCandidates.filter(
+    (c) =>
+      !top3Ids.has(c.subProductId) &&
+      c.eligibilityStatus !== 'placeholder' &&
+      c.suitabilityScore > 0
+  );
+
+  const alternativeSubProducts = alternativePool.slice(0, 5);
 
   return {
     evaluationId: `eval-${Date.now()}`,

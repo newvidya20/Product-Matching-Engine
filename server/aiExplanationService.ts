@@ -46,6 +46,41 @@ function getAiClient(): GoogleGenAI {
   });
 }
 
+async function generateContentWithRetry(
+  ai: GoogleGenAI,
+  payload: Parameters<GoogleGenAI['models']['generateContent']>[0],
+  maxAttempts = 3
+) {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await ai.models.generateContent(payload);
+    } catch (error) {
+      lastError = error;
+      const message =
+        error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+      const isRetryable =
+        /503|UNAVAILABLE|429|rate limit|temporar/i.test(message) ||
+        (typeof error === 'object' &&
+          error !== null &&
+          'status' in error &&
+          [429, 503].includes(Number((error as { status?: number }).status)));
+
+      if (!isRetryable || attempt >= maxAttempts) {
+        break;
+      }
+
+      const delayMs = 900 * attempt;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error('The Gemini explanation service failed to respond successfully.');
+}
+
 /**
  * Separated AI Advisory Explanation Service.
  * Explains deterministic Two-Stage (Requirement + Verified Eligibility) results
@@ -123,45 +158,48 @@ export async function generateSeparatedAdvisoryExplanation(
     '7. Never change or imply an eligibility decision based on AI-generated prose; all candidates remain subject to the supplied deterministic result.',
   ].join('\n');
 
-  const response = await ai.models.generateContent({
-    model: modelName,
-    contents: `Generate a separated advisory explanation strictly grounded in this local PDF evidence and deterministic evaluation payload:\n${JSON.stringify(
-      structuredContext,
-      null,
-      2
-    )}`,
-    config: {
-      systemInstruction,
-      temperature: 0.2,
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          borrowerRequirementSummary: {
-            type: Type.STRING,
-            description:
-              '2-3 concise sentences summarizing the borrower profile, funding purpose, financials, and collateral.',
+  const response = await generateContentWithRetry(
+    ai,
+    {
+      model: modelName,
+      contents: `Generate a separated advisory explanation strictly grounded in this local PDF evidence and deterministic evaluation payload:\n${JSON.stringify(
+        structuredContext,
+        null,
+        2
+      )}`,
+      config: {
+        systemInstruction,
+        temperature: 0.2,
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            borrowerRequirementSummary: {
+              type: Type.STRING,
+              description:
+                '2-3 concise sentences summarizing the borrower profile, funding purpose, financials, and collateral.',
+            },
+            deterministicOutcomeNarrative: {
+              type: Type.STRING,
+              description:
+                'Clear explanation of Stage 1 requirement fit, Stage 2 verified rule outcomes, Top 3 matches, and any missing information.',
+            },
+            employeeFollowUpChecklist: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+              description:
+                '3-5 concrete operational next steps (such as collecting missing fields or required documents) without inventing financial criteria.',
+            },
           },
-          deterministicOutcomeNarrative: {
-            type: Type.STRING,
-            description:
-              'Clear explanation of Stage 1 requirement fit, Stage 2 verified rule outcomes, Top 3 matches, and any missing information.',
-          },
-          employeeFollowUpChecklist: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
-            description:
-              '3-5 concrete operational next steps (such as collecting missing fields or required documents) without inventing financial criteria.',
-          },
+          required: [
+            'borrowerRequirementSummary',
+            'deterministicOutcomeNarrative',
+            'employeeFollowUpChecklist',
+          ],
         },
-        required: [
-          'borrowerRequirementSummary',
-          'deterministicOutcomeNarrative',
-          'employeeFollowUpChecklist',
-        ],
       },
-    },
-  });
+    }
+  );
 
   const rawText = response.text;
   if (!rawText) {

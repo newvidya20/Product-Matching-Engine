@@ -3,11 +3,13 @@ import { Beaker, Plus, RotateCcw, Save, Send, Trash2 } from 'lucide-react';
 import { useAppState } from '../context/AppStateContext';
 import { PageHeader, SegmentedControl } from '../components/ui/Primitives';
 import type {
+  BorrowerFinancialProfile,
   EntityStructureType,
   FundingPurposeCategory,
   KeyValueAttribute,
   ProfitabilityStatus,
 } from '../types/domain';
+import { calculateFinancialRatios } from '../utils/financialMetrics';
 
 interface DynamicQuestionSpec {
   key: string;
@@ -177,6 +179,7 @@ interface FormState {
   collateralDescription: string;
   statedPurpose: string;
   advisorNotes: string;
+  financialProfile: BorrowerFinancialProfile;
   isFictionalDemo: boolean;
   customAttributes: KeyValueAttribute[];
 }
@@ -205,6 +208,43 @@ function createBlankForm(defaultCurrency: string, officerDefault = ''): FormStat
     collateralDescription: '',
     statedPurpose: '',
     advisorNotes: '',
+    financialProfile: {
+      financialYearLabel: 'Latest Completed FY (Apr–Mar)',
+      dataSource: 'audited',
+      annualRevenue: '',
+      previousAnnualRevenue: '',
+      netProfitAfterTax: '',
+      ebitda: '',
+      ebit: '',
+      depreciation: '',
+      amortization: '',
+      interestExpense: '',
+      currentAssets: '',
+      currentLiabilities: '',
+      totalAssets: '',
+      totalLiabilities: '',
+      totalOutstandingBorrowings: '',
+      totalOutsideLiabilities: '',
+      tangibleNetWorth: '',
+      shareholdersEquity: '',
+      annualScheduledPrincipalRepayments: '',
+      existingMonthlyEmi: '',
+      operatingCashFlow: '',
+      averageMonthlyBankingCredits: '',
+      averageMonthlyBankingBalance: '',
+      ccOdSanctionedLimit: '',
+      ccOdUtilisation: '',
+      gstAnnualTurnover: '',
+      gstComplianceStatus: 'not_provided',
+      personalCibilScore: '',
+      promoterCibilScore: '',
+      personalCreditReportDate: '',
+      commercialCmrRank: '',
+      commercialCreditReportStatus: 'not_provided',
+      existingCorporateBorrowingExposure: '',
+      delinquencies: '',
+      ratios: {},
+    } as BorrowerFinancialProfile,
     isFictionalDemo: false,
     customAttributes: [],
   };
@@ -305,6 +345,62 @@ export function NewAssessmentModule() {
     }));
   };
 
+  const updateFinancialField = <K extends keyof BorrowerFinancialProfile>(
+    key: K,
+    value: BorrowerFinancialProfile[K]
+  ) => {
+    setForm((prev) => ({
+      ...prev,
+      financialProfile: {
+        ...prev.financialProfile,
+        [key]: value,
+      },
+    }));
+  };
+
+  const buildFinancialProfile = (): BorrowerFinancialProfile => {
+    const base: BorrowerFinancialProfile = {
+      ...form.financialProfile,
+      annualRevenue: Number(form.financialProfile.annualRevenue) || null,
+      previousAnnualRevenue: Number(form.financialProfile.previousAnnualRevenue) || null,
+      netProfitAfterTax: Number(form.financialProfile.netProfitAfterTax) || null,
+      ebitda: Number(form.financialProfile.ebitda) || null,
+      ebit: Number(form.financialProfile.ebit) || null,
+      depreciation: Number(form.financialProfile.depreciation) || null,
+      amortization: Number(form.financialProfile.amortization) || null,
+      interestExpense: Number(form.financialProfile.interestExpense) || null,
+      currentAssets: Number(form.financialProfile.currentAssets) || null,
+      currentLiabilities: Number(form.financialProfile.currentLiabilities) || null,
+      totalAssets: Number(form.financialProfile.totalAssets) || null,
+      totalLiabilities: Number(form.financialProfile.totalLiabilities) || null,
+      totalOutstandingBorrowings:
+        Number(form.financialProfile.totalOutstandingBorrowings) || null,
+      totalOutsideLiabilities: Number(form.financialProfile.totalOutsideLiabilities) || null,
+      tangibleNetWorth: Number(form.financialProfile.tangibleNetWorth) || null,
+      shareholdersEquity: Number(form.financialProfile.shareholdersEquity) || null,
+      annualScheduledPrincipalRepayments:
+        Number(form.financialProfile.annualScheduledPrincipalRepayments) || null,
+      existingMonthlyEmi: Number(form.financialProfile.existingMonthlyEmi) || null,
+      operatingCashFlow: Number(form.financialProfile.operatingCashFlow) || null,
+      averageMonthlyBankingCredits:
+        Number(form.financialProfile.averageMonthlyBankingCredits) || null,
+      averageMonthlyBankingBalance:
+        Number(form.financialProfile.averageMonthlyBankingBalance) || null,
+      ccOdSanctionedLimit: Number(form.financialProfile.ccOdSanctionedLimit) || null,
+      ccOdUtilisation: Number(form.financialProfile.ccOdUtilisation) || null,
+      gstAnnualTurnover: Number(form.financialProfile.gstAnnualTurnover) || null,
+      personalCibilScore: Number(form.financialProfile.personalCibilScore) || null,
+      promoterCibilScore: Number(form.financialProfile.promoterCibilScore) || null,
+      commercialCmrRank: Number(form.financialProfile.commercialCmrRank) || null,
+      existingCorporateBorrowingExposure:
+        Number(form.financialProfile.existingCorporateBorrowingExposure) || null,
+    };
+    return {
+      ...base,
+      ratios: calculateFinancialRatios(base),
+    };
+  };
+
   const submitForm = async (asDraft: boolean) => {
     setValidationError(null);
 
@@ -369,6 +465,7 @@ export function NewAssessmentModule() {
         advisorNotes: form.advisorNotes.trim(),
         isFictionalDemo: form.isFictionalDemo,
         customAttributes: cleanAttributes,
+        financialProfile: buildFinancialProfile(),
         status: asDraft ? 'draft' : 'submitted',
       },
       !asDraft
@@ -832,7 +929,214 @@ export function NewAssessmentModule() {
           </div>
         </div>
 
-        {/* Section 4: Collateral & Other Relevant Requirements */}
+        {/* Section 4: Financial Assessment & Credit Signals */}
+        <div className="p-6 sm:p-8 space-y-5">
+          <div>
+            <h2 className="text-base font-semibold text-stone-900 font-display">
+              04. Financial Assessment & Credit Signals
+            </h2>
+            <p className="text-xs text-stone-500 mt-0.5">
+              Capture the latest completed FY and key credit metrics for lender-specific eligibility matching.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-5">
+            <div className="space-y-1.5">
+              <label className="block text-xs font-medium text-stone-700">Latest FY label</label>
+              <input
+                type="text"
+                value={form.financialProfile.financialYearLabel || ''}
+                onChange={(e) => updateFinancialField('financialYearLabel', e.target.value)}
+                placeholder="e.g., FY 2024-25"
+                className="w-full px-3.5 py-2 text-sm bg-white border border-stone-300 rounded-lg focus:outline-none focus:border-orange-600"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="block text-xs font-medium text-stone-700">Data source</label>
+              <select
+                value={form.financialProfile.dataSource || 'audited'}
+                onChange={(e) => updateFinancialField('dataSource', e.target.value as BorrowerFinancialProfile['dataSource'])}
+                className="w-full px-3.5 py-2 text-sm bg-white border border-stone-300 rounded-lg focus:outline-none focus:border-orange-600"
+              >
+                <option value="audited">Audited</option>
+                <option value="provisional">Provisional</option>
+                <option value="management">Management</option>
+              </select>
+            </div>
+            <div className="space-y-1.5">
+              <label className="block text-xs font-medium text-stone-700">Annual Revenue ({form.currency})</label>
+              <input
+                type="number"
+                min="0"
+                step="1000"
+                value={form.financialProfile.annualRevenue ?? ''}
+                onChange={(e) => updateFinancialField('annualRevenue', Number(e.target.value) || null)}
+                className="w-full px-3.5 py-2 text-sm font-mono tabular-nums bg-white border border-stone-300 rounded-lg focus:outline-none focus:border-orange-600"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="block text-xs font-medium text-stone-700">Previous FY Revenue ({form.currency})</label>
+              <input
+                type="number"
+                min="0"
+                step="1000"
+                value={form.financialProfile.previousAnnualRevenue ?? ''}
+                onChange={(e) => updateFinancialField('previousAnnualRevenue', Number(e.target.value) || null)}
+                className="w-full px-3.5 py-2 text-sm font-mono tabular-nums bg-white border border-stone-300 rounded-lg focus:outline-none focus:border-orange-600"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="block text-xs font-medium text-stone-700">PAT ({form.currency})</label>
+              <input
+                type="number"
+                min="0"
+                step="1000"
+                value={form.financialProfile.netProfitAfterTax ?? ''}
+                onChange={(e) => updateFinancialField('netProfitAfterTax', Number(e.target.value) || null)}
+                className="w-full px-3.5 py-2 text-sm font-mono tabular-nums bg-white border border-stone-300 rounded-lg focus:outline-none focus:border-orange-600"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="block text-xs font-medium text-stone-700">EBITDA ({form.currency})</label>
+              <input
+                type="number"
+                min="0"
+                step="1000"
+                value={form.financialProfile.ebitda ?? ''}
+                onChange={(e) => updateFinancialField('ebitda', Number(e.target.value) || null)}
+                className="w-full px-3.5 py-2 text-sm font-mono tabular-nums bg-white border border-stone-300 rounded-lg focus:outline-none focus:border-orange-600"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="block text-xs font-medium text-stone-700">EBIT ({form.currency})</label>
+              <input
+                type="number"
+                min="0"
+                step="1000"
+                value={form.financialProfile.ebit ?? ''}
+                onChange={(e) => updateFinancialField('ebit', Number(e.target.value) || null)}
+                className="w-full px-3.5 py-2 text-sm font-mono tabular-nums bg-white border border-stone-300 rounded-lg focus:outline-none focus:border-orange-600"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="block text-xs font-medium text-stone-700">Interest Expense ({form.currency})</label>
+              <input
+                type="number"
+                min="0"
+                step="1000"
+                value={form.financialProfile.interestExpense ?? ''}
+                onChange={(e) => updateFinancialField('interestExpense', Number(e.target.value) || null)}
+                className="w-full px-3.5 py-2 text-sm font-mono tabular-nums bg-white border border-stone-300 rounded-lg focus:outline-none focus:border-orange-600"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="block text-xs font-medium text-stone-700">Current Assets ({form.currency})</label>
+              <input
+                type="number"
+                min="0"
+                step="1000"
+                value={form.financialProfile.currentAssets ?? ''}
+                onChange={(e) => updateFinancialField('currentAssets', Number(e.target.value) || null)}
+                className="w-full px-3.5 py-2 text-sm font-mono tabular-nums bg-white border border-stone-300 rounded-lg focus:outline-none focus:border-orange-600"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="block text-xs font-medium text-stone-700">Current Liabilities ({form.currency})</label>
+              <input
+                type="number"
+                min="0"
+                step="1000"
+                value={form.financialProfile.currentLiabilities ?? ''}
+                onChange={(e) => updateFinancialField('currentLiabilities', Number(e.target.value) || null)}
+                className="w-full px-3.5 py-2 text-sm font-mono tabular-nums bg-white border border-stone-300 rounded-lg focus:outline-none focus:border-orange-600"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="block text-xs font-medium text-stone-700">Tangible Net Worth ({form.currency})</label>
+              <input
+                type="number"
+                min="0"
+                step="1000"
+                value={form.financialProfile.tangibleNetWorth ?? ''}
+                onChange={(e) => updateFinancialField('tangibleNetWorth', Number(e.target.value) || null)}
+                className="w-full px-3.5 py-2 text-sm font-mono tabular-nums bg-white border border-stone-300 rounded-lg focus:outline-none focus:border-orange-600"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="block text-xs font-medium text-stone-700">Total Outside Liabilities ({form.currency})</label>
+              <input
+                type="number"
+                min="0"
+                step="1000"
+                value={form.financialProfile.totalOutsideLiabilities ?? ''}
+                onChange={(e) => updateFinancialField('totalOutsideLiabilities', Number(e.target.value) || null)}
+                className="w-full px-3.5 py-2 text-sm font-mono tabular-nums bg-white border border-stone-300 rounded-lg focus:outline-none focus:border-orange-600"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="block text-xs font-medium text-stone-700">Debt Service Coverage (DSCR)</label>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={form.financialProfile.ratios?.dscr ?? ''}
+                onChange={(e) => {
+                  const value = Number(e.target.value);
+                  updateFinancialField('ratios', {
+                    ...(form.financialProfile.ratios || {}),
+                    dscr: Number.isFinite(value) ? value : null,
+                  });
+                }}
+                className="w-full px-3.5 py-2 text-sm font-mono tabular-nums bg-white border border-stone-300 rounded-lg focus:outline-none focus:border-orange-600"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="block text-xs font-medium text-stone-700">Personal CIBIL</label>
+              <input
+                type="number"
+                min="300"
+                max="900"
+                value={form.financialProfile.personalCibilScore ?? ''}
+                onChange={(e) => updateFinancialField('personalCibilScore', Number(e.target.value) || null)}
+                className="w-full px-3.5 py-2 text-sm font-mono tabular-nums bg-white border border-stone-300 rounded-lg focus:outline-none focus:border-orange-600"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="block text-xs font-medium text-stone-700">Commercial CMR Rank</label>
+              <input
+                type="number"
+                min="1"
+                value={form.financialProfile.commercialCmrRank ?? ''}
+                onChange={(e) => updateFinancialField('commercialCmrRank', Number(e.target.value) || null)}
+                className="w-full px-3.5 py-2 text-sm font-mono tabular-nums bg-white border border-stone-300 rounded-lg focus:outline-none focus:border-orange-600"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="block text-xs font-medium text-stone-700">Monthly Banking Credits ({form.currency})</label>
+              <input
+                type="number"
+                min="0"
+                step="1000"
+                value={form.financialProfile.averageMonthlyBankingCredits ?? ''}
+                onChange={(e) => updateFinancialField('averageMonthlyBankingCredits', Number(e.target.value) || null)}
+                className="w-full px-3.5 py-2 text-sm font-mono tabular-nums bg-white border border-stone-300 rounded-lg focus:outline-none focus:border-orange-600"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="block text-xs font-medium text-stone-700">GST Annual Turnover ({form.currency})</label>
+              <input
+                type="number"
+                min="0"
+                step="1000"
+                value={form.financialProfile.gstAnnualTurnover ?? ''}
+                onChange={(e) => updateFinancialField('gstAnnualTurnover', Number(e.target.value) || null)}
+                className="w-full px-3.5 py-2 text-sm font-mono tabular-nums bg-white border border-stone-300 rounded-lg focus:outline-none focus:border-orange-600"
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Section 5: Collateral & Other Relevant Requirements */}
         <div className="p-6 sm:p-8 space-y-5">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
             <div>
