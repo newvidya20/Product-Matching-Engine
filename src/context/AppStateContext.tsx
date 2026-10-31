@@ -85,6 +85,73 @@ const localWorkspaceUser: AuthenticatedGoogleUser = {
   role: 'admin',
 };
 
+const USERS_STORAGE_KEY = 'loanbazaar-local-users-v1';
+const SESSION_STORAGE_KEY = 'loanbazaar-local-session-v1';
+
+interface LocalUserRecord {
+  uid: string;
+  email: string;
+  displayName: string;
+  password: string;
+  role: 'admin' | 'employee';
+  createdAt: string;
+}
+
+function readStoredUsers(): LocalUserRecord[] {
+  if (typeof window === 'undefined') {
+    return [];
+  }
+
+  try {
+    const raw = window.localStorage.getItem(USERS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? (parsed as LocalUserRecord[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeStoredUsers(users: LocalUserRecord[]) {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(users));
+}
+
+function readStoredSessionUser(): AuthenticatedGoogleUser | null {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
+  try {
+    const raw = window.localStorage.getItem(SESSION_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<AuthenticatedGoogleUser>;
+    if (!parsed || !parsed.email || !parsed.role) return null;
+    return {
+      uid: parsed.uid || `local-${parsed.email}`,
+      email: parsed.email,
+      displayName: parsed.displayName || parsed.email.split('@')[0],
+      role: parsed.role === 'employee' ? 'employee' : 'admin',
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredSessionUser(user: AuthenticatedGoogleUser | null) {
+  if (typeof window === 'undefined') return;
+  if (!user) {
+    window.localStorage.removeItem(SESSION_STORAGE_KEY);
+    return;
+  }
+  window.localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(user));
+}
+
+function isVerifiedAdminEmail(email: string, adminEmails: string[]) {
+  const normalized = email.trim().toLowerCase();
+  return adminEmails.some((item) => item.trim().toLowerCase() === normalized);
+}
+
 const getAccessToken = (): null => null;
 
 const initialState: AppState = {
@@ -94,7 +161,7 @@ const initialState: AppState = {
   isGeneratingAi: false,
   isSigningIn: false,
   needsGoogleAuth: false,
-  currentUser: null,
+  currentUser: readStoredSessionUser(),
   workspaceConfig: initialWorkspaceConfig,
   activeModule: 'dashboard',
   selectedAssessmentId: null,
@@ -429,7 +496,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       role?: 'admin' | 'employee';
       displayName?: string;
     }) => {
-      const email = payload.email.trim();
+      const email = payload.email.trim().toLowerCase();
       const password = payload.password.trim();
 
       if (!email || !password) {
@@ -442,16 +509,32 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      const user: AuthenticatedGoogleUser = {
-        uid: `local-${email}`,
-        email,
-        displayName:
-          payload.displayName?.trim() || email.split('@')[0] || 'LoanBazaar User',
-        role: payload.role === 'employee' ? 'employee' : 'admin',
+      const users = readStoredUsers();
+      const existingUser = users.find((user) => user.email.toLowerCase() === email);
+
+      if (!existingUser) {
+        notify('error', 'No account found for this email. Please create an account first.');
+        return;
+      }
+
+      if (existingUser.password !== password) {
+        notify('error', 'Incorrect password. Please try again.');
+        return;
+      }
+
+      const authenticatedUser: AuthenticatedGoogleUser = {
+        uid: existingUser.uid,
+        email: existingUser.email,
+        displayName: existingUser.displayName,
+        role: existingUser.role,
       };
 
-      dispatch({ type: 'SET_AUTH_STATE', user, needsAuth: false });
-      notify('success', `Signed in as ${user.role === 'admin' ? 'Administrator' : 'Employee'}.`);
+      writeStoredSessionUser(authenticatedUser);
+      dispatch({ type: 'SET_AUTH_STATE', user: authenticatedUser, needsAuth: false });
+      notify(
+        'success',
+        `Signed in as ${authenticatedUser.role === 'admin' ? 'Administrator' : 'Employee'}.`
+      );
     },
     [notify]
   );
@@ -463,9 +546,10 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       password: string;
       role?: 'admin' | 'employee';
     }) => {
-      const email = payload.email.trim();
+      const email = payload.email.trim().toLowerCase();
       const displayName = payload.displayName.trim();
       const password = payload.password.trim();
+      const selectedRole = payload.role === 'employee' ? 'employee' : 'admin';
 
       if (!displayName) {
         notify('error', 'Please enter your full name.');
@@ -482,20 +566,57 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      const user: AuthenticatedGoogleUser = {
-        uid: `local-${email}`,
+      const users = readStoredUsers();
+      if (users.some((user) => user.email.toLowerCase() === email)) {
+        notify('error', 'An account already exists for this email. Please sign in instead.');
+        return;
+      }
+
+      const adminWhitelist = Array.from(
+        new Set([
+          ...initialWorkspaceConfig.adminEmails,
+          ...state.workspaceConfig.adminEmails,
+          'viloanbazzar@gmail.com',
+          'admin@loanbazaar.local',
+        ])
+      );
+
+      if (selectedRole === 'admin' && !isVerifiedAdminEmail(email, adminWhitelist)) {
+        notify(
+          'error',
+          'Admin access is restricted to verified LoanBazaar administrators. Please use an approved admin email.'
+        );
+        return;
+      }
+
+      const nextUser: LocalUserRecord = {
+        uid: `local-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
         email,
         displayName,
-        role: payload.role === 'employee' ? 'employee' : 'admin',
+        password,
+        role: selectedRole,
+        createdAt: new Date().toISOString(),
       };
 
-      dispatch({ type: 'SET_AUTH_STATE', user, needsAuth: false });
-      notify('success', `Account created for ${displayName}.`);
+      const nextUsers = [...users, nextUser];
+      writeStoredUsers(nextUsers);
+
+      const authenticatedUser: AuthenticatedGoogleUser = {
+        uid: nextUser.uid,
+        email: nextUser.email,
+        displayName: nextUser.displayName,
+        role: nextUser.role,
+      };
+
+      writeStoredSessionUser(authenticatedUser);
+      dispatch({ type: 'SET_AUTH_STATE', user: authenticatedUser, needsAuth: false });
+      notify('success', `Account created for ${displayName}. You are now signed in.`);
     },
-    [notify]
+    [notify, state.workspaceConfig.adminEmails]
   );
 
   const signOut = useCallback(() => {
+    writeStoredSessionUser(null);
     dispatch({ type: 'SET_AUTH_STATE', user: null, needsAuth: false });
     notify('info', 'You have been signed out.');
   }, [notify]);
@@ -511,6 +632,10 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     }, 5000);
     return () => window.clearTimeout(timer);
   }, [state.toast]);
+
+  useEffect(() => {
+    writeStoredSessionUser(state.currentUser);
+  }, [state.currentUser]);
 
   const refreshBootstrap = useCallback(async () => {
     dispatch({ type: 'BOOTSTRAP_START' });

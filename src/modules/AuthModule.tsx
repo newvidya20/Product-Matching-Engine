@@ -10,7 +10,7 @@ export function AuthModule() {
     name: '',
     email: '',
     password: '',
-    role: 'admin' as 'admin' | 'employee',
+    role: 'employee' as 'admin' | 'employee',
   });
 
   const handleSubmit = async (event: React.FormEvent) => {
@@ -31,21 +31,6 @@ export function AuthModule() {
       email: form.email,
       password: form.password,
       role: form.role,
-    });
-  };
-
-  const handleDemoLogin = async (role: 'admin' | 'employee') => {
-    const demoCredentials = {
-      admin: { email: 'admin@loanbazaar.local', password: 'loanbazaar123', displayName: 'LoanBazaar Admin' },
-      employee: { email: 'employee@loanbazaar.local', password: 'loanbazaar123', displayName: 'LoanBazaar Employee' },
-    };
-
-    const next = demoCredentials[role];
-    await signInLocalUser({
-      email: next.email,
-      password: next.password,
-      role,
-      displayName: next.displayName,
     });
   };
 
@@ -195,28 +180,6 @@ export function AuthModule() {
             </button>
           </form>
 
-          <div className="mt-6 rounded-2xl border border-slate-200 bg-slate-50 p-4">
-            <div className="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
-              <Lock className="h-3.5 w-3.5" />
-              Quick access demo
-            </div>
-            <div className="grid gap-2 sm:grid-cols-2">
-              <button
-                type="button"
-                onClick={() => void handleDemoLogin('admin')}
-                className="rounded-xl border border-orange-200 bg-orange-50 px-3 py-2.5 text-sm font-medium text-orange-700 transition hover:bg-orange-100"
-              >
-                Continue as Admin
-              </button>
-              <button
-                type="button"
-                onClick={() => void handleDemoLogin('employee')}
-                className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-medium text-slate-700 transition hover:bg-slate-100"
-              >
-                Continue as Employee
-              </button>
-            </div>
-          </div>
         </div>
       </div>
     </div>

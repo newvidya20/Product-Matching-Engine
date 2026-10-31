@@ -112,6 +112,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     state,
     navigateTo,
     clearToast,
+    signOut,
   } = useAppState();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -329,6 +330,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               </button>
             )}
 
+            <button
+              type="button"
+              onClick={signOut}
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-all whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <span>Sign Out</span>
+            </button>
           </div>
         </header>
 
