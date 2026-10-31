@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "tsx server.ts",
     "build": "vite build",
-    "start": "cross-env NODE_ENV=production tsx server.ts",
+    "start": "node --import tsx server.ts",
     "preview": "vite preview",
     "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true });\"",
     "lint": "tsc --noEmit",
