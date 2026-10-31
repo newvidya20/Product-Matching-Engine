@@ -86,9 +86,20 @@ function validateReference(raw: unknown): StudyMaterialReferenceDocument[] {
   });
 }
 
-const referenceDocuments = validateReference(
-  JSON.parse(fs.readFileSync(REFERENCE_PATH, 'utf8')) as unknown
-);
+function loadReferenceDocuments(): StudyMaterialReferenceDocument[] {
+  try {
+    const raw = fs.readFileSync(REFERENCE_PATH, 'utf8');
+    return validateReference(JSON.parse(raw) as unknown);
+  } catch (error) {
+    console.warn(
+      `Study-material index not available at ${REFERENCE_PATH}. Falling back to an empty local catalogue until \`npm run index:study-material\` is executed.`,
+      error instanceof Error ? error.message : error
+    );
+    return [];
+  }
+}
+
+const referenceDocuments = loadReferenceDocuments();
 export const localStudyMaterialReferenceDocuments = referenceDocuments;
 const indexedDocuments: IndexedDocument[] = referenceDocuments.map((reference) => {
   const titleTerms = tokenize(

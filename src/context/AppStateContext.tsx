@@ -549,7 +549,17 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       const email = payload.email.trim().toLowerCase();
       const displayName = payload.displayName.trim();
       const password = payload.password.trim();
-      const selectedRole = payload.role === 'employee' ? 'employee' : 'admin';
+      const adminWhitelist = Array.from(
+        new Set([
+          ...initialWorkspaceConfig.adminEmails,
+          ...state.workspaceConfig.adminEmails,
+          'viloanbazzar@gmail.com',
+          'admin@loanbazaar.local',
+        ])
+      );
+      const selectedRole = isVerifiedAdminEmail(email, adminWhitelist)
+        ? 'admin'
+        : 'employee';
 
       if (!displayName) {
         notify('error', 'Please enter your full name.');
@@ -571,15 +581,6 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
         notify('error', 'An account already exists for this email. Please sign in instead.');
         return;
       }
-
-      const adminWhitelist = Array.from(
-        new Set([
-          ...initialWorkspaceConfig.adminEmails,
-          ...state.workspaceConfig.adminEmails,
-          'viloanbazzar@gmail.com',
-          'admin@loanbazaar.local',
-        ])
-      );
 
       if (selectedRole === 'admin' && !isVerifiedAdminEmail(email, adminWhitelist)) {
         notify(
