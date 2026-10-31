@@ -770,10 +770,16 @@ export function runTwoStageProductMatching(
     (c) =>
       (c.eligibilityStatus === 'eligible' ||
         c.eligibilityStatus === 'incomplete_data') &&
-      c.suitabilityScore >= 98
+      c.suitabilityScore >= 70
   );
 
-  const top3SubProducts = primarySuitable.slice(0, 3);
+  const top3SubProducts =
+    primarySuitable.length > 0
+      ? primarySuitable.slice(0, 3)
+      : sortedCandidates
+          .filter((c) => c.eligibilityStatus !== 'placeholder')
+          .slice(0, 3);
+
   const top3Ids = new Set(top3SubProducts.map((item) => item.subProductId));
 
   const alternativeSubProducts = sortedCandidates
@@ -781,7 +787,7 @@ export function runTwoStageProductMatching(
       (c) =>
         !top3Ids.has(c.subProductId) &&
         c.eligibilityStatus !== 'placeholder' &&
-        c.suitabilityScore >= 98
+        c.suitabilityScore >= 60
     )
     .slice(0, 5);
 

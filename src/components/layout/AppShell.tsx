@@ -163,7 +163,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         >
           {isCollapsed ? (
             <img
-              src="/Screenshot 2026-10-30 112643.jpg"
+              src="/loanbazaar-mark.jpg"
               alt="LoanBazaar"
               className="h-10 w-10 object-contain rounded-full"
             />
