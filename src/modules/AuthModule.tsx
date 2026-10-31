@@ -10,6 +10,7 @@ export function AuthModule() {
     name: '',
     email: '',
     password: '',
+    role: 'employee' as 'admin' | 'employee',
   });
 
   const handleSubmit = async (event: React.FormEvent) => {
@@ -19,6 +20,7 @@ export function AuthModule() {
       await signInLocalUser({
         email: form.email,
         password: form.password,
+        role: form.role,
       });
       return;
     }
@@ -27,29 +29,19 @@ export function AuthModule() {
       displayName: form.name,
       email: form.email,
       password: form.password,
+      role: form.role,
     });
   };
 
   return (
     <div className="min-h-screen bg-[#f4f1ee] px-4 py-8 sm:px-6">
       <div className="mx-auto max-w-[560px] pt-4">
-        <div className="flex justify-center mb-8">
-          <div className="flex items-center gap-3">
-            <div className="relative h-12 w-12 rounded-full bg-[#f6c94d] shadow-[inset_0_0_0_4px_#f5b642]">
-              <div className="absolute -top-2 left-1/2 h-3 w-3 -translate-x-1/2 rounded-full bg-[#f8d766]" />
-              <div className="absolute inset-2 rounded-full border-[3px] border-[#f4ba33]" />
-              <div className="absolute left-1/2 top-1/2 h-3.5 w-3.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-[#f0b73a]" />
-            </div>
-            <div>
-              <div className="text-[28px] font-bold tracking-[-0.04em] text-[#0f172a]">
-                <span className="text-[#f59e0b]">Loan</span>
-                <span className="text-[#0f172a]">Bazaar</span>
-              </div>
-              <div className="text-[9px] uppercase tracking-[0.18em] text-[#64748b]">
-                Secure Distribution Venture Pvt Ltd
-              </div>
-            </div>
-          </div>
+        <div className="mb-8 flex justify-center">
+          <img
+            src="/loanbazaar-logo.png"
+            alt="LoanBazaar"
+            className="h-16 w-auto object-contain"
+          />
         </div>
 
         <div className="text-center">
@@ -135,6 +127,25 @@ export function AuthModule() {
                 >
                   {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                 </button>
+              </div>
+            </label>
+
+            <label className="block">
+              <span className="mb-2 block text-sm font-semibold text-[#0f172a]">User Type</span>
+              <div className="rounded-xl border border-[#dfe3e8] bg-[#edf3fb] px-3 py-2.5 shadow-inner">
+                <select
+                  value={form.role}
+                  onChange={(event) =>
+                    setForm((current) => ({
+                      ...current,
+                      role: event.target.value as 'admin' | 'employee',
+                    }))
+                  }
+                  className="w-full bg-transparent text-sm text-[#0f172a] focus:outline-none"
+                >
+                  <option value="employee">Employee</option>
+                  <option value="admin">Administrator</option>
+                </select>
               </div>
             </label>
 

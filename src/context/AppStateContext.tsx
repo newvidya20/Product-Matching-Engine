@@ -522,6 +522,15 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
+      const requestedRole = payload.role === 'admin' ? 'admin' : 'employee';
+      if (existingUser.role !== requestedRole) {
+        notify(
+          'error',
+          `This account is registered as ${existingUser.role === 'admin' ? 'Administrator' : 'Employee'}. Please select the matching user type.`
+        );
+        return;
+      }
+
       const authenticatedUser: AuthenticatedGoogleUser = {
         uid: existingUser.uid,
         email: existingUser.email,
