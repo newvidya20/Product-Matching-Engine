@@ -1,0 +1,4 @@
+# Fixtures are binary. Without this, core.autocrlf rewrites the PDF line endings on Windows checkout and breaks xref offsets.
+*.pdf binary
+*.png binary
+*.xlsx binary
