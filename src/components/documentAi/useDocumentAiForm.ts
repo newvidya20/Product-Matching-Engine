@@ -682,7 +682,7 @@ export function useDocumentAiForm({
       Object.keys(p.setEdited).length + Object.keys(p.setApplied).length + p.clearEdited.size + p.clearApplied.size;
     if (outstanding > 0 && (sessionExistsRef.current || docStateRef.current)) {
       warning =
-        'Saved, but your changes to the extracted fields could not be stored with the documents. They stay protected on this page only.';
+        'Your changes to the extracted fields could not be stored with the documents. They stay protected on this page only.';
       if (mountedRef.current) setNotice(warning);
     }
     const link = sessionExistsRef.current ? { documentSessionId: sessionIdRef.current } : {};
