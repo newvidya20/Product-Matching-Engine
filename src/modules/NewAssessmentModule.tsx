@@ -80,11 +80,23 @@ export function NewAssessmentModule() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [editingId]
   );
-  return <AssessmentForm key={editing?.id ?? 'new'} editingAssessment={editing} />;
+  // Reset and Populate Demo leave the saved record. The form keeps its key so the new content survives.
+  const [detachedKey, setDetachedKey] = useState<string | null>(null);
+  useEffect(() => {
+    if (editingId) setDetachedKey(null);
+  }, [editingId]);
+  const key = !editingId && detachedKey ? detachedKey : editing?.id ?? 'new';
+  return <AssessmentForm key={key} editingAssessment={editing} onDetach={() => setDetachedKey(key)} />;
 }
 
-function AssessmentForm({ editingAssessment }: { editingAssessment: BorrowerAssessment | null }) {
-  const { state, createAssessment, updateAssessment, openAssessmentInEngine } = useAppState();
+function AssessmentForm({
+  editingAssessment,
+  onDetach,
+}: {
+  editingAssessment: BorrowerAssessment | null;
+  onDetach: () => void;
+}) {
+  const { state, createAssessment, updateAssessment, openAssessmentInEngine, navigateTo, notify } = useAppState();
   const officerDefault = state.currentUser?.displayName || state.currentUser?.email || '';
   const defaultCurrency = state.settings.defaultCurrency;
 
@@ -137,10 +149,25 @@ function AssessmentForm({ editingAssessment }: { editingAssessment: BorrowerAsse
 
   // ------------------------------------------------------------- Actions
 
+  /** Leaves the saved record: the next Save creates a new one and the heading stops saying Edit Draft. */
+  const detachFromSaved = (): boolean => {
+    const wasSaved = savedIdRef.current !== null;
+    savedIdRef.current = null;
+    setSaved(null);
+    if (state.editingAssessmentId) {
+      // SET_MODULE clears editingAssessmentId; re-selecting this module is the only exposed way.
+      onDetach();
+      navigateTo(state.activeModule);
+    }
+    return wasSaved;
+  };
+
   const handleLoadFictionalSample = () => {
     setValidationError(null);
+    const detach = detachFromSaved();
     const blank = createBlankForm(defaultCurrency, officerDefault);
-    ai.loadDemo({
+    ai.loadDemo(
+      {
       ...blank,
       applicantLabel: '[FICTIONAL DEMO] Deccan Precision Engineering LLP',
       entityType: 'llp',
@@ -169,12 +196,15 @@ function AssessmentForm({ editingAssessment }: { editingAssessment: BorrowerAsse
       statedPurpose: 'Fictional sample intake: automated CNC assembly line acquisition.',
       advisorNotes: 'Populate the borrower profile to test product fit analysis against the approved catalogue.',
       isFictionalDemo: true,
-    });
+      },
+      { detach }
+    );
   };
 
   const handleReset = () => {
     setValidationError(null);
     setUnresolvedWarning(null);
+    detachFromSaved();
     ai.reset(createBlankForm(defaultCurrency, officerDefault));
   };
 
@@ -220,14 +250,24 @@ function AssessmentForm({ editingAssessment }: { editingAssessment: BorrowerAsse
       return;
     }
 
-    const link = await ai.prepareForSave();
-    const payload: Partial<BorrowerAssessment> = { ...buildAssessmentPayload(current, asDraft), ...link };
+    let link: { documentSessionId?: string };
+    try {
+      link = await ai.prepareForSave();
+    } catch (error) {
+      setValidationError(error instanceof Error ? error.message : 'Could not save your changes. Try again.');
+      return;
+    }
+    // Built after the flush, from the ref, so edits made while it ran are saved.
+    const payload: Partial<BorrowerAssessment> = {
+      ...buildAssessmentPayload(ai.formRef.current, asDraft),
+      ...link,
+    };
 
     const existingId = savedIdRef.current;
     if (existingId) {
       const updated = await updateAssessment(existingId, payload);
       if (!updated) return;
-      void ai.afterSave(updated.id);
+      void ai.afterSave(updated.id).then((message) => message && notify('error', message));
       if (!asDraft) openAssessmentInEngine(updated.id);
       return;
     }
@@ -237,7 +277,7 @@ function AssessmentForm({ editingAssessment }: { editingAssessment: BorrowerAsse
     const created = await createAssessment(payload, !asDraft);
     if (!created) return;
     savedIdRef.current = created.id;
-    void ai.afterSave(created.id);
+    void ai.afterSave(created.id).then((message) => message && notify('error', message));
     setSaved({ id: created.id, referenceCode: created.referenceCode });
   };
 

@@ -217,6 +217,10 @@ export function writeFieldById(form: FormState, fieldId: string, value: string):
 const numToString = (value: number | null | undefined): string =>
   value === null || value === undefined || !Number.isFinite(value) ? '' : String(value);
 
+/** Required amount or turnover: a saved 0 means "not entered" (contracts 4.7), so it reopens blank. */
+const positiveToString = (value: number | null | undefined): string =>
+  value === 0 ? '' : numToString(value);
+
 export function assessmentToForm(
   assessment: BorrowerAssessment,
   defaultCurrency: string
@@ -247,10 +251,10 @@ export function assessmentToForm(
     dynamicPurposeAnswers: { ...(assessment.dynamicPurposeAnswers ?? {}) },
     assignedOfficer: assessment.assignedOfficer ?? '',
     branchOrDesk: assessment.branchOrDesk ?? 'Central Advisory Desk',
-    requestedAmount: numToString(assessment.requestedAmount),
+    requestedAmount: positiveToString(assessment.requestedAmount),
     currency: assessment.currency || blank.currency,
     requestedTenureMonths: numToString(assessment.requestedTenureMonths),
-    annualTurnoverOrIncome: numToString(assessment.annualTurnoverOrIncome),
+    annualTurnoverOrIncome: positiveToString(assessment.annualTurnoverOrIncome),
     creditScore: numToString(assessment.creditScore),
     existingEmiObligations: numToString(assessment.existingEmiObligations),
     profitabilityStatus: assessment.profitabilityStatus ?? 'not_provided',
