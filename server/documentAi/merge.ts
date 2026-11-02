@@ -1,0 +1,860 @@
+/**
+ * Candidate rules and session merge (docs/contracts.md sections 4 and 5). Pure: no I/O, no clock,
+ * no env, and inputs are never mutated. `today` and the threshold always arrive as arguments.
+ */
+import {
+  FIELD_DEFINITIONS,
+  getFieldDefinition,
+  type FieldDefinition,
+} from '../../src/documentAi/fieldMap.ts';
+import {
+  DOCUMENT_AI_LIMITS,
+  DOCUMENT_AI_THRESHOLDS,
+} from '../../src/types/documentAi.ts';
+import type {
+  AcceptedFileKind,
+  BankMonthlyTotal,
+  DocumentExtractionSuccess,
+  DocumentType,
+  ExtractedField,
+  FieldReasonCode,
+  FieldResult,
+  FieldValue,
+  MergeSessionInput,
+  MergeSessionOutput,
+  SessionWarning,
+  SourceRef,
+} from '../../src/types/documentAi.ts';
+import { deriveCandidates, type ScoredBankMonthlyTotal } from './derive.ts';
+import type { RawBankMonth, RawField, RawLocation } from './prompt.ts';
+import {
+  applySignPolicy,
+  currencyEqual,
+  fieldValuesEqual,
+  gstinEmbeddedPan,
+  normalizeComparableString,
+  normalizeFinancialYear,
+  normalizePeriod,
+  parseDate,
+  parseIndianAmount,
+  parseMeasure,
+  parsePercent,
+  periodEndDate,
+  previousFinancialYear,
+  rawValueInSnippet,
+  significantDigits,
+  validateGstin,
+  validatePan,
+} from './validators.ts';
+
+const FIELD = {
+  pan: 'identity.pan',
+  gstin: 'identity.gstin',
+  establishment: 'identity.dateOfEstablishment',
+  applicantLabel: 'applicantLabel',
+  entityType: 'entityType',
+  fyLabel: 'financialProfile.financialYearLabel',
+  dataSource: 'financialProfile.dataSource',
+  revenue: 'financialProfile.annualRevenue',
+  previousRevenue: 'financialProfile.previousAnnualRevenue',
+  gstTurnover: 'financialProfile.gstAnnualTurnover',
+  turnoverMirror: 'annualTurnoverOrIncome',
+  personalScore: 'financialProfile.personalCibilScore',
+  promoterScore: 'financialProfile.promoterCibilScore',
+  reportDate: 'financialProfile.personalCreditReportDate',
+  gstCompliance: 'financialProfile.gstComplianceStatus',
+  gstCompliant: 'gstTaxCompliant',
+} as const;
+
+const DATE_FIELDS: ReadonlySet<string> = new Set([FIELD.establishment, FIELD.reportDate]);
+/** Bank credits are never turnover. */
+const TURNOVER_FIELDS: ReadonlySet<string> = new Set([FIELD.revenue, FIELD.previousRevenue, FIELD.gstTurnover]);
+/** Entity types where a report on an individual is about a promoter, not the applicant. */
+const SINGLE_PERSON_ENTITIES: ReadonlySet<FieldValue> = new Set(['individual', 'proprietorship']);
+const PLACEHOLDER = /^(?:n\.?\/?a\.?|nil|none|null|undefined|not\s+(?:available|applicable|provided|stated|mentioned)|-+)?$/i;
+const MAX_STRING_LENGTH = 500;
+/** Beyond these, a reason caps a candidate at needs_verification. */
+const NON_CAPPING_REASONS: ReadonlySet<FieldReasonCode> = new Set(['superseded_period']);
+/** Recomputed on every merge, because they depend on the threshold or the rest of the session. */
+const SESSION_REASONS: ReadonlySet<FieldReasonCode> = new Set([
+  'low_confidence',
+  'identity_mismatch',
+  'superseded_period',
+]);
+
+/** financialYearLabel names a period, so two statements of different years are not a conflict. */
+function isPeriodGrouped(definition: FieldDefinition): boolean {
+  return Boolean(definition.periodScoped) || definition.fieldId === FIELD.fyLabel;
+}
+
+// ------------------------------------------------------------ Value normalising
+
+type Normalized =
+  | { kind: 'value'; value: FieldValue; ambiguousUnit: boolean }
+  | { kind: 'rejected'; nonInr: boolean }
+  /** No candidate at all: the document established nothing. */
+  | { kind: 'absent' };
+
+const rejected: Normalized = { kind: 'rejected', nonInr: false };
+
+function withinRange(definition: FieldDefinition, value: number): boolean {
+  return (
+    (definition.min === undefined || value >= definition.min) &&
+    (definition.max === undefined || value <= definition.max)
+  );
+}
+
+function normalizeNumber(definition: FieldDefinition, raw: RawField, documentType: DocumentType): Normalized {
+  let value: number;
+  let ambiguousUnit = false;
+  if (definition.unit === 'currency') {
+    const parsed = parseIndianAmount(raw.rawValue, { statedUnit: raw.statedUnit, documentType });
+    if (!parsed.ok) {
+      if (parsed.code === 'empty_value') return { kind: 'absent' };
+      return { kind: 'rejected', nonInr: parsed.code === 'non_inr_currency' };
+    }
+    value = parsed.value;
+    ambiguousUnit = parsed.ambiguousUnit;
+  } else {
+    const parsed = definition.unit === 'percent' ? parsePercent(raw.rawValue) : parseMeasure(raw.rawValue, definition.unit);
+    if (!parsed.ok) return rejected;
+    value = parsed.value;
+  }
+  const signed = applySignPolicy(value, definition.signPolicy);
+  if (!signed.ok || !withinRange(definition, signed.value)) return rejected;
+  return { kind: 'value', value: signed.value, ambiguousUnit };
+}
+
+function normalizeString(definition: FieldDefinition, raw: RawField, today: string): Normalized {
+  const text = raw.rawValue.replace(/\s+/g, ' ').trim();
+  let parsed: { ok: true; value: string } | { ok: false; code: string };
+  if (definition.fieldId === FIELD.pan) parsed = validatePan(text);
+  else if (definition.fieldId === FIELD.gstin) parsed = validateGstin(text);
+  else if (DATE_FIELDS.has(definition.fieldId)) parsed = parseDate(text, { today });
+  else if (definition.fieldId === FIELD.fyLabel) parsed = normalizeFinancialYear(text);
+  else parsed = { ok: true, value: text.slice(0, MAX_STRING_LENGTH) };
+  return parsed.ok ? { kind: 'value', value: parsed.value, ambiguousUnit: false } : rejected;
+}
+
+function normalizeEnum(definition: FieldDefinition, raw: RawField): Normalized {
+  const value = raw.enumValue ?? raw.rawValue.trim();
+  if (value === 'not_provided') return { kind: 'absent' };
+  if (!definition.allowedValues.includes(value)) return rejected;
+  // A document can establish "yes" or "available". Anything else proves nothing.
+  if (definition.policy === 'positive_only' && value !== 'yes' && value !== 'available') {
+    return { kind: 'absent' };
+  }
+  return { kind: 'value', value, ambiguousUnit: false };
+}
+
+function normalizeValue(
+  definition: FieldDefinition,
+  raw: RawField,
+  documentType: DocumentType,
+  today: string
+): Normalized {
+  if (PLACEHOLDER.test(raw.rawValue.trim()) && !raw.enumValue) return { kind: 'absent' };
+  if (definition.valueType === 'number') return normalizeNumber(definition, raw, documentType);
+  if (definition.valueType === 'enum') return normalizeEnum(definition, raw);
+  return normalizeString(definition, raw, today);
+}
+
+// ---------------------------------------------------------- Candidate provenance
+
+export interface DocumentContext {
+  documentId: string;
+  fileName: string;
+  documentType: DocumentType;
+  kind: AcceptedFileKind;
+  /** Real sheet names, so a model-supplied name cannot point nowhere. */
+  sheetNames: readonly string[];
+  injectionSuspected: boolean;
+  today: string;
+}
+
+function buildSource(raw: RawLocation, ctx: DocumentContext): SourceRef {
+  const isXlsx = ctx.kind === 'xlsx';
+  const sheetName = isXlsx && raw.sheetName && ctx.sheetNames.includes(raw.sheetName) ? raw.sheetName : null;
+  let cellRef: string | null = null;
+  if (isXlsx && raw.cellRef && /^[A-Z]{1,3}[1-9]\d*$/.test(raw.cellRef)) cellRef = raw.cellRef;
+  if (ctx.kind === 'csv' && raw.cellRef && /^row:[1-9]\d*$/.test(raw.cellRef)) cellRef = raw.cellRef;
+  return {
+    documentId: ctx.documentId,
+    fileName: ctx.fileName,
+    documentType: ctx.documentType,
+    page: ctx.kind === 'pdf' ? raw.page : null,
+    sheetName,
+    cellRef,
+    snippet: raw.snippet.trim().slice(0, DOCUMENT_AI_LIMITS.maxSnippetLength),
+  };
+}
+
+/** Account last 4, or a credit report's subject. Never a full account number or an identifier. */
+export function maskSubjectRef(raw: string | null, documentType: DocumentType): string | null {
+  const text = raw?.trim();
+  if (!text) return null;
+  if (documentType === 'bank_statement') {
+    const digits = text.replace(/\D/g, '');
+    return digits.length >= 4 ? `XXXX${digits.slice(-4)}` : null;
+  }
+  if (documentType !== 'credit_report') return null;
+  return /\d{4,}|[A-Z]{5}\d{4}[A-Z]/i.test(text) ? null : text.slice(0, 80);
+}
+
+const roundConfidence = (confidence: number) => Math.round(confidence * 100) / 100;
+
+// ------------------------------------------------------------- Single-candidate rules
+
+function settleStatus(candidate: ExtractedField, threshold: number, extraReasons: FieldReasonCode[] = []): ExtractedField {
+  const definition = getFieldDefinition(candidate.fieldId);
+  const reasons = new Set<FieldReasonCode>(candidate.reasons.filter((reason) => !SESSION_REASONS.has(reason)));
+  if (candidate.confidence < threshold) reasons.add('low_confidence');
+  extraReasons.forEach((reason) => reasons.add(reason));
+
+  const capped =
+    [...reasons].some((reason) => !NON_CAPPING_REASONS.has(reason)) || definition?.target.kind === 'review_only';
+  const status =
+    candidate.status === 'rejected_validation' ? candidate.status : capped ? 'needs_verification' : 'auto_applied';
+  return { ...candidate, reasons: [...reasons], status };
+}
+
+/** Section 4.2. The status set here is provisional: every merge re-settles it. */
+export function buildCandidates(
+  rawFields: RawField[],
+  ctx: DocumentContext
+): { fields: ExtractedField[]; droppedLowConfidence: number } {
+  const fields: ExtractedField[] = [];
+  const counters = new Map<string, number>();
+  let droppedLowConfidence = 0;
+
+  for (const raw of rawFields) {
+    const definition = getFieldDefinition(raw.fieldId);
+    if (!definition || !definition.extractable || definition.extractionMode !== 'direct') continue;
+    const allowedSource = definition.sourceDocumentTypes.includes(ctx.documentType);
+    // Section 4.2: an explicit request has only the allowed sources. This is what stops an
+    // existing sanction letter from supplying requestedAmount.
+    if (definition.policy === 'explicit_request' && !allowedSource) continue;
+
+    const confidence = roundConfidence(raw.confidence);
+    if (!(confidence >= DOCUMENT_AI_THRESHOLDS.discardBelow) || confidence > 1) {
+      droppedLowConfidence += 1;
+      continue;
+    }
+
+    const normalized = normalizeValue(definition, raw, ctx.documentType, ctx.today);
+    if (normalized.kind === 'absent') continue;
+
+    const source = buildSource(raw, ctx);
+    const period =
+      definition.fieldId === FIELD.fyLabel && normalized.kind === 'value'
+        ? String(normalized.value)
+        : normalizePeriod(raw.period, ctx.today);
+
+    const reasons = new Set<FieldReasonCode>();
+    const periodEnd = periodEndDate(period);
+    const failures: boolean[] = [
+      normalized.kind === 'rejected',
+      // cma_projection is never a source for historical figures, nor bank credits for turnover.
+      ctx.documentType === 'cma_projection' && isPeriodGrouped(definition),
+      ctx.documentType === 'bank_statement' && TURNOVER_FIELDS.has(definition.fieldId),
+      isPeriodGrouped(definition) && periodEnd !== null && periodEnd > ctx.today,
+    ];
+    const isRejected = failures.some(Boolean);
+    if (isRejected) reasons.add('validation_failed');
+    if (normalized.kind === 'rejected' && normalized.nonInr) reasons.add('non_inr_currency');
+
+    const snippetOk =
+      definition.valueType === 'enum'
+        ? source.snippet.length > 0
+        : rawValueInSnippet(raw.rawValue, source.snippet, definition.valueType === 'number' ? 'number' : 'string');
+    if (!snippetOk) reasons.add('value_not_in_snippet');
+    if (!allowedSource) reasons.add('unexpected_source_type');
+    if (ctx.injectionSuspected) reasons.add('injection_suspected');
+    if (definition.periodScoped && period === null) reasons.add('period_unknown');
+    if (normalized.kind === 'value' && normalized.ambiguousUnit) reasons.add('ambiguous_unit');
+
+    const n = counters.get(definition.fieldId) ?? 0;
+    counters.set(definition.fieldId, n + 1);
+
+    fields.push(
+      settleStatus(
+        {
+          candidateId: `${ctx.documentId}:${definition.fieldId}:${n}`,
+          fieldId: definition.fieldId,
+          value: !isRejected && normalized.kind === 'value' ? normalized.value : null,
+          rawValue: raw.rawValue,
+          confidence,
+          source,
+          status: isRejected ? 'rejected_validation' : 'needs_verification',
+          reasons: [...reasons],
+          period,
+          subjectRef: maskSubjectRef(raw.subjectRef, ctx.documentType),
+        },
+        DOCUMENT_AI_THRESHOLDS.defaultAutoApply
+      )
+    );
+  }
+  return { fields, droppedLowConfidence };
+}
+
+function parseBankAmount(raw: string | null, row: RawBankMonth): number | null {
+  if (raw === null) return null;
+  const parsed = parseIndianAmount(raw, { statedUnit: row.statedUnit, documentType: 'bank_statement' });
+  // The figure must be on the page the snippet quotes. A model total that is not there is a guess.
+  return parsed.ok && !parsed.ambiguousUnit && rawValueInSnippet(raw, row.snippet, 'number') ? parsed.value : null;
+}
+
+/** The server parses the amounts. Rows that say nothing usable are dropped, never repaired. */
+export function buildBankMonthlyTotals(rows: RawBankMonth[], ctx: DocumentContext): BankMonthlyTotal[] {
+  if (ctx.documentType !== 'bank_statement') return [];
+  const totals: ScoredBankMonthlyTotal[] = [];
+  for (const row of rows) {
+    const confidence = roundConfidence(row.confidence);
+    if (!(confidence >= DOCUMENT_AI_THRESHOLDS.discardBelow) || confidence > 1) continue;
+    const month = row.month.trim();
+    const monthStart = /^\d{4}-(?:0[1-9]|1[0-2])$/.test(month) ? `${month}-01` : null;
+    if (!monthStart || monthStart > ctx.today) continue;
+    const totalCredits = parseBankAmount(row.totalCredits, row);
+    const closingBalance = parseBankAmount(row.closingBalance, row);
+    if (totalCredits === null && closingBalance === null) continue;
+    totals.push({
+      month,
+      totalCredits,
+      closingBalance,
+      subjectRef: maskSubjectRef(row.subjectRef, ctx.documentType),
+      source: buildSource(row, ctx),
+      confidence,
+    });
+  }
+  return totals;
+}
+
+// ------------------------------------------------------------------- Identity check
+
+interface IdentityOutcome {
+  /** Documents whose candidates all take identity_mismatch. */
+  mismatchedDocuments: Set<string>;
+  /** Any GSTIN or non-P PAN in the session, which stops a P PAN card naming the applicant. */
+  hasNonIndividualIdentity: boolean;
+}
+
+function checkIdentity(candidates: ExtractedField[]): IdentityOutcome {
+  const eligible = candidates.filter((c) => c.status !== 'rejected_validation' && typeof c.value === 'string');
+  const gstinPans = eligible
+    .filter((c) => c.fieldId === FIELD.gstin)
+    .map((c) => ({ pan: gstinEmbeddedPan(c.value as string), documentId: c.source.documentId }));
+  const entityPans = eligible
+    .filter((c) => c.fieldId === FIELD.pan && (c.value as string)[3] !== 'P')
+    .map((c) => ({ pan: c.value as string, documentId: c.source.documentId }));
+
+  const hasNonIndividualIdentity =
+    entityPans.length > 0 || gstinPans.some((identity) => identity.pan[3] !== 'P');
+
+  const distinctGstinPans = new Set(gstinPans.map((identity) => identity.pan));
+  const mismatch =
+    distinctGstinPans.size > 1 ||
+    (distinctGstinPans.size === 1 && entityPans.some((identity) => !distinctGstinPans.has(identity.pan)));
+  if (!mismatch) return { mismatchedDocuments: new Set(), hasNonIndividualIdentity };
+
+  const documentsByPan = new Map<string, Set<string>>();
+  for (const { pan, documentId } of [...gstinPans, ...entityPans]) {
+    documentsByPan.set(pan, (documentsByPan.get(pan) ?? new Set()).add(documentId));
+  }
+  const allDocuments = new Set([...gstinPans, ...entityPans].map((identity) => identity.documentId));
+  const majority = [...documentsByPan.values()].find((documents) => documents.size > allDocuments.size / 2);
+  if (!majority) return { mismatchedDocuments: allDocuments, hasNonIndividualIdentity };
+
+  const majorityPan = [...documentsByPan.entries()].find(([, documents]) => documents === majority)?.[0];
+  const mismatchedDocuments = new Set(
+    [...gstinPans, ...entityPans].filter(({ pan }) => pan !== majorityPan).map((identity) => identity.documentId)
+  );
+  return { mismatchedDocuments, hasNonIndividualIdentity };
+}
+
+// --------------------------------------------------------------------- Precedence
+
+interface DocumentFacts {
+  index: number;
+  /** Audited, provisional or management, from the document's own statement. */
+  dataSource: FieldValue | null;
+  reportDate: string | null;
+}
+
+const FINANCIAL_GROUP = new Set([
+  'annualRevenue', 'previousAnnualRevenue', 'gstAnnualTurnover', 'netProfitAfterTax', 'ebitda', 'ebit',
+  'depreciation', 'amortization', 'interestExpense', 'currentAssets', 'currentLiabilities', 'totalAssets',
+  'totalLiabilities', 'totalOutstandingBorrowings', 'totalOutsideLiabilities', 'tangibleNetWorth',
+  'shareholdersEquity', 'operatingCashFlow', 'dataSource', 'financialYearLabel',
+].map((key) => `financialProfile.${key}`));
+const IDENTITY_GROUP = new Set([
+  FIELD.applicantLabel, FIELD.entityType, 'industrySector', 'businessVintageYears',
+  FIELD.pan, FIELD.gstin, FIELD.establishment,
+]);
+const BUREAU_GROUP = new Set([
+  FIELD.personalScore, FIELD.promoterScore, FIELD.reportDate,
+  ...['commercialCmrRank', 'commercialCreditReportStatus', 'existingCorporateBorrowingExposure', 'delinquencies'].map(
+    (key) => `financialProfile.${key}`
+  ),
+]);
+const FACILITY_GROUP = new Set(
+  ['existingMonthlyEmi', 'annualScheduledPrincipalRepayments', 'ccOdSanctionedLimit', 'ccOdUtilisation'].map(
+    (key) => `financialProfile.${key}`
+  )
+);
+
+const IDENTITY_ORDER: readonly DocumentType[] = [
+  'registration_certificate', 'gst_certificate', 'pan_card', 'itr', 'financial_statement',
+];
+const FACILITY_ORDER: readonly DocumentType[] = [
+  'existing_sanction_letter', 'bank_statement', 'credit_report', 'loan_application',
+];
+
+function orderRank(order: readonly DocumentType[], type: DocumentType): number {
+  const index = order.indexOf(type);
+  return index === -1 ? order.length : index;
+}
+
+function financialRank(type: DocumentType, facts: DocumentFacts | undefined): number {
+  switch (type) {
+    case 'financial_statement':
+      if (facts?.dataSource === 'audited') return 0;
+      return facts?.dataSource === 'management' ? 4 : 3;
+    case 'itr':
+      return 1;
+    case 'gst_return':
+      return 2;
+    case 'loan_application':
+      return 5;
+    default:
+      return 6;
+  }
+}
+
+function precedenceRank(fieldId: string, candidate: ExtractedField, facts: DocumentFacts | undefined): number {
+  const type = candidate.source.documentType;
+  // A turnover mirror keeps the group of the field it copies.
+  if (FINANCIAL_GROUP.has(fieldId) || fieldId === FIELD.turnoverMirror) return financialRank(type, facts);
+  if (IDENTITY_GROUP.has(fieldId)) return orderRank(IDENTITY_ORDER, type);
+  if (BUREAU_GROUP.has(fieldId)) return type === 'credit_report' ? 0 : 1;
+  if (FACILITY_GROUP.has(fieldId)) return orderRank(FACILITY_ORDER, type);
+  return 0;
+}
+
+function strongest(fieldId: string, candidates: ExtractedField[], facts: Map<string, DocumentFacts>): ExtractedField {
+  const reportDate = (c: ExtractedField) => facts.get(c.source.documentId)?.reportDate ?? '';
+  const order = (a: ExtractedField, b: ExtractedField): number => {
+    const rank =
+      precedenceRank(fieldId, a, facts.get(a.source.documentId)) -
+      precedenceRank(fieldId, b, facts.get(b.source.documentId));
+    if (rank !== 0) return rank;
+    if (BUREAU_GROUP.has(fieldId) && reportDate(a) !== reportDate(b)) {
+      return reportDate(b).localeCompare(reportDate(a));
+    }
+    if (a.confidence !== b.confidence) return b.confidence - a.confidence;
+    // The documents array is the session's upload order, so later means a later upload.
+    const upload = (facts.get(b.source.documentId)?.index ?? 0) - (facts.get(a.source.documentId)?.index ?? 0);
+    return upload !== 0 ? upload : a.candidateId.localeCompare(b.candidateId);
+  };
+  return [...candidates].sort(order)[0];
+}
+
+// ----------------------------------------------------------------- Field resolution
+
+function unionReasons(candidates: ExtractedField[]): FieldReasonCode[] {
+  return [...new Set(candidates.flatMap((candidate) => candidate.reasons))].filter(
+    (reason) => !NON_CAPPING_REASONS.has(reason)
+  );
+}
+
+function everyPairAgrees(definition: FieldDefinition, candidates: ExtractedField[]): boolean {
+  return candidates.every((a, i) =>
+    candidates.slice(i + 1).every((b) => fieldValuesEqual(definition, a.value as FieldValue, b.value as FieldValue))
+  );
+}
+
+function conflictResult(
+  fieldId: string,
+  candidates: ExtractedField[],
+  contenders: ExtractedField[],
+  facts: Map<string, DocumentFacts>
+): FieldResult {
+  return {
+    fieldId,
+    status: 'conflict',
+    value: null,
+    confidence: Math.max(...contenders.map((candidate) => candidate.confidence)),
+    source: null,
+    reasons: ['values_differ'],
+    candidates,
+    suggestedCandidateId: strongest(fieldId, contenders, facts).candidateId,
+    mirrorOf: null,
+    overriddenByUser: false,
+  };
+}
+
+function resolveField(
+  definition: FieldDefinition,
+  candidates: ExtractedField[],
+  facts: Map<string, DocumentFacts>
+): { result: FieldResult; multipleSubjects: boolean } {
+  const { fieldId } = definition;
+  const eligible = candidates.filter((candidate) => candidate.status !== 'rejected_validation');
+
+  if (eligible.length === 0) {
+    return {
+      multipleSubjects: false,
+      result: {
+        fieldId,
+        status: 'rejected_validation',
+        value: null,
+        confidence: Math.max(...candidates.map((candidate) => candidate.confidence)),
+        source: candidates[0].source,
+        reasons: unionReasons(candidates),
+        candidates,
+        suggestedCandidateId: null,
+        mirrorOf: null,
+        overriddenByUser: false,
+      },
+    };
+  }
+
+  // Runs before the period logic: two accounts are not two periods of one account.
+  const subjects = new Set(
+    eligible.flatMap((candidate) =>
+      candidate.subjectRef ? [normalizeComparableString(candidate.subjectRef)] : []
+    )
+  );
+  if (subjects.size > 1) {
+    const suggested = strongest(fieldId, eligible, facts);
+    return {
+      multipleSubjects: true,
+      result: {
+        fieldId,
+        status: 'needs_verification',
+        value: suggested.value,
+        confidence: suggested.confidence,
+        source: suggested.source,
+        reasons: ['multiple_subjects'],
+        candidates,
+        suggestedCandidateId: suggested.candidateId,
+        mirrorOf: null,
+        overriddenByUser: false,
+      },
+    };
+  }
+
+  let group = eligible;
+  let listed = candidates;
+  let undated: ExtractedField[] = [];
+  if (isPeriodGrouped(definition)) {
+    const dated = eligible.filter((candidate) => periodEndDate(candidate.period) !== null);
+    if (dated.length > 0) {
+      const latestEnd = dated.reduce(
+        (latest, candidate) => {
+          const end = periodEndDate(candidate.period) as string;
+          return end > latest ? end : latest;
+        },
+        ''
+      );
+      group = dated.filter((candidate) => periodEndDate(candidate.period) === latestEnd);
+      undated = eligible.filter((candidate) => periodEndDate(candidate.period) === null);
+      listed = candidates.map((candidate) => {
+        const end = periodEndDate(candidate.period);
+        return end !== null && end < latestEnd && candidate.status !== 'rejected_validation'
+          ? { ...candidate, reasons: [...candidate.reasons, 'superseded_period' as const] }
+          : candidate;
+      });
+    }
+  }
+
+  if (!everyPairAgrees(definition, group)) {
+    return { multipleSubjects: false, result: conflictResult(fieldId, listed, group, facts) };
+  }
+
+  const mostPrecise = Math.max(...group.map((candidate) => significantDigits(candidate.value as FieldValue)));
+  const chosen = strongest(
+    fieldId,
+    group.filter((candidate) => significantDigits(candidate.value as FieldValue) === mostPrecise),
+    facts
+  );
+
+  const reasons = unionReasons(group);
+  // A figure with no stated period, which disagrees, might be this period or another. Say so.
+  const undatedDisagrees = undated.some(
+    (candidate) => !fieldValuesEqual(definition, candidate.value as FieldValue, chosen.value as FieldValue)
+  );
+  if (undatedDisagrees && !reasons.includes('period_unknown')) reasons.push('period_unknown');
+
+  const needsReview = undatedDisagrees || group.some((candidate) => candidate.status === 'needs_verification');
+  return {
+    multipleSubjects: false,
+    result: {
+      fieldId,
+      status: needsReview ? 'needs_verification' : 'auto_applied',
+      value: chosen.value,
+      confidence: Math.max(...group.map((candidate) => candidate.confidence)),
+      source: chosen.source,
+      reasons,
+      candidates: listed,
+      suggestedCandidateId: chosen.candidateId,
+      mirrorOf: null,
+      overriddenByUser: false,
+    },
+  };
+}
+
+// ---------------------------------------------------------------- Session rewrites
+
+/** An older statement's revenue, for exactly the prior year, is that year's previous revenue. */
+function previousRevenueCandidates(candidates: ExtractedField[], threshold: number): ExtractedField[] {
+  const revenues = candidates.filter(
+    (candidate) => candidate.fieldId === FIELD.revenue && candidate.status !== 'rejected_validation'
+  );
+  const latestPeriod = revenues.reduce<string | null>((latest, candidate) => {
+    const end = periodEndDate(candidate.period);
+    return end !== null && end > (periodEndDate(latest) ?? '') ? candidate.period : latest;
+  }, null);
+  const priorPeriod = previousFinancialYear(latestPeriod);
+  if (!priorPeriod) return [];
+  return revenues
+    .filter((candidate) => candidate.period === priorPeriod)
+    .map((candidate, n) =>
+      settleStatus(
+        {
+          ...candidate,
+          candidateId: `${candidate.source.documentId}:${FIELD.previousRevenue}:p${n}`,
+          fieldId: FIELD.previousRevenue,
+        },
+        threshold
+      )
+    );
+}
+
+/** Section 4.5: who a report on an individual speaks for depends on the applicant. */
+function routeCreditScores(candidates: ExtractedField[]): ExtractedField[] {
+  const entityValues = new Set(
+    candidates
+      .filter((c) => c.fieldId === FIELD.entityType && c.status !== 'rejected_validation')
+      .map((c) => c.value as FieldValue)
+  );
+  const isCompany = entityValues.size === 1 && !SINGLE_PERSON_ENTITIES.has([...entityValues][0]);
+  const from = isCompany ? FIELD.personalScore : FIELD.promoterScore;
+  const to = isCompany ? FIELD.promoterScore : FIELD.personalScore;
+  return candidates.map((candidate) => (candidate.fieldId === from ? { ...candidate, fieldId: to } : candidate));
+}
+
+function hasUsableValue(result: FieldResult | undefined): result is FieldResult {
+  return result !== undefined && result.status !== 'rejected_validation';
+}
+
+function mirrorResult(
+  definition: FieldDefinition,
+  primary: FieldResult,
+  isFallback: boolean
+): FieldResult {
+  const candidates = primary.candidates.map((candidate) => {
+    const copy = { ...candidate, fieldId: definition.fieldId };
+    if (!isFallback) return copy;
+    return {
+      ...copy,
+      status: copy.status === 'auto_applied' ? ('needs_verification' as const) : copy.status,
+      reasons: [...new Set<FieldReasonCode>([...copy.reasons, 'fallback_source'])],
+    };
+  });
+  const capped = isFallback && primary.status === 'auto_applied';
+  return {
+    ...primary,
+    fieldId: definition.fieldId,
+    status: capped ? 'needs_verification' : primary.status,
+    reasons:
+      isFallback && primary.status !== 'conflict'
+        ? [...new Set<FieldReasonCode>([...primary.reasons, 'fallback_source'])]
+        : primary.reasons,
+    candidates,
+    mirrorOf: primary.fieldId,
+  };
+}
+
+/** Section 4.3: revenue and GST turnover for the same period must agree, or turnover is a conflict. */
+function applyTurnoverCrossCheck(
+  mirror: FieldResult | undefined,
+  fields: Record<string, FieldResult>,
+  facts: Map<string, DocumentFacts>
+): FieldResult | undefined {
+  const revenue = fields[FIELD.revenue];
+  const gst = fields[FIELD.gstTurnover];
+  if (!mirror || mirror.mirrorOf !== FIELD.revenue || !revenue?.source || !gst || mirror.status === 'conflict') {
+    return mirror;
+  }
+  const chosen = revenue.candidates.find((candidate) => candidate.candidateId === revenue.suggestedCandidateId);
+  if (!chosen?.period || typeof revenue.value !== 'number') return mirror;
+
+  const eligibleRevenue = revenue.candidates.filter(
+    (candidate) => candidate.period === chosen.period && candidate.status !== 'rejected_validation'
+  );
+  const eligibleGst = gst.candidates.filter(
+    (candidate) => candidate.period === chosen.period && candidate.status !== 'rejected_validation'
+  );
+  const differs = eligibleGst.some(
+    (candidate) => !currencyEqual(revenue.value as number, candidate.value as number)
+  );
+  if (!differs) return mirror;
+
+  const contenders = [...eligibleRevenue, ...eligibleGst].map((candidate) => ({
+    ...candidate,
+    fieldId: FIELD.turnoverMirror,
+  }));
+  const allCandidates = [...mirror.candidates, ...gst.candidates.map((c) => ({ ...c, fieldId: FIELD.turnoverMirror }))];
+  return {
+    ...conflictResult(FIELD.turnoverMirror, allCandidates, contenders, facts),
+    mirrorOf: FIELD.revenue,
+  };
+}
+
+const GST_COMPLIANCE_TO_FORM: Readonly<Record<string, string>> = {
+  compliant: 'yes',
+  not_compliant: 'no',
+  not_applicable: 'no',
+};
+
+/** Unlike other derivations, this keeps the source's status. */
+function gstCompliantResult(status: FieldResult | undefined): FieldResult | undefined {
+  if (!hasUsableValue(status)) return undefined;
+  const candidates = status.candidates.flatMap((candidate): ExtractedField[] => {
+    const value = GST_COMPLIANCE_TO_FORM[String(candidate.value)];
+    if (!value) return [];
+    return [
+      {
+        ...candidate,
+        fieldId: FIELD.gstCompliant,
+        value,
+        derivation: { ruleId: 'gst_compliance_mirror', fromCandidateIds: [candidate.candidateId] },
+      },
+    ];
+  });
+  if (candidates.length === 0) return undefined;
+  const value = status.value === null ? null : (GST_COMPLIANCE_TO_FORM[String(status.value)] ?? null);
+  return { ...status, fieldId: FIELD.gstCompliant, value, candidates, mirrorOf: FIELD.gstCompliance };
+}
+
+// ---------------------------------------------------------------------- The merge
+
+function collectDocumentFacts(documents: DocumentExtractionSuccess[]): Map<string, DocumentFacts> {
+  return new Map(
+    documents.map((document, index) => {
+      const eligible = document.fields.filter((c) => c.status !== 'rejected_validation');
+      return [
+        document.documentId,
+        {
+          index,
+          dataSource: eligible.find((c) => c.fieldId === FIELD.dataSource)?.value ?? null,
+          reportDate: (eligible.find((c) => c.fieldId === FIELD.reportDate)?.value as string | undefined) ?? null,
+        },
+      ];
+    })
+  );
+}
+
+export function mergeSession(input: MergeSessionInput): MergeSessionOutput {
+  const { documents, editedFieldIds, autoApplyThreshold: threshold, today } = input;
+  const warnings: SessionWarning[] = [];
+  const facts = collectDocumentFacts(documents);
+
+  // Drop anything an older run stored that is no longer allowed.
+  const stored = documents
+    .flatMap((document) => document.fields)
+    .filter((candidate) => getFieldDefinition(candidate.fieldId)?.extractionMode === 'direct');
+
+  const identity = checkIdentity(stored);
+  if (identity.mismatchedDocuments.size > 0) {
+    warnings.push({
+      code: 'identity_mismatch',
+      documentIds: [...identity.mismatchedDocuments],
+      fieldIds: [FIELD.pan, FIELD.gstin],
+    });
+  }
+  const injected = documents.filter((document) => document.injectionSuspected);
+  if (injected.length > 0) {
+    warnings.push({
+      code: 'injection_suspected',
+      documentIds: injected.map((document) => document.documentId),
+      fieldIds: [],
+    });
+  }
+
+  const individualPanCards = new Set(
+    documents
+      .filter(
+        (document) =>
+          document.documentType === 'pan_card' &&
+          document.fields.some((c) => c.fieldId === FIELD.pan && String(c.value)[3] === 'P')
+      )
+      .map((document) => document.documentId)
+  );
+
+  const direct = routeCreditScores(
+    stored
+      .filter(
+        (candidate) =>
+          !(
+            identity.hasNonIndividualIdentity &&
+            candidate.fieldId === FIELD.applicantLabel &&
+            individualPanCards.has(candidate.source.documentId)
+          )
+      )
+      .map((candidate) =>
+        settleStatus(
+          candidate,
+          threshold,
+          identity.mismatchedDocuments.has(candidate.source.documentId) ? ['identity_mismatch'] : []
+        )
+      )
+  );
+
+  const withPrevious = [...direct, ...previousRevenueCandidates(direct, threshold)];
+  const derived = deriveCandidates(withPrevious, documents, today).map((candidate) => settleStatus(candidate, threshold));
+  const all = [...withPrevious, ...derived];
+
+  const byField = new Map<string, ExtractedField[]>();
+  for (const candidate of all) {
+    byField.set(candidate.fieldId, [...(byField.get(candidate.fieldId) ?? []), candidate]);
+  }
+
+  const fields: Record<string, FieldResult> = {};
+  for (const definition of FIELD_DEFINITIONS) {
+    const candidates = byField.get(definition.fieldId);
+    if (!candidates || candidates.length === 0) continue;
+    const { result, multipleSubjects } = resolveField(definition, candidates, facts);
+    fields[definition.fieldId] = result;
+    if (multipleSubjects) {
+      warnings.push({
+        code: 'multiple_subjects',
+        documentIds: [...new Set(candidates.map((candidate) => candidate.source.documentId))],
+        fieldIds: [definition.fieldId],
+      });
+    }
+  }
+
+  for (const definition of FIELD_DEFINITIONS) {
+    if (definition.extractionMode !== 'mirror' || !definition.mirrorOf) continue;
+    const primary = fields[definition.mirrorOf];
+    if (hasUsableValue(primary)) {
+      fields[definition.fieldId] = mirrorResult(definition, primary, false);
+      continue;
+    }
+    const fallback = (definition.mirrorFallbacks ?? []).map((id) => fields[id]).find(hasUsableValue);
+    if (fallback) fields[definition.fieldId] = mirrorResult(definition, fallback, true);
+  }
+
+  const turnover = applyTurnoverCrossCheck(fields[FIELD.turnoverMirror], fields, facts);
+  if (turnover) fields[FIELD.turnoverMirror] = turnover;
+
+  const gstCompliant = gstCompliantResult(fields[FIELD.gstCompliance]);
+  if (gstCompliant) fields[FIELD.gstCompliant] = gstCompliant;
+
+  const edited = new Set(editedFieldIds);
+  for (const fieldId of Object.keys(fields)) {
+    fields[fieldId] = { ...fields[fieldId], overriddenByUser: edited.has(fieldId) };
+  }
+  return { fields, warnings };
+}
