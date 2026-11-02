@@ -182,6 +182,27 @@ describe('dropped candidates (contract 4.2 rule 1)', () => {
     assert.ok(output.fields[PAT], 'control field must be present');
     assert.equal(output.fields[TURNOVER_MIRROR], undefined);
   });
+
+  it('drops a non-direct candidate unless it carries the derivation its field names', () => {
+    const profitability = (ruleId: 'profitability_from_pat' | 'gst_compliance_mirror') =>
+      cand({
+        documentId: DOC_STATEMENT,
+        documentType: 'financial_statement',
+        fieldId: 'profitabilityStatus',
+        value: 'loss_making',
+        derivation: { ruleId, fromCandidateIds: [`${DOC_STATEMENT}:${PAT}:9`] },
+      });
+    const forged = run([successDocument(DOC_STATEMENT, 'financial_statement', [profitability('gst_compliance_mirror'), control()])]);
+    assert.ok(forged.fields[PAT], 'control field must be present');
+    assert.notEqual(forged.fields.profitabilityStatus?.value, 'loss_making');
+
+    const valid = result(
+      run([successDocument(DOC_STATEMENT, 'financial_statement', [profitability('profitability_from_pat')])]),
+      'profitabilityStatus'
+    );
+    assert.equal(valid.status, 'needs_verification');
+    assert.ok(valid.reasons.includes('derived_value'));
+  });
 });
 
 describe('validation (contract 4.2 rule 3)', () => {
@@ -297,6 +318,32 @@ describe('snippet check (contract 4.2 rule 4)', () => {
 
   it('marks value_not_in_snippet when the snippet shows a different number', () => {
     const r = result(run([revenueFrom('Total turnover 1,00,000')]), REVENUE);
+    assert.equal(r.status, 'needs_verification');
+    assert.ok(r.reasons.includes('value_not_in_snippet'));
+  });
+
+  it('compares rawValue, so a value scaled from a stated unit still auto-applies', () => {
+    const r = result(
+      run([
+        successDocument(DOC_STATEMENT, 'financial_statement', [
+          cand({
+            documentId: DOC_STATEMENT,
+            documentType: 'financial_statement',
+            fieldId: PAT,
+            value: -1250000,
+            rawValue: '(12.50)',
+            snippet: 'Profit / (Loss) after tax (12.50)   8.40',
+          }),
+        ]),
+      ]),
+      PAT
+    );
+    assert.equal(r.status, 'auto_applied');
+    assert.equal(r.value, -1250000);
+  });
+
+  it('does not take a shorter number found inside a longer one', () => {
+    const r = result(run([revenueFrom('Total turnover 12,50,00,000')]), REVENUE);
     assert.equal(r.status, 'needs_verification');
     assert.ok(r.reasons.includes('value_not_in_snippet'));
   });

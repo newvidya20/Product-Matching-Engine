@@ -25,7 +25,7 @@ import type {
   SessionWarning,
   SourceRef,
 } from '../../src/types/documentAi.ts';
-import { deriveCandidates, type ScoredBankMonthlyTotal } from './derive.ts';
+import { deriveCandidates } from './derive.ts';
 import type { RawBankMonth, RawField, RawLocation } from './prompt.ts';
 import {
   applySignPolicy,
@@ -45,6 +45,7 @@ import {
   significantDigits,
   validateGstin,
   validatePan,
+  type Validated,
 } from './validators.ts';
 
 const FIELD = {
@@ -73,14 +74,8 @@ const TURNOVER_FIELDS: ReadonlySet<string> = new Set([FIELD.revenue, FIELD.previ
 const SINGLE_PERSON_ENTITIES: ReadonlySet<FieldValue> = new Set(['individual', 'proprietorship']);
 const PLACEHOLDER = /^(?:n\.?\/?a\.?|nil|none|null|undefined|not\s+(?:available|applicable|provided|stated|mentioned)|-+)?$/i;
 const MAX_STRING_LENGTH = 500;
-/** Beyond these, a reason caps a candidate at needs_verification. */
+/** Not a cap: an older period's candidate is listed, not doubted. */
 const NON_CAPPING_REASONS: ReadonlySet<FieldReasonCode> = new Set(['superseded_period']);
-/** Recomputed on every merge, because they depend on the threshold or the rest of the session. */
-const SESSION_REASONS: ReadonlySet<FieldReasonCode> = new Set([
-  'low_confidence',
-  'identity_mismatch',
-  'superseded_period',
-]);
 
 /** financialYearLabel names a period, so two statements of different years are not a conflict. */
 function isPeriodGrouped(definition: FieldDefinition): boolean {
@@ -91,11 +86,11 @@ function isPeriodGrouped(definition: FieldDefinition): boolean {
 
 type Normalized =
   | { kind: 'value'; value: FieldValue; ambiguousUnit: boolean }
-  | { kind: 'rejected'; nonInr: boolean }
+  | { kind: 'rejected' }
   /** No candidate at all: the document established nothing. */
   | { kind: 'absent' };
 
-const rejected: Normalized = { kind: 'rejected', nonInr: false };
+const rejected: Normalized = { kind: 'rejected' };
 
 function withinRange(definition: FieldDefinition, value: number): boolean {
   return (
@@ -110,8 +105,7 @@ function normalizeNumber(definition: FieldDefinition, raw: RawField, documentTyp
   if (definition.unit === 'currency') {
     const parsed = parseIndianAmount(raw.rawValue, { statedUnit: raw.statedUnit, documentType });
     if (!parsed.ok) {
-      if (parsed.code === 'empty_value') return { kind: 'absent' };
-      return { kind: 'rejected', nonInr: parsed.code === 'non_inr_currency' };
+      return parsed.code === 'empty_value' ? { kind: 'absent' } : rejected;
     }
     value = parsed.value;
     ambiguousUnit = parsed.ambiguousUnit;
@@ -125,14 +119,17 @@ function normalizeNumber(definition: FieldDefinition, raw: RawField, documentTyp
   return { kind: 'value', value: signed.value, ambiguousUnit };
 }
 
+function validateStringField(fieldId: string, text: string, today: string): Validated<string> {
+  if (fieldId === FIELD.pan) return validatePan(text);
+  if (fieldId === FIELD.gstin) return validateGstin(text);
+  if (DATE_FIELDS.has(fieldId)) return parseDate(text, { today });
+  if (fieldId === FIELD.fyLabel) return normalizeFinancialYear(text);
+  return { ok: true, value: text.slice(0, MAX_STRING_LENGTH) };
+}
+
 function normalizeString(definition: FieldDefinition, raw: RawField, today: string): Normalized {
   const text = raw.rawValue.replace(/\s+/g, ' ').trim();
-  let parsed: { ok: true; value: string } | { ok: false; code: string };
-  if (definition.fieldId === FIELD.pan) parsed = validatePan(text);
-  else if (definition.fieldId === FIELD.gstin) parsed = validateGstin(text);
-  else if (DATE_FIELDS.has(definition.fieldId)) parsed = parseDate(text, { today });
-  else if (definition.fieldId === FIELD.fyLabel) parsed = normalizeFinancialYear(text);
-  else parsed = { ok: true, value: text.slice(0, MAX_STRING_LENGTH) };
+  const parsed = validateStringField(definition.fieldId, text, today);
   return parsed.ok ? { kind: 'value', value: parsed.value, ambiguousUnit: false } : rejected;
 }
 
@@ -205,35 +202,117 @@ const roundConfidence = (confidence: number) => Math.round(confidence * 100) / 1
 
 // ------------------------------------------------------------- Single-candidate rules
 
-function settleStatus(candidate: ExtractedField, threshold: number, extraReasons: FieldReasonCode[] = []): ExtractedField {
-  const definition = getFieldDefinition(candidate.fieldId);
-  const reasons = new Set<FieldReasonCode>(candidate.reasons.filter((reason) => !SESSION_REASONS.has(reason)));
-  if (candidate.confidence < threshold) reasons.add('low_confidence');
-  extraReasons.forEach((reason) => reasons.add(reason));
-
-  const capped =
-    [...reasons].some((reason) => !NON_CAPPING_REASONS.has(reason)) || definition?.target.kind === 'review_only';
-  const status =
-    candidate.status === 'rejected_validation' ? candidate.status : capped ? 'needs_verification' : 'auto_applied';
-  return { ...candidate, reasons: [...reasons], status };
+export interface SettleContext {
+  threshold: number;
+  today: string;
+  /** Documents flagged injectionSuspected. */
+  injectedDocuments: ReadonlySet<string>;
 }
 
-/** Section 4.2. The status set here is provisional: every merge re-settles it. */
+/** Rule 1 and rule 2 of section 4.2. A non-direct candidate needs the derivation its field names. */
+function isDroppedCandidate(candidate: ExtractedField, definition: FieldDefinition | undefined): boolean {
+  if (!definition || !definition.extractable) return true;
+  if (!(candidate.confidence >= DOCUMENT_AI_THRESHOLDS.discardBelow) || candidate.confidence > 1) return true;
+  if (definition.extractionMode === 'direct') return false;
+  const { derivation } = candidate;
+  return !derivation || derivation.ruleId !== definition.derivation || derivation.fromCandidateIds.length === 0;
+}
+
+/** Re-checks the stored value, since a candidate's input status is only a placeholder. */
+function recheckValue(definition: FieldDefinition, value: FieldValue | null, today: string): FieldValue | null {
+  if (value === null) return null;
+  if (definition.valueType === 'number') {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+    const signed = applySignPolicy(value, definition.signPolicy);
+    return signed.ok && withinRange(definition, signed.value) ? signed.value : null;
+  }
+  if (typeof value !== 'string') return null;
+  if (definition.valueType === 'enum') return definition.allowedValues.includes(value) ? value : null;
+  const checked = validateStringField(definition.fieldId, value, today);
+  return checked.ok ? checked.value : null;
+}
+
+function isNonInrRaw(definition: FieldDefinition, candidate: ExtractedField): boolean {
+  if (definition.unit !== 'currency') return false;
+  const parsed = parseIndianAmount(candidate.rawValue, { documentType: candidate.source.documentType });
+  return !parsed.ok && parsed.code === 'non_inr_currency';
+}
+
+function snippetShowsValue(definition: FieldDefinition, candidate: ExtractedField): boolean {
+  const { snippet } = candidate.source;
+  if (definition.valueType === 'enum') return snippet.trim().length > 0;
+  // rawValue first: a scaled value is not what the page prints.
+  const shown = candidate.rawValue.trim() || String(candidate.value ?? '');
+  return rawValueInSnippet(shown, snippet, definition.valueType === 'number' ? 'number' : 'string');
+}
+
+/**
+ * Section 4.2, in full, so nothing reaches auto_applied by any path. Input status and reasons are
+ * placeholders, except ambiguous_unit, which needs the stated unit and cannot be recomputed.
+ * Returns null for a dropped candidate. Idempotent.
+ */
+export function settleCandidate(
+  candidate: ExtractedField,
+  ctx: SettleContext,
+  extraReasons: FieldReasonCode[] = []
+): ExtractedField | null {
+  const definition = getFieldDefinition(candidate.fieldId);
+  if (isDroppedCandidate(candidate, definition) || !definition) return null;
+
+  const { documentType } = candidate.source;
+  const isDerived = candidate.derivation !== undefined;
+  const nonInr = isNonInrRaw(definition, candidate);
+  const periodEnd = periodEndDate(candidate.period);
+  const value = nonInr ? null : recheckValue(definition, candidate.value, ctx.today);
+  const isRejected =
+    value === null ||
+    // cma_projection is never a source for historical figures, nor bank credits for turnover.
+    (documentType === 'cma_projection' && isPeriodGrouped(definition)) ||
+    (documentType === 'bank_statement' && TURNOVER_FIELDS.has(definition.fieldId)) ||
+    (isPeriodGrouped(definition) && periodEnd !== null && periodEnd > ctx.today);
+
+  const reasons = new Set<FieldReasonCode>(extraReasons);
+  if (candidate.reasons.includes('ambiguous_unit')) reasons.add('ambiguous_unit');
+  if (isRejected) reasons.add('validation_failed');
+  if (nonInr) reasons.add('non_inr_currency');
+  if (candidate.confidence < ctx.threshold) reasons.add('low_confidence');
+  if (!isDerived && !snippetShowsValue(definition, candidate)) reasons.add('value_not_in_snippet');
+  if (!definition.sourceDocumentTypes.includes(documentType)) reasons.add('unexpected_source_type');
+  if (ctx.injectedDocuments.has(candidate.source.documentId)) reasons.add('injection_suspected');
+  if (!isDerived && definition.periodScoped && candidate.period === null) reasons.add('period_unknown');
+  if (isDerived) reasons.add('derived_value');
+
+  const capped = reasons.size > 0 || definition.target.kind === 'review_only';
+  return {
+    ...candidate,
+    value: isRejected ? null : value,
+    reasons: [...reasons],
+    status: isRejected ? 'rejected_validation' : capped ? 'needs_verification' : 'auto_applied',
+  };
+}
+
+/** Parses and normalises the model's output. The status set here is provisional: merge re-settles it. */
 export function buildCandidates(
   rawFields: RawField[],
   ctx: DocumentContext
 ): { fields: ExtractedField[]; droppedLowConfidence: number } {
   const fields: ExtractedField[] = [];
   const counters = new Map<string, number>();
+  const settleContext: SettleContext = {
+    threshold: DOCUMENT_AI_THRESHOLDS.defaultAutoApply,
+    today: ctx.today,
+    injectedDocuments: new Set(ctx.injectionSuspected ? [ctx.documentId] : []),
+  };
   let droppedLowConfidence = 0;
 
   for (const raw of rawFields) {
     const definition = getFieldDefinition(raw.fieldId);
     if (!definition || !definition.extractable || definition.extractionMode !== 'direct') continue;
-    const allowedSource = definition.sourceDocumentTypes.includes(ctx.documentType);
     // Section 4.2: an explicit request has only the allowed sources. This is what stops an
     // existing sanction letter from supplying requestedAmount.
-    if (definition.policy === 'explicit_request' && !allowedSource) continue;
+    if (definition.policy === 'explicit_request' && !definition.sourceDocumentTypes.includes(ctx.documentType)) {
+      continue;
+    }
 
     const confidence = roundConfidence(raw.confidence);
     if (!(confidence >= DOCUMENT_AI_THRESHOLDS.discardBelow) || confidence > 1) {
@@ -243,56 +322,30 @@ export function buildCandidates(
 
     const normalized = normalizeValue(definition, raw, ctx.documentType, ctx.today);
     if (normalized.kind === 'absent') continue;
-
-    const source = buildSource(raw, ctx);
-    const period =
-      definition.fieldId === FIELD.fyLabel && normalized.kind === 'value'
-        ? String(normalized.value)
-        : normalizePeriod(raw.period, ctx.today);
-
-    const reasons = new Set<FieldReasonCode>();
-    const periodEnd = periodEndDate(period);
-    const failures: boolean[] = [
-      normalized.kind === 'rejected',
-      // cma_projection is never a source for historical figures, nor bank credits for turnover.
-      ctx.documentType === 'cma_projection' && isPeriodGrouped(definition),
-      ctx.documentType === 'bank_statement' && TURNOVER_FIELDS.has(definition.fieldId),
-      isPeriodGrouped(definition) && periodEnd !== null && periodEnd > ctx.today,
-    ];
-    const isRejected = failures.some(Boolean);
-    if (isRejected) reasons.add('validation_failed');
-    if (normalized.kind === 'rejected' && normalized.nonInr) reasons.add('non_inr_currency');
-
-    const snippetOk =
-      definition.valueType === 'enum'
-        ? source.snippet.length > 0
-        : rawValueInSnippet(raw.rawValue, source.snippet, definition.valueType === 'number' ? 'number' : 'string');
-    if (!snippetOk) reasons.add('value_not_in_snippet');
-    if (!allowedSource) reasons.add('unexpected_source_type');
-    if (ctx.injectionSuspected) reasons.add('injection_suspected');
-    if (definition.periodScoped && period === null) reasons.add('period_unknown');
-    if (normalized.kind === 'value' && normalized.ambiguousUnit) reasons.add('ambiguous_unit');
+    const isValue = normalized.kind === 'value';
 
     const n = counters.get(definition.fieldId) ?? 0;
     counters.set(definition.fieldId, n + 1);
 
-    fields.push(
-      settleStatus(
-        {
-          candidateId: `${ctx.documentId}:${definition.fieldId}:${n}`,
-          fieldId: definition.fieldId,
-          value: !isRejected && normalized.kind === 'value' ? normalized.value : null,
-          rawValue: raw.rawValue,
-          confidence,
-          source,
-          status: isRejected ? 'rejected_validation' : 'needs_verification',
-          reasons: [...reasons],
-          period,
-          subjectRef: maskSubjectRef(raw.subjectRef, ctx.documentType),
-        },
-        DOCUMENT_AI_THRESHOLDS.defaultAutoApply
-      )
+    const settled = settleCandidate(
+      {
+        candidateId: `${ctx.documentId}:${definition.fieldId}:${n}`,
+        fieldId: definition.fieldId,
+        value: isValue ? normalized.value : null,
+        rawValue: raw.rawValue,
+        confidence,
+        source: buildSource(raw, ctx),
+        status: 'needs_verification',
+        reasons: isValue && normalized.ambiguousUnit ? ['ambiguous_unit'] : [],
+        period:
+          definition.fieldId === FIELD.fyLabel && isValue
+            ? String(normalized.value)
+            : normalizePeriod(raw.period, ctx.today),
+        subjectRef: maskSubjectRef(raw.subjectRef, ctx.documentType),
+      },
+      settleContext
     );
+    if (settled) fields.push(settled);
   }
   return { fields, droppedLowConfidence };
 }
@@ -307,7 +360,7 @@ function parseBankAmount(raw: string | null, row: RawBankMonth): number | null {
 /** The server parses the amounts. Rows that say nothing usable are dropped, never repaired. */
 export function buildBankMonthlyTotals(rows: RawBankMonth[], ctx: DocumentContext): BankMonthlyTotal[] {
   if (ctx.documentType !== 'bank_statement') return [];
-  const totals: ScoredBankMonthlyTotal[] = [];
+  const totals: BankMonthlyTotal[] = [];
   for (const row of rows) {
     const confidence = roundConfidence(row.confidence);
     if (!(confidence >= DOCUMENT_AI_THRESHOLDS.discardBelow) || confidence > 1) continue;
@@ -606,7 +659,7 @@ function resolveField(
 // ---------------------------------------------------------------- Session rewrites
 
 /** An older statement's revenue, for exactly the prior year, is that year's previous revenue. */
-function previousRevenueCandidates(candidates: ExtractedField[], threshold: number): ExtractedField[] {
+function previousRevenueCandidates(candidates: ExtractedField[]): ExtractedField[] {
   const revenues = candidates.filter(
     (candidate) => candidate.fieldId === FIELD.revenue && candidate.status !== 'rejected_validation'
   );
@@ -618,16 +671,11 @@ function previousRevenueCandidates(candidates: ExtractedField[], threshold: numb
   if (!priorPeriod) return [];
   return revenues
     .filter((candidate) => candidate.period === priorPeriod)
-    .map((candidate, n) =>
-      settleStatus(
-        {
-          ...candidate,
-          candidateId: `${candidate.source.documentId}:${FIELD.previousRevenue}:p${n}`,
-          fieldId: FIELD.previousRevenue,
-        },
-        threshold
-      )
-    );
+    .map((candidate, n) => ({
+      ...candidate,
+      candidateId: `${candidate.source.documentId}:${FIELD.previousRevenue}:p${n}`,
+      fieldId: FIELD.previousRevenue,
+    }));
 }
 
 /** Section 4.5: who a report on an individual speaks for depends on the applicant. */
@@ -637,7 +685,9 @@ function routeCreditScores(candidates: ExtractedField[]): ExtractedField[] {
       .filter((c) => c.fieldId === FIELD.entityType && c.status !== 'rejected_validation')
       .map((c) => c.value as FieldValue)
   );
-  const isCompany = entityValues.size === 1 && !SINGLE_PERSON_ENTITIES.has([...entityValues][0]);
+  // Unestablished entity: leave them as read. The prompt already sends individuals to personal.
+  if (entityValues.size !== 1) return candidates;
+  const isCompany = !SINGLE_PERSON_ENTITIES.has([...entityValues][0]);
   const from = isCompany ? FIELD.personalScore : FIELD.promoterScore;
   const to = isCompany ? FIELD.promoterScore : FIELD.personalScore;
   return candidates.map((candidate) => (candidate.fieldId === from ? { ...candidate, fieldId: to } : candidate));
@@ -742,7 +792,7 @@ function gstCompliantResult(status: FieldResult | undefined): FieldResult | unde
 function collectDocumentFacts(documents: DocumentExtractionSuccess[]): Map<string, DocumentFacts> {
   return new Map(
     documents.map((document, index) => {
-      const eligible = document.fields.filter((c) => c.status !== 'rejected_validation');
+      const eligible = document.fields.filter((c) => c.value !== null);
       return [
         document.documentId,
         {
@@ -760,12 +810,18 @@ export function mergeSession(input: MergeSessionInput): MergeSessionOutput {
   const warnings: SessionWarning[] = [];
   const facts = collectDocumentFacts(documents);
 
-  // Drop anything an older run stored that is no longer allowed.
-  const stored = documents
-    .flatMap((document) => document.fields)
-    .filter((candidate) => getFieldDefinition(candidate.fieldId)?.extractionMode === 'direct');
+  const injected = documents.filter((document) => document.injectionSuspected);
+  const context: SettleContext = {
+    threshold,
+    today,
+    injectedDocuments: new Set(injected.map((document) => document.documentId)),
+  };
 
-  const identity = checkIdentity(stored);
+  const settled = documents
+    .flatMap((document) => document.fields)
+    .flatMap((candidate) => settleCandidate(candidate, context) ?? []);
+
+  const identity = checkIdentity(settled);
   if (identity.mismatchedDocuments.size > 0) {
     warnings.push({
       code: 'identity_mismatch',
@@ -773,7 +829,6 @@ export function mergeSession(input: MergeSessionInput): MergeSessionOutput {
       fieldIds: [FIELD.pan, FIELD.gstin],
     });
   }
-  const injected = documents.filter((document) => document.injectionSuspected);
   if (injected.length > 0) {
     warnings.push({
       code: 'injection_suspected',
@@ -792,8 +847,16 @@ export function mergeSession(input: MergeSessionInput): MergeSessionOutput {
       .map((document) => document.documentId)
   );
 
+  /** Carries identity_mismatch on to every candidate of a minority document, copies included. */
+  const settleInSession = (candidate: ExtractedField) =>
+    settleCandidate(
+      candidate,
+      context,
+      identity.mismatchedDocuments.has(candidate.source.documentId) ? ['identity_mismatch'] : []
+    ) ?? [];
+
   const direct = routeCreditScores(
-    stored
+    settled
       .filter(
         (candidate) =>
           !(
@@ -802,17 +865,11 @@ export function mergeSession(input: MergeSessionInput): MergeSessionOutput {
             individualPanCards.has(candidate.source.documentId)
           )
       )
-      .map((candidate) =>
-        settleStatus(
-          candidate,
-          threshold,
-          identity.mismatchedDocuments.has(candidate.source.documentId) ? ['identity_mismatch'] : []
-        )
-      )
+      .flatMap(settleInSession)
   );
 
-  const withPrevious = [...direct, ...previousRevenueCandidates(direct, threshold)];
-  const derived = deriveCandidates(withPrevious, documents, today).map((candidate) => settleStatus(candidate, threshold));
+  const withPrevious = [...direct, ...previousRevenueCandidates(direct).flatMap(settleInSession)];
+  const derived = deriveCandidates(withPrevious, documents, today).flatMap(settleInSession);
   const all = [...withPrevious, ...derived];
 
   const byField = new Map<string, ExtractedField[]>();

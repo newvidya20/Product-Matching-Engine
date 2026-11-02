@@ -412,9 +412,9 @@ export const FIELD_DEFINITIONS: readonly FieldDefinition[] = [
   }),
 
   dynamic('working_capital', 'receivableDays', 'Average Debtor / Receivable Cycle (Days)', 'e.g., 45 Days',
-    ['loan_application', 'cma_projection'], DAYS),
+    ['loan_application'], DAYS),
   dynamic('working_capital', 'inventoryHoldingDays', 'Average Inventory Holding Period (Days)', 'e.g., 30 Days',
-    ['loan_application', 'cma_projection'], DAYS),
+    ['loan_application'], DAYS),
   dynamic('working_capital', 'existingCashCreditOd', 'Existing Sanctioned CC / OD Facility', 'Select status',
     ['loan_application'], {
       options: ['None', 'Existing CC/OD — Enhancement Needed', 'Existing CC/OD — Takeover'],
@@ -458,14 +458,14 @@ export const FIELD_DEFINITIONS: readonly FieldDefinition[] = [
   dynamic('debt_consolidation', 'existingLenderCount', 'Number of Active Facilities to Consolidate', 'e.g., 3 Facilities',
     ['loan_application'], { unit: 'count', min: 0, max: 100 }),
   dynamic('debt_consolidation', 'repaymentTrackLast12M', 'Last 12 Months Repayment Track Record', 'Select track record',
-    ['credit_report', 'loan_application'], {
+    ['loan_application'], {
       options: ['0 DPD (Clean Track)', 'Minor Delays (<30 DPD)', '30+ DPD Observed'],
     }),
 
   dynamic('project_expansion', 'dprPrepared', 'Detailed Project Report (DPR) & Financial Projections Ready', 'Select',
-    ['cma_projection', 'loan_application'], { options: ['Yes — Ready', 'In Preparation', 'No'] }),
+    ['loan_application'], { options: ['Yes — Ready', 'In Preparation', 'No'] }),
   dynamic('project_expansion', 'promoterContributionPercent', 'Promoter Equity Contribution (%)', 'e.g., 25%',
-    ['cma_projection', 'loan_application'], PERCENT),
+    ['loan_application'], PERCENT),
 
   dynamic('trade_import_export', 'iecCodeAvailable', 'Valid Import-Export Code (IEC) Available', 'Select',
     ['registration_certificate', 'loan_application'], { options: ['Yes', 'No'] }),

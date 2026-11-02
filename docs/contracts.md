@@ -42,7 +42,12 @@ export function readSpreadsheetPreview(bytes: Uint8Array, kind: 'xlsx' | 'csv'):
 - `extractDocument` handles one file. Document failures return `{ ok: false, errorCode }`. It rejects only if
   `signal` aborts, and `jobs.ts` records that as `llm_timeout`. It does no storage or logging of content.
 - `mergeSessionResults` is pure: no I/O, no clock, no env. Call it after every job, delete, type override and
-  `PUT .../edits`, and after a threshold change. Pass successful results of all documents whose result still exists.
+  `PUT .../edits`, and after a threshold change. Pass successful results of all documents whose result still exists,
+  oldest upload first: array order is what "latest upload" means in section 4.4.
+- **Merge is the enforcement point.** `mergeSessionResults` itself applies every rule in section 4.2, so nothing reaches
+  `auto_applied` by any path. A candidate's input `status` and `reasons` are placeholders that merge recomputes, except
+  `ambiguous_unit`, which is preserved because it depends on the stated unit. `value: null` on input means the value
+  failed to parse, and stays rejected. `buildCandidates` normalises values and may set provisional statuses.
 - `jobs.ts` owns queueing, concurrency, timeouts and persistence. `pipeline.ts` owns one retry on 429/503.
 - Validators live in `server/documentAi/validators.ts` with the signatures in section 6.
 
@@ -104,14 +109,17 @@ Field result (`FieldResult`) adds `candidates`, `suggestedCandidateId`, `mirrorO
 
 Evaluate top to bottom; the first match wins. `reasons` collects every condition that applies.
 
-1. Unknown `fieldId`, `extractable: false`, or `extractionMode` other than `direct`: **drop silently**.
+1. Unknown `fieldId`, `extractable: false`, or `extractionMode` other than `direct`: **drop silently**. The exception is
+   a candidate carrying a `derivation` whose rule is the one its field names: it stays, and takes `derived_value`.
 2. Confidence below 0.50: **drop** and count.
 3. Validator fails, or value outside `allowedValues`, `min`/`max`, or the `signPolicy`, or non-INR currency:
    `rejected_validation`.
 4. Any of these: `needs_verification`.
    - Confidence below the threshold (`low_confidence`).
-   - The value is not found in `snippet` (`value_not_in_snippet`). Compare digits only for numbers, after stripping
-     separators; case-folded for strings. For enums, the check is that the snippet is non-empty.
+   - The value is not found in `snippet` (`value_not_in_snippet`). Compare `rawValue` when present, otherwise the value,
+     because a scaled value is not what the page prints: -1250000 from `(12.50)` in lakh matches a snippet showing
+     `(12.50)`. Digits only for numbers, after stripping separators, as whole numbers; case-folded for strings. For enums,
+     the check is that the snippet is non-empty. Derived values are exempt, as they take `derived_value` anyway.
    - The document type is not in `sourceDocumentTypes`, including `other` (`unexpected_source_type`).
    - The document was flagged `injectionSuspected`, or fails the identity check in section 4.4
      (`injection_suspected`, `identity_mismatch`).
@@ -126,9 +134,11 @@ enforces it by rules 1 and 4. `review_only` values appear in the Review panel on
 
 `explicit_request` fields (`requestedAmount`, `requestedTenureMonths`, `fundingPurpose`, `statedPurpose`, all
 `dynamicPurposeAnswers.*`): the model must return them only when the document states the borrower's own request in
-words; the snippet must show it. Allowed sources are in the field map. They are never inferred from turnover, an
-existing facility, or a document's general theme. An `existing_sanction_letter` is about an existing facility and
-never supplies `requestedAmount`. If stated and clean, these auto-apply like any other field.
+words; the snippet must show it. Allowed sources are in the field map, which therefore lists no `credit_report` or
+`cma_projection` for them: neither states a request in words. They are never inferred from turnover, an existing
+facility, or a document's general theme. An `existing_sanction_letter` is about an existing facility and
+never supplies `requestedAmount`: `buildCandidates` drops an `explicit_request` candidate from a source not listed, and
+merge caps any that arrives by another path with `unexpected_source_type`. If stated and clean, these auto-apply like any other field.
 
 `positive_only` fields: a document can establish "yes"/"available". Absence never produces "no".
 

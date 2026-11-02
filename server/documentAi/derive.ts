@@ -4,7 +4,6 @@
  * The GST mapping keeps its source status, so it is a mirror step in merge.ts, not a rule here.
  */
 import { getFieldDefinition } from '../../src/documentAi/fieldMap.ts';
-import { DOCUMENT_AI_THRESHOLDS } from '../../src/types/documentAi.ts';
 import type {
   BankMonthlyTotal,
   DerivationRuleId,
@@ -20,19 +19,6 @@ import {
   periodEndDate,
   previousFinancialYear,
 } from './validators.ts';
-
-/**
- * BankMonthlyTotal has no confidence in the shared types, yet a derived value takes the lowest
- * confidence of its inputs. pipeline.ts stores it on the row as this subtype.
- */
-export interface ScoredBankMonthlyTotal extends BankMonthlyTotal {
-  confidence: number;
-}
-
-function rowConfidence(row: BankMonthlyTotal): number {
-  const { confidence } = row as Partial<ScoredBankMonthlyTotal>;
-  return typeof confidence === 'number' ? confidence : DOCUMENT_AI_THRESHOLDS.discardBelow;
-}
 
 const isEligible = (candidate: ExtractedField) => candidate.status !== 'rejected_validation';
 
@@ -196,7 +182,7 @@ function deriveBankAverage(
         ruleId: 'average_monthly_from_bank_table',
         value: Math.round(mean),
         fromCandidateIds: entries.map(([month, entry]) => `${entry.row.source.documentId}:bank:${month}`),
-        confidence: Math.min(...entries.map(([, entry]) => rowConfidence(entry.row))),
+        confidence: Math.min(...entries.map(([, entry]) => entry.row.confidence)),
         source: last.row.source,
         period: lastDayOfMonth(lastMonth),
         subjectRef: last.row.subjectRef,

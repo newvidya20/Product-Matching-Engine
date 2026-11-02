@@ -216,6 +216,8 @@ export interface BankMonthlyTotal {
   month: string; // YYYY-MM
   totalCredits: number | null;
   closingBalance: number | null;
+  /** From the model, 0 to 1. A derived value takes the lowest among its inputs. */
+  confidence: number;
   subjectRef: string | null;
   source: SourceRef;
 }

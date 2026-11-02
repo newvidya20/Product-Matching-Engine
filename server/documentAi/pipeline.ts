@@ -25,6 +25,7 @@ import {
   containsInjectionPhrases,
   EXTRACTION_REQUEST,
   EXTRACTION_SCHEMA,
+  fieldsToRequest,
   newDelimiter,
   parseClassificationResponse,
   parseExtractionResponse,
@@ -108,6 +109,21 @@ async function runExtraction(input: ExtractDocumentInput): Promise<DocumentExtra
     ? { documentType: declaredDocumentType, confidence: 1, suspicious: false }
     : await classify(prepared, signal);
   const { documentType } = classification;
+
+  // No field accepts this document type, so there is nothing to ask the model.
+  if (fieldsToRequest(documentType).length === 0) {
+    return {
+      ok: true,
+      documentId,
+      documentType,
+      classificationConfidence: classification.confidence,
+      fields: [],
+      bankMonthlyTotals: [],
+      injectionSuspected: prepared.injectionInText || classification.suspicious,
+      droppedLowConfidence: 0,
+      model: geminiModelName(),
+    };
+  }
 
   const response = await generateJson({
     systemInstruction: buildExtractionInstruction(documentType),
