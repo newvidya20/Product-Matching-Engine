@@ -6,9 +6,16 @@ import { ApiError, GoogleGenAI, type Part, type Schema } from '@google/genai';
 import type { ExtractionErrorCode } from '../../src/types/documentAi.ts';
 
 const DEFAULT_MODEL = 'gemini-3.8-flash';
-/** One retry on 429/503, per contract section 2. */
-const MAX_ATTEMPTS = 2;
-const RETRY_DELAY_MS = 900;
+/**
+ * Contract section 2. Backoff runs 1-2 s, 2-4 s, 4-8 s. Three hung attempts plus backoff take at
+ * most 284 s, which is why section 13 asks jobs.ts for 300 s per file.
+ */
+const MAX_ATTEMPTS = 4;
+const ATTEMPT_TIMEOUT_MS = 90_000;
+const BACKOFF_BASE_MS = 2_000;
+const BACKOFF_CAP_MS = 8_000;
+/** The SDK's own limit, a backstop only: our per-attempt timeout must fire first and be recognised. */
+const SDK_TIMEOUT_MS = ATTEMPT_TIMEOUT_MS + 5_000;
 
 const ERROR_MESSAGES: Record<ExtractionErrorCode, string> = {
   password_protected: 'The document is password protected.',
@@ -49,12 +56,22 @@ export function geminiModelName(): string {
   return process.env.DOCUMENT_AI_GEMINI_MODEL?.trim() || DEFAULT_MODEL;
 }
 
+/**
+ * Retries live in callWithRetry, in one place: an SDK retry would multiply them and hide them from
+ * the job's signal. The SDK retries only when retryOptions is set, so this is stated, not assumed.
+ */
+export const GEMINI_HTTP_OPTIONS = {
+  headers: { 'User-Agent': 'aistudio-build' },
+  timeout: SDK_TIMEOUT_MS,
+  retryOptions: { attempts: 1 },
+};
+
 function createClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY?.trim();
   if (!apiKey) throw new LlmNotConfiguredError();
   return new GoogleGenAI({
     apiKey,
-    httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+    httpOptions: GEMINI_HTTP_OPTIONS,
   });
 }
 
@@ -71,18 +88,23 @@ function providerMessage(error: unknown): string {
   return error instanceof Error ? error.message : '';
 }
 
-function isRetryable(error: unknown): boolean {
+function isRateLimited(error: unknown): boolean {
   const status = providerStatus(error);
   if (status !== null) return status === 429 || status === 503;
   return /\b(?:429|503)\b|UNAVAILABLE|RESOURCE_EXHAUSTED/.test(providerMessage(error));
+}
+
+function isProviderTimeout(error: unknown): boolean {
+  const status = providerStatus(error);
+  return status === 408 || status === 504 || /DEADLINE_EXCEEDED/.test(providerMessage(error));
 }
 
 /** Exported so the mapping can be unit tested. Returns a code, never the provider's text. */
 export function classifyProviderError(error: unknown): ExtractionErrorCode {
   const status = providerStatus(error);
   const message = providerMessage(error);
-  if (isRetryable(error)) return 'llm_rate_limited';
-  if (status === 408 || status === 504 || /DEADLINE_EXCEEDED/.test(message)) return 'llm_timeout';
+  if (isRateLimited(error)) return 'llm_rate_limited';
+  if (isProviderTimeout(error)) return 'llm_timeout';
   // A rejected key is an operator problem, the same one as a missing key.
   if (status === 401 || status === 403 || /API[_ ]KEY[_ ]INVALID|API key not valid/i.test(message)) {
     return 'llm_not_configured';
@@ -97,7 +119,13 @@ function abortError(): DOMException {
   return new DOMException('Extraction was aborted.', 'AbortError');
 }
 
-function waitForRetry(signal: AbortSignal): Promise<void> {
+/** Delay before retry `retry` (1-based): capped exponential, with equal jitter. */
+export function backoffDelayMs(retry: number, random: () => number = Math.random): number {
+  const ceiling = Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * 2 ** (retry - 1));
+  return Math.round(ceiling / 2 + random() * (ceiling / 2));
+}
+
+function waitForRetry(delayMs: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     const onAbort = () => {
       clearTimeout(timer);
@@ -106,9 +134,65 @@ function waitForRetry(signal: AbortSignal): Promise<void> {
     const timer = setTimeout(() => {
       signal.removeEventListener('abort', onAbort);
       resolve();
-    }, RETRY_DELAY_MS);
+    }, delayMs);
     signal.addEventListener('abort', onAbort, { once: true });
   });
+}
+
+export interface RetryOptions {
+  maxAttempts?: number;
+  attemptTimeoutMs?: number;
+  sleep?: (delayMs: number, signal: AbortSignal) => Promise<void>;
+  random?: () => number;
+}
+
+/** Settles when `run` does, or as soon as `signal` fires, even if the provider call ignores it. */
+function untilAborted<T>(run: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(abortError());
+    if (signal.aborted) onAbort();
+    signal.addEventListener('abort', onAbort, { once: true });
+    run.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
+}
+
+/**
+ * Runs one provider call with a timeout per attempt, retrying 429, 503 and timeouts. Rejects with
+ * ExtractionError, whose code stays retryable (llm_rate_limited, llm_timeout) for those failures,
+ * or with an AbortError when the job's signal fires, which is never retried.
+ */
+export async function callWithRetry<T>(
+  run: (attemptSignal: AbortSignal) => Promise<T>,
+  signal: AbortSignal,
+  options: RetryOptions = {}
+): Promise<T> {
+  const {
+    maxAttempts = MAX_ATTEMPTS,
+    attemptTimeoutMs = ATTEMPT_TIMEOUT_MS,
+    sleep = waitForRetry,
+    random = Math.random,
+  } = options;
+
+  for (let attempt = 1; ; attempt += 1) {
+    if (signal.aborted) throw abortError();
+    const timeout = new AbortController();
+    const timer = setTimeout(() => timeout.abort(), attemptTimeoutMs);
+    const attemptSignal = AbortSignal.any([signal, timeout.signal]);
+    try {
+      return await untilAborted(run(attemptSignal), attemptSignal);
+    } catch (error) {
+      if (signal.aborted) throw abortError();
+      if (error instanceof ExtractionError) throw error;
+      const timedOut = timeout.signal.aborted;
+      const retryable = timedOut || isRateLimited(error) || isProviderTimeout(error);
+      if (attempt >= maxAttempts || !retryable) {
+        throw new ExtractionError(timedOut ? 'llm_timeout' : classifyProviderError(error));
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+    await sleep(backoffDelayMs(attempt, random), signal);
+  }
 }
 
 export interface GeminiJsonRequest {
@@ -126,31 +210,20 @@ export async function generateJson(request: GeminiJsonRequest): Promise<string> 
   const { systemInstruction, parts, responseSchema, signal } = request;
   const client = createClient();
 
-  for (let attempt = 1; ; attempt += 1) {
-    if (signal.aborted) throw abortError();
-    try {
-      const response = await client.models.generateContent({
-        model: geminiModelName(),
-        contents: [{ role: 'user', parts }],
-        config: {
-          systemInstruction,
-          temperature: 0,
-          responseMimeType: 'application/json',
-          responseSchema,
-          abortSignal: signal,
-        },
-      });
-      if (signal.aborted) throw abortError();
-      const text = response.text;
-      if (!text) throw new ExtractionError('llm_invalid_response');
-      return text;
-    } catch (error) {
-      if (signal.aborted) throw abortError();
-      if (error instanceof ExtractionError) throw error;
-      if (attempt >= MAX_ATTEMPTS || !isRetryable(error)) {
-        throw new ExtractionError(classifyProviderError(error));
-      }
-    }
-    await waitForRetry(signal);
-  }
+  return callWithRetry(async (attemptSignal) => {
+    const response = await client.models.generateContent({
+      model: geminiModelName(),
+      contents: [{ role: 'user', parts }],
+      config: {
+        systemInstruction,
+        temperature: 0,
+        responseMimeType: 'application/json',
+        responseSchema,
+        abortSignal: attemptSignal,
+      },
+    });
+    const text = response.text;
+    if (!text) throw new ExtractionError('llm_invalid_response');
+    return text;
+  }, signal);
 }

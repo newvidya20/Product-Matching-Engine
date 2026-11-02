@@ -46,6 +46,12 @@ export type ExtractionMode = 'direct' | 'mirror' | 'derived' | 'none';
  */
 export type ExtractionPolicy = 'stated' | 'explicit_request' | 'positive_only';
 
+/** Option evidence: at least one `any` phrase, and no `none` phrase, in the snippet. */
+export interface EnumEvidence {
+  any: readonly string[];
+  none?: readonly string[];
+}
+
 export type FieldTarget =
   | { kind: 'form'; key: string }
   | { kind: 'financial'; key: keyof BorrowerFinancialProfile }
@@ -84,6 +90,14 @@ export interface FieldDefinition {
   max?: number;
   /** Per-period or point-in-time value: conflicts compare within one period. */
   periodScoped?: boolean;
+  /** Covers a whole year, so only a full FY period can supply it. Balance-sheet fields stay point-in-time. */
+  annualFlow?: boolean;
+  /** A sanctioned limit: a trailing Cr means crore even on a bank statement. */
+  amountNature?: 'limit';
+  /** Enum only: a person always confirms it, whatever the snippet says. */
+  alwaysReview?: boolean;
+  /** Enum only, by option. An option with no entry cannot auto-apply. */
+  enumEvidence?: Readonly<Record<string, EnumEvidence>>;
   /** Rendered for dynamic questions, moved here so there is one source of truth. */
   placeholder?: string;
   notExtractableReason?: string;
@@ -123,6 +137,30 @@ const PROFITABILITY_VALUES = [
 const DATA_SOURCE_VALUES = ['audited', 'provisional', 'management'] as const;
 const GST_COMPLIANCE_VALUES = ['compliant', 'not_compliant', 'not_applicable', 'not_provided'] as const;
 const CREDIT_REPORT_VALUES = ['available', 'pending', 'not_applicable', 'not_provided'] as const;
+
+const ENTITY_TYPE_EVIDENCE: Readonly<Record<string, EnumEvidence>> = {
+  individual: { any: ['individual', 'self employed'] },
+  proprietorship: { any: ['proprietor', 'proprietorship', 'proprietary concern', 'sole proprietor'] },
+  partnership: { any: ['partnership', 'partnership firm', 'partnership deed'], none: ['limited liability partnership'] },
+  llp: { any: ['llp', 'limited liability partnership'] },
+  private_limited: { any: ['private limited', 'private company'] },
+  public_limited: { any: ['public limited', 'public company'] },
+  trust_society: { any: ['trust', 'society', 'societies registration'] },
+};
+
+const DATA_SOURCE_EVIDENCE: Readonly<Record<string, EnumEvidence>> = {
+  audited: { any: ['audited', 'auditor', 'auditors', 'audit report'], none: ['un audited', 'not audited'] },
+  provisional: { any: ['provisional'] },
+  management: { any: ['management accounts', 'management certified', 'prepared by management', 'management prepared'] },
+};
+
+const CREDIT_REPORT_EVIDENCE: Readonly<Record<string, EnumEvidence>> = {
+  available: { any: ['commercial credit report', 'company credit report', 'cmr', 'ccr', 'commercial bureau'] },
+};
+
+const COLLATERAL_EVIDENCE: Readonly<Record<string, EnumEvidence>> = {
+  yes: { any: ['collateral', 'security', 'mortgage', 'mortgaged', 'hypothecation', 'hypothecated', 'pledge', 'pledged', 'valuation'] },
+};
 
 // -------------------------------------------------------------- Builders
 
@@ -231,6 +269,7 @@ function dynamic(
   });
 }
 
+const ANNUAL = { annualFlow: true } as const;
 const DAYS = { unit: 'days', min: 0, max: 3650 } as const;
 const PERCENT = { unit: 'percent', min: 0, max: 100 } as const;
 
@@ -254,6 +293,7 @@ export const FIELD_DEFINITIONS: readonly FieldDefinition[] = [
     valueType: 'enum',
     target: { kind: 'form', key: 'entityType' },
     allowedValues: ENTITY_TYPE_VALUES,
+    enumEvidence: ENTITY_TYPE_EVIDENCE,
     sourceDocumentTypes: [
       'registration_certificate',
       'gst_certificate',
@@ -551,24 +591,27 @@ export const FIELD_DEFINITIONS: readonly FieldDefinition[] = [
     valueType: 'enum',
     target: { kind: 'financial', key: 'dataSource' },
     allowedValues: DATA_SOURCE_VALUES,
+    enumEvidence: DATA_SOURCE_EVIDENCE,
     sourceDocumentTypes: BALANCE_SOURCES,
     defaultValue: 'audited',
     periodScoped: true,
   }),
-  money('annualRevenue', 'Annual Revenue', STATEMENT_SOURCES),
-  money('previousAnnualRevenue', 'Previous FY Revenue', STATEMENT_SOURCES),
-  money('netProfitAfterTax', 'PAT', STATEMENT_SOURCES, { signPolicy: 'signed' }),
-  money('ebitda', 'EBITDA', BALANCE_SOURCES, { signPolicy: 'signed' }),
-  money('ebit', 'EBIT', BALANCE_SOURCES, { signPolicy: 'signed' }),
+  money('annualRevenue', 'Annual Revenue', STATEMENT_SOURCES, ANNUAL),
+  money('previousAnnualRevenue', 'Previous FY Revenue', STATEMENT_SOURCES, ANNUAL),
+  money('netProfitAfterTax', 'PAT', STATEMENT_SOURCES, { ...ANNUAL, signPolicy: 'signed' }),
+  money('ebitda', 'EBITDA', BALANCE_SOURCES, { ...ANNUAL, signPolicy: 'signed' }),
+  money('ebit', 'EBIT', BALANCE_SOURCES, { ...ANNUAL, signPolicy: 'signed' }),
   money('depreciation', 'Depreciation', BALANCE_SOURCES, {
+    ...ANNUAL,
     signPolicy: 'expense_magnitude',
     hasVisibleInput: false,
   }),
   money('amortization', 'Amortization', BALANCE_SOURCES, {
+    ...ANNUAL,
     signPolicy: 'expense_magnitude',
     hasVisibleInput: false,
   }),
-  money('interestExpense', 'Interest Expense', BALANCE_SOURCES, { signPolicy: 'expense_magnitude' }),
+  money('interestExpense', 'Interest Expense', BALANCE_SOURCES, { ...ANNUAL, signPolicy: 'expense_magnitude' }),
   money('currentAssets', 'Current Assets', BALANCE_SOURCES),
   money('currentLiabilities', 'Current Liabilities', BALANCE_SOURCES),
   money('totalAssets', 'Total Assets', BALANCE_SOURCES, { hasVisibleInput: false }),
@@ -583,13 +626,14 @@ export const FIELD_DEFINITIONS: readonly FieldDefinition[] = [
     hasVisibleInput: false,
   }),
   money('annualScheduledPrincipalRepayments', 'Annual Scheduled Principal Repayments',
-    ['financial_statement', 'existing_sanction_letter'], { hasVisibleInput: false }),
+    ['financial_statement', 'existing_sanction_letter'], { ...ANNUAL, hasVisibleInput: false }),
   money('existingMonthlyEmi', 'Existing Monthly EMI (Financial)',
     ['credit_report', 'existing_sanction_letter', 'loan_application'], {
       hasVisibleInput: false,
       periodScoped: false,
     }),
   money('operatingCashFlow', 'Operating Cash Flow', BALANCE_SOURCES, {
+    ...ANNUAL,
     signPolicy: 'signed',
     hasVisibleInput: false,
   }),
@@ -602,11 +646,12 @@ export const FIELD_DEFINITIONS: readonly FieldDefinition[] = [
     signPolicy: 'signed', // overdraft accounts run negative
   }),
   money('ccOdSanctionedLimit', 'CC / OD Sanctioned Limit', ['existing_sanction_letter', 'bank_statement'], {
+    amountNature: 'limit',
     hasVisibleInput: false,
     periodScoped: false,
   }),
   money('ccOdUtilisation', 'CC / OD Utilisation', ['bank_statement'], { hasVisibleInput: false }),
-  money('gstAnnualTurnover', 'GST Annual Turnover', ['gst_return']),
+  money('gstAnnualTurnover', 'GST Annual Turnover', ['gst_return'], ANNUAL),
   field({
     fieldId: 'financialProfile.gstComplianceStatus',
     section: '04',
@@ -614,6 +659,7 @@ export const FIELD_DEFINITIONS: readonly FieldDefinition[] = [
     valueType: 'enum',
     target: { kind: 'financial', key: 'gstComplianceStatus' },
     allowedValues: GST_COMPLIANCE_VALUES,
+    alwaysReview: true,
     sourceDocumentTypes: ['gst_certificate', 'gst_return'],
     hasVisibleInput: false,
     defaultValue: 'not_provided',
@@ -671,6 +717,7 @@ export const FIELD_DEFINITIONS: readonly FieldDefinition[] = [
     valueType: 'enum',
     target: { kind: 'financial', key: 'commercialCreditReportStatus' },
     allowedValues: CREDIT_REPORT_VALUES,
+    enumEvidence: CREDIT_REPORT_EVIDENCE,
     sourceDocumentTypes: ['credit_report'],
     policy: 'positive_only',
     hasVisibleInput: false,
@@ -706,6 +753,7 @@ export const FIELD_DEFINITIONS: readonly FieldDefinition[] = [
     valueType: 'enum',
     target: { kind: 'form', key: 'collateralAvailable' },
     allowedValues: ['yes', 'no'],
+    enumEvidence: COLLATERAL_EVIDENCE,
     sourceDocumentTypes: ['collateral_valuation', 'loan_application'],
     policy: 'positive_only',
     defaultValue: 'no',

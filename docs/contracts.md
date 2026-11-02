@@ -48,7 +48,13 @@ export function readSpreadsheetPreview(bytes: Uint8Array, kind: 'xlsx' | 'csv'):
   `auto_applied` by any path. A candidate's input `status` and `reasons` are placeholders that merge recomputes, except
   `ambiguous_unit`, which is preserved because it depends on the stated unit. `value: null` on input means the value
   failed to parse, and stays rejected. `buildCandidates` normalises values and may set provisional statuses.
-- `jobs.ts` owns queueing, concurrency, timeouts and persistence. `pipeline.ts` owns one retry on 429/503.
+- Merge is pure and never holds document text, so the check against source text runs once, in `buildCandidates`, while
+  the file is in memory. Its outcome is stored as `sourceCheck` (and `rowLabel`), and merge caps on them.
+- `jobs.ts` owns queueing, concurrency, the per-file timeout and persistence. `gemini.ts` owns retries, and the timeout of
+  each attempt. Up to 4 attempts per call, 90 seconds each, on 429, 503, 408, 504 and an attempt that times out. Backoff is
+  capped exponential with equal jitter: 1-2 s, 2-4 s, 4-8 s. The SDK is set to no retries (`retryOptions: { attempts: 1 }`),
+  so there is one retry loop, and the job's signal stops it at once. Exhausted retries give `llm_rate_limited` or
+  `llm_timeout`, and the client offers Retry for both.
 - Validators live in `server/documentAi/validators.ts` with the signatures in section 6.
 
 ## 3. Extracted field JSON
@@ -74,7 +80,11 @@ Candidate (`ExtractedField`):
   "status": "auto_applied",
   "reasons": [],
   "period": "FY 2024-25",
-  "subjectRef": null
+  "subjectRef": null,
+  "statedUnit": "lakh",
+  "unitText": "(Rs. in lakhs)",
+  "sourceCheck": "verified",
+  "rowLabel": "Profit / (Loss) after tax | (12.50) | 8.40"
 }
 ```
 
@@ -86,6 +96,10 @@ Candidate (`ExtractedField`):
 - `source`: `page` is 1-based and PDF-only. Spreadsheets set `sheetName` and `cellRef`. CSV sets
   `cellRef: "row:<n>"`. Images set all three to null. `snippet` is verbatim and at most 300 characters.
 - `status`: one of `auto_applied`, `needs_verification`, `conflict`, `rejected_validation`.
+- `statedUnit`, `unitText`: the model's reading of the table or page header, and that header quoted verbatim.
+- `sourceCheck`: `verified`, `failed` or `no_text`, set by the server against text it read itself (section 4.2). Absent
+  reads as `no_text`.
+- `rowLabel`: for `signed` fields, the text the server read in the value's row or printed line, at most 300 characters.
 
 Field result (`FieldResult`) adds `candidates`, `suggestedCandidateId`, `mirrorOf` and `overriddenByUser`.
 
@@ -118,8 +132,19 @@ Evaluate top to bottom; the first match wins. `reasons` collects every condition
    - Confidence below the threshold (`low_confidence`).
    - The value is not found in `snippet` (`value_not_in_snippet`). Compare `rawValue` when present, otherwise the value,
      because a scaled value is not what the page prints: -1250000 from `(12.50)` in lakh matches a snippet showing
-     `(12.50)`. Digits only for numbers, after stripping separators, as whole numbers; case-folded for strings. For enums,
-     the check is that the snippet is non-empty. Derived values are exempt, as they take `derived_value` anyway.
+     `(12.50)`. Digits only for numbers, after stripping separators, as whole numbers keeping the decimal point, so `1.25`
+     is not found in `12.5`; case-folded for strings. For enums, the check is that the snippet is non-empty. Derived values
+     are exempt, as they take `derived_value` anyway.
+   - The candidate fails the check against text the server read itself (`not_in_source`). See "Source text check" below.
+   - An enum that is `explicit_request` or `alwaysReview` (`enum_review_required`), which is every enum `explicit_request`
+     field, plus `gstComplianceStatus`, and `gstTaxCompliant` through it. Any other enum whose snippet has none of the
+     evidence keywords the field map defines for that option (`enum_no_evidence`). An option with no keywords cannot
+     auto-apply. `entityType` from a registration document is the expected auto-apply case.
+   - A `signed` field with a positive value whose snippet or `rowLabel` says loss, deficit, negative, shortfall or similar
+     (`loss_wording`). The name of a statement ("Statement of Profit and Loss") does not count. A row label does, including
+     the neutral `Profit / (Loss)`.
+   - A unit that does not agree (`unit_mismatch`) or is not INR (`non_inr_unit`), section 6.3.
+   - An `annualFlow` field with a part-year period or wording (`part_year_period`), section 4.3.
    - The document type is not in `sourceDocumentTypes`, including `other` (`unexpected_source_type`).
    - The document was flagged `injectionSuspected`, or fails the identity check in section 4.4
      (`injection_suspected`, `identity_mismatch`).
@@ -128,6 +153,19 @@ Evaluate top to bottom; the first match wins. `reasons` collects every condition
    - It is a derived value or a mirror fallback (`derived_value`, `fallback_source`).
 5. `review_only` target: `needs_verification`.
 6. Otherwise: `auto_applied`.
+
+**Source text check.** `buildCandidates` compares each candidate with text the server read itself, never with the model's
+own snippet:
+
+| File | What the server reads | A candidate fails when |
+|---|---|---|
+| `xlsx`, `csv` | Parsed visible cells. Hidden sheets, rows (including zero height) and columns are excluded, and do not reach the model | `rawValue` is in no visible cell, preferring the cited cell. For an enum, its evidence keyword is in no cell |
+| Digital `pdf` | The text layer, via `pdfjs-dist`. Digital means at least 50 non-space characters | Any digits of `snippet` or `rawValue` are absent. A string's `rawValue`, or an enum's evidence keyword, is absent. An inline unit differs from the unit printed beside that figure |
+| A PDF that will not parse, or takes over 20 seconds | Nothing | Always. A file must not escape the check by breaking the parser |
+| Scanned `pdf`, images | Nothing | Never: `no_text`. See section 12 |
+
+`unitText` must also be in the source where a source exists. A failure gives `not_in_source` and caps at
+`needs_verification`. A bank month whose figure fails is dropped.
 
 **Never guess.** If a document does not state a value, there is no candidate. The prompt says so, and the server
 enforces it by rules 1 and 4. `review_only` values appear in the Review panel only.
@@ -138,7 +176,8 @@ words; the snippet must show it. Allowed sources are in the field map, which the
 `cma_projection` for them: neither states a request in words. They are never inferred from turnover, an existing
 facility, or a document's general theme. An `existing_sanction_letter` is about an existing facility and
 never supplies `requestedAmount`: `buildCandidates` drops an `explicit_request` candidate from a source not listed, and
-merge caps any that arrives by another path with `unexpected_source_type`. If stated and clean, these auto-apply like any other field.
+merge caps any that arrives by another path with `unexpected_source_type`. If stated and clean, the non-enum ones auto-apply
+like any other field. The enum ones are always `needs_verification` (`enum_review_required`).
 
 `positive_only` fields: a document can establish "yes"/"available". Absence never produces "no".
 
@@ -149,6 +188,16 @@ Group candidates by field after the checks above. `rejected_validation` candidat
 Comparison group: for `periodScoped` fields, the same normalised `period`. Different periods are **not** a conflict:
 the latest period is chosen, and older candidates are kept with `superseded_period`. An older statement's
 `annualRevenue` for exactly the prior year becomes a candidate for `previousAnnualRevenue`.
+
+**Part-year figures.** `annualFlow` fields (revenue, previous revenue, GST turnover, PAT, EBITDA, EBIT, depreciation,
+amortization, interest expense, operating cash flow, scheduled principal repayments) need a full-FY period label. A date
+other than 31 March, or part-year wording in the snippet or unit text (six months ended, Q2, H1, half year, YTD, quarter
+ended and the like), takes `part_year_period`, even if the model labelled it FY. A range or other period text normalises to
+`null` and takes `period_unknown`. A bare 31 March stays that FY, because statements head columns that way; a quarter ended 31
+March is caught only by its wording. A part-year candidate never beats a full-year one, however late: it is listed with
+`superseded_period`, and does not cap the full-year result. It feeds neither `previousAnnualRevenue`, the turnover
+cross-check, nor `profitabilityStatus`. If no full-year candidate exists, it remains as `needs_verification`. Balance-sheet
+fields keep point-in-time dates.
 
 Equality:
 
@@ -210,15 +259,16 @@ with `mirrorOf` set. Each field has its own edited state: editing one does not e
 - For a company, a report on an individual feeds `promoterCibilScore`. For `individual` or `proprietorship`, or
   when no entity type is established, it feeds `personalCibilScore`.
 - `gstTaxCompliant` from `gstComplianceStatus`: `compliant`→`yes`; `not_compliant` and `not_applicable`→`no`;
-  `not_provided` produces nothing. It keeps the source status (`gst_compliance_mirror`).
+  `not_provided` produces nothing. It keeps the source status (`gst_compliance_mirror`), which is always
+  `needs_verification`.
 
-Derivations run in `derive.ts`. Each uses stated inputs only, and is always `needs_verification` except the GST mapping.
+Derivations run in `derive.ts`. Each uses stated inputs only, and is always `needs_verification`.
 If a direct candidate exists, it wins and the derived value is not produced.
 
 | Rule | Output | Inputs and method |
 |---|---|---|
 | `vintage_from_establishment_date` | `businessVintageYears` | Full years from `identity.dateOfEstablishment` to `today`, rounded down to the nearest 0.5 |
-| `profitability_from_pat` | `profitabilityStatus` | Latest PAT < 0: `loss_making`. Latest = 0: `breakeven_or_early`. Latest > 0 and previous FY PAT > 0: `profitable_2plus_years`. Latest > 0 otherwise: `profitable_1_year` |
+| `profitability_from_pat` | `profitabilityStatus` | Latest PAT < 0: `loss_making`. Latest = 0: `breakeven_or_early`. Latest > 0 and previous FY PAT > 0: `profitable_2plus_years`. Latest > 0 otherwise: `profitable_1_year`. Nothing is derived if an input has `loss_wording`. Part-year PAT is not an input |
 | `average_monthly_from_bank_table` | `averageMonthlyBankingCredits`, `averageMonthlyBankingBalance` | Mean of `bankMonthlyTotals` for one `subjectRef`, needing 3 or more distinct months. Rounded to the rupee |
 
 ### 4.6 Required fields cannot always autofill
@@ -299,8 +349,8 @@ Details:
 type Validated<T> = { ok: true; value: T } | { ok: false; code: string };
 validatePan(raw: string): Validated<string>;
 validateGstin(raw: string): Validated<string>;
-parseIndianAmount(raw: string, ctx: { statedUnit?: AmountUnit | null; documentType: DocumentType }):
-  { ok: true; value: number; ambiguousUnit: boolean } | { ok: false; code: string };
+parseIndianAmount(raw: string, ctx: { statedUnit?: AmountUnit | null; documentType: DocumentType; amountNature?: 'limit' }):
+  { ok: true; value: number; ambiguousUnit: boolean; inlineUnit: AmountUnit | null } | { ok: false; code: string };
 parseDate(raw: string, ctx: { today: string; allowFuture?: boolean }): Validated<string>; // YYYY-MM-DD
 normalizeFinancialYear(raw: string): Validated<string>;                                    // 'FY 2024-25'
 parsePercent(raw: string): Validated<number>;
@@ -331,22 +381,31 @@ Test vectors: `27AAPFU0939F1ZV` and `29AAGCB7383J1Z4` are valid. `27ABCDE1234F1Z
 
 ### 6.3 Indian currency
 
-The model returns `rawValue` verbatim and, separately, `statedUnit` from a header such as "Rs. in lakhs". The server
-multiplies. Order:
+The model returns `rawValue` verbatim and, separately, `statedUnit` from a header such as "Rs. in lakhs", with that header
+quoted in `unitText`. The server multiplies. Order:
 
 1. Trim. Strip `₹`, `Rs`, `Rs.`, `INR`, `Re.`, and trailing `/-`, in any case. Any other currency mark (`$`, `USD`, `EUR`)
    fails with `non_inr_currency`.
 2. Negatives: `(1,234)`, `-1,234`, `1,234-`. All mean negative. In `bank_statement` only, a trailing `Dr` means negative.
-3. A trailing `Cr`/`CR` in `bank_statement` is the **credit marker**, not crore: strip it, no multiplier. Elsewhere
-   `Cr`, `Crs`, `Crore(s)` mean crore.
+3. A trailing `Cr`/`CR` on a balance or transaction amount in `bank_statement` is the **credit marker**, not crore: strip
+   it, no multiplier. On a limit (`amountNature: 'limit'`, such as `ccOdSanctionedLimit`) and elsewhere, `Cr`, `Crs`, `Crore(s)`
+   mean crore.
 4. Inline unit: `L`, `Lac(s)`, `Lakh(s)` → 1e5; `Cr...` → 1e7; `Mn`, `Million` → 1e6; `K`, `Thousand` → 1e3.
 5. Number: digits with `,` in any grouping (`12,50,000` or `1,250,000`), and at most one `.`. No other characters.
    Reject `1.250.000`, `12,5`, ranges and words.
 6. Multiplier: an inline unit beats `statedUnit`. `'000`, `Rs. in thousands` is `thousand`. Otherwise `statedUnit`, otherwise 1.
-7. Set `ambiguousUnit: true` when an inline unit differs from `statedUnit`, or when a figure below 1,000 with decimals has
-   no unit at all, outside `bank_statement` and `gst_return`. The value is still computed; the candidate takes
-   `ambiguous_unit` and is capped at `needs_verification`.
+7. Set `ambiguousUnit: true` when an inline unit differs from `statedUnit`; when a figure below 1,000 with decimals has
+   no unit at all, outside `bank_statement` and `gst_return`; when a non-zero `financial_statement` figure below 1,00,000 has
+   no unit at all; or when a limit in `bank_statement` reads `Cr` on a figure of 1,00,000 or more, which may be a credit
+   marker. The value is still computed; the candidate takes `ambiguous_unit` and is capped at `needs_verification`.
 8. Round to 2 decimal places. Then the field's `signPolicy` applies.
+
+Unit checks, in merge, for currency fields. Any failure caps at `needs_verification`:
+
+- `unit_mismatch`: a unit in `rawValue` is not beside that figure in the snippet, nor named in it (`1.25 Cr` against
+  `1.25 Lakh`). Or the snippet prints a unit beside the figure that `rawValue` dropped, or that differs from `statedUnit`.
+  Or `statedUnit` is set, and `unitText` is missing or names another unit.
+- `non_inr_unit`: a non-INR currency in the snippet, `unitText` or `rowLabel`, wherever it appears.
 
 | Input | Context | Result |
 |---|---|---|
@@ -357,6 +416,8 @@ multiplies. Order:
 | `1,250.00` | stated `thousand` | 1250000 |
 | `1,23,456.00 Cr` | `bank_statement` | 123456 |
 | `5,000.00 Dr` | `bank_statement` | -5000 |
+| `2.5 Cr` | `bank_statement`, limit | 25000000 |
+| `2,000` | `financial_statement` | 2000, `ambiguousUnit` |
 | `0` or `0.00` | | 0 |
 | `-` or `Nil` or blank | | failure; the model should omit it |
 | `USD 5,000` | | failure `non_inr_currency` |
@@ -621,7 +682,7 @@ Rules:
 - Writes are atomic: temp file in the same directory, then rename. Each session has an in-process promise queue for
   read-modify-write. `edits.json` merges by key and increments `revision`.
 - Directories `0o700`, files `0o600`, where the OS supports it.
-- Never store base64 or document text. `results/` holds snippets, and is treated as borrower data.
+- Never store base64 or document text. `results/` holds snippets, `unitText` and `rowLabel`, and is treated as borrower data.
 - `saveDatabase` is not used. Nothing from here goes into the workspace JSON, Sheets, or `/api/bootstrap`.
 
 Env vars, added to `.env.example` and `render.yaml` (`sync: false`) by storage-engineer:
@@ -694,13 +755,20 @@ prefix. Only `llmConfigured` reaches the client. Map provider errors to `Extract
   to report what is written. The instruction goes in `systemInstruction`, and is built only from the field map.
 - Never put `originalName` in a prompt. Refer to the file by its position only.
 - Spreadsheet and CSV text is delimited with a per-request random marker, and any occurrence of it is stripped from the content.
+  Hidden sheets, rows and columns are not sent to the model.
 - No tools, no URL fetching. `responseMimeType: 'application/json'` with a strict `responseSchema`; `temperature: 0`.
 - Response schema includes `suspiciousInstructions: boolean`. `prompt.ts` also runs a pattern scan on spreadsheet and CSV text, including
   hidden sheets, for phrases such as "ignore previous instructions". Either sets `injectionSuspected`, which caps every candidate of
   that document at `needs_verification`, and logs `injection_suspected`.
-- The real controls are downstream and hold even if the model is fooled: the field allowlist, validators, the snippet
-  check, section 4.2, and human review. A document cannot set `assignedOfficer`, `isFictionalDemo` or `advisorNotes`, whatever
-  the model returns.
+- The controls that hold even if the model is fooled are downstream: the field allowlist, validators, section 4.2 and human
+  review. A document cannot set `assignedOfficer`, `isFictionalDemo` or `advisorNotes`, whatever the model returns.
+- **The check against source text is only as strong as the server's own reading of the file, and that differs by file:**
+
+| File | What holds if the model is fooled or invents a value |
+|---|---|
+| `xlsx`, `csv` | The raw value must be in a visible parsed cell. The server cannot tell whether it is the right cell if the model cites the wrong row of the same figure, except through the row label it reads |
+| Digital `pdf` | The digits must be somewhere in the text layer, at document level, not at the cited place, and a number that is on the page under another label passes. The text layer can also differ from what is rendered, as with white or hidden text |
+| Scanned `pdf`, images | **No check against the source exists, because the server has no text of its own.** `snippet` and `unitText` are the model's word, and the snippet check compares the model with itself. An invented value that is confident, validates, and quotes a snippet that agrees with it **will auto-apply**. Auto-apply stays allowed here only for values that pass confidence and validation, and this is a residual risk, not a control. Mitigation is the source preview beside each field and human review. The fix, if the risk is not accepted, is to cap every `no_text` candidate at `needs_verification`, or to add server-side OCR |
 - Snippets and names render as text. No `dangerouslySetInnerHTML`. Spreadsheet preview cells are text, so a cell starting `=` does nothing.
 
 **Exposed elsewhere.** `identity.*` values live only in the authenticated store. They stay out of `customAttributes` and
@@ -728,4 +796,7 @@ copied to Sheets.
 | Negative net worth gives a negative TOL/TNW, which passes the rule engine's `> tolTnwMax` check. Autofill now preserves such negatives | Pre-existing logic in `server/ruleEngine.ts`, unowned here. Orchestrator to decide |
 | The `DSCR` input appears editable, but `buildFinancialProfile` overwrites `ratios` on save | Pre-existing. Unchanged |
 | Password-protected PDFs | Reported as `password_protected`. No password entry in v1 |
+| Scanned PDFs and images have no server-readable text, so nothing verifies their values against the source | Residual risk, section 12. Values passing confidence and validation still auto-apply |
+| `gemini.ts` can use up to 284 seconds of hung attempts and backoff, but `jobs.ts` allows 120 seconds per file | `PER_FILE_TIMEOUT_MS` should be 300 seconds, with section 7.6. Until then, a spike ends in `llm_timeout` after one hung attempt and part of a second |
+| Part-year figures labelled as a bare 31 March, with no wording in the snippet | Taken as the full year, because statements head columns that way |
 | Unsaved form values are lost on leaving the page | Pre-existing. Documents and auto-applied fields resume; typed values do not |

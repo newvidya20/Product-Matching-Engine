@@ -31,7 +31,8 @@ import {
   parseExtractionResponse,
   wrapDocumentText,
 } from './prompt.ts';
-import { buildSpreadsheetPreview, parseSpreadsheet, renderSpreadsheetText } from './spreadsheet.ts';
+import { buildSpreadsheetPreview, parseSpreadsheet, readPdfSource, renderSpreadsheetText } from './spreadsheet.ts';
+import type { DocumentSource } from './validators.ts';
 
 /** Enough to tell a balance sheet from a bank statement, and much cheaper than the whole sheet. */
 const CLASSIFICATION_TEXT_CHARS = 20_000;
@@ -45,17 +46,20 @@ interface PreparedDocument {
   classificationPart: Part;
   extractionPart: Part;
   sheetNames: string[];
+  /** What the server read itself, to check the model against. Held in memory only. */
+  source: DocumentSource;
   /** Pattern scan hit. Only spreadsheets have text to scan before the model sees them. */
   injectionInText: boolean;
 }
 
 async function prepareDocument(input: ExtractDocumentInput): Promise<PreparedDocument> {
-  const { kind, bytes } = input;
+  const { kind, bytes, signal } = input;
   if (kind !== 'xlsx' && kind !== 'csv') {
     const part: Part = {
       inlineData: { mimeType: FILE_KIND_MIME[kind], data: Buffer.from(bytes).toString('base64') },
     };
-    return { classificationPart: part, extractionPart: part, sheetNames: [], injectionInText: false };
+    const source: DocumentSource = kind === 'pdf' ? await readPdfSource(bytes, signal) : { kind: 'no_text' };
+    return { classificationPart: part, extractionPart: part, sheetNames: [], source, injectionInText: false };
   }
 
   let text;
@@ -71,6 +75,7 @@ async function prepareDocument(input: ExtractDocumentInput): Promise<PreparedDoc
     classificationPart: { text: wrapDocumentText(text.promptText.slice(0, CLASSIFICATION_TEXT_CHARS), delimiter) },
     extractionPart: { text: wrapDocumentText(text.promptText, delimiter) },
     sheetNames: text.visibleSheetNames,
+    source: { kind: 'cells', rows: text.sourceRows },
     injectionInText: containsInjectionPhrases(text.scanText),
   };
 }
@@ -147,6 +152,7 @@ async function runExtraction(input: ExtractDocumentInput): Promise<DocumentExtra
     documentType,
     kind,
     sheetNames: prepared.sheetNames,
+    source: prepared.source,
     injectionSuspected,
     today,
   };

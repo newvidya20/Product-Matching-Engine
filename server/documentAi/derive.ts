@@ -91,7 +91,10 @@ function agreedAmount(group: ExtractedField[]): number | null {
 
 function deriveProfitability(candidates: ExtractedField[]): ExtractedField[] {
   const pats = ofField(candidates, 'financialProfile.netProfitAfterTax').filter(
-    (candidate) => typeof candidate.value === 'number' && isFinancialYearLabel(candidate.period)
+    (candidate) =>
+      typeof candidate.value === 'number' &&
+      isFinancialYearLabel(candidate.period) &&
+      !candidate.reasons.includes('part_year_period')
   );
   if (pats.length === 0) return [];
 
@@ -113,6 +116,8 @@ function deriveProfitability(candidates: ExtractedField[]): ExtractedField[] {
   else value = prior !== null && prior > 0 ? 'profitable_2plus_years' : 'profitable_1_year';
 
   const inputs = latest > 0 ? [...latestGroup, ...priorGroup] : latestGroup;
+  // A positive figure beside loss wording may really be a loss, so it decides nothing.
+  if (inputs.some((input) => input.reasons.includes('loss_wording'))) return [];
   return [
     derivedCandidate({
       fieldId: 'profitabilityStatus',

@@ -60,6 +60,7 @@ function describeField(definition: FieldDefinition): string {
     parts.push(`enumValue must be exactly one of: ${definition.allowedValues.join(' / ')}`);
   }
   if (definition.periodScoped) parts.push('state its period');
+  if (definition.annualFlow) parts.push('a full financial year figure');
   if (definition.policy === 'explicit_request') {
     parts.push("only if the document states the borrower's own request in words; never infer it");
   }
@@ -80,9 +81,11 @@ export function buildExtractionInstruction(documentType: DocumentType): string {
     '2. Never calculate, convert, add up, round or infer. Report only figures printed in the document.',
     '3. rawValue is the text exactly as printed, keeping brackets, minus signs, Dr/Cr markers, currency marks and any unit beside the figure. Example: (12.50).',
     '4. statedUnit is the unit of the table or section header, such as "Rs. in lakhs" (lakh) or "\'000" (thousand). Null if there is no such header. Do not apply it yourself.',
+    '4a. unitText is that header quoted verbatim, such as "(Rs. in lakhs)", whatever currency it names. Null if there is no header. Never give statedUnit without unitText.',
     '5. snippet is a verbatim quote of at most 300 characters around the value, containing rawValue, with its row label.',
     '6. page is the 1-based PDF page. For a spreadsheet, give sheetName and cellRef as shown beside the cell. For CSV, cellRef is the row label such as row:12.',
     '7. period is the financial year, such as FY 2024-25, or the date for point-in-time data. Null if the document does not state it.',
+    '7a. A figure for part of a year, such as a quarter, six months or nine months, is never a financial year figure. Give that period as printed, such as "Six months ended 30 September 2024", and never label it FY.',
     '8. A statement with comparative columns gets one entry per period for each field.',
     '9. subjectRef is only for a bank statement (the last 4 digits of the account, never the full number) or a credit report (the name of the person or company it covers). Otherwise null.',
     '10. confidence is your certainty from 0 to 1 that rawValue is read correctly and belongs to this field.',
@@ -90,6 +93,7 @@ export function buildExtractionInstruction(documentType: DocumentType): string {
     '12. For a credit report on an individual, use financialProfile.personalCibilScore.',
     '13. bankMonthlyTotals: only monthly totals printed in the statement, one row per month and account. Do not add transactions up yourself. Leave the array empty if none are printed.',
     '14. Report only the fields listed below.',
+    '15. A figure on a row that says loss, deficit, negative or similar is reported exactly as printed, with no sign added or removed, and with that row label in the snippet. Never present a loss as a profit.',
     '',
     `This document is classified as: ${documentType}. Fields:`,
     ...fields.map(describeField),
@@ -140,6 +144,7 @@ export const EXTRACTION_SCHEMA: Schema = {
           rawValue: { type: Type.STRING, description: 'Exactly as printed' },
           enumValue: nullableString('For enum fields only: one of the allowed values'),
           statedUnit: { type: Type.STRING, nullable: true, enum: [...AMOUNT_UNITS] },
+          unitText: nullableString('The unit header, quoted verbatim'),
           confidence: { type: Type.NUMBER },
           period: nullableString('FY 2024-25 or a date'),
           subjectRef: nullableString('Account last 4, or the person a credit report covers'),
@@ -157,6 +162,7 @@ export const EXTRACTION_SCHEMA: Schema = {
           totalCredits: nullableString('As printed'),
           closingBalance: nullableString('As printed'),
           statedUnit: { type: Type.STRING, nullable: true, enum: [...AMOUNT_UNITS] },
+          unitText: nullableString('The unit header, quoted verbatim'),
           confidence: { type: Type.NUMBER },
           subjectRef: nullableString('Account last 4'),
           ...locationProperties,
@@ -220,6 +226,7 @@ export interface RawField extends RawLocation {
   rawValue: string;
   enumValue: string | null;
   statedUnit: AmountUnit | null;
+  unitText: string | null;
   confidence: number;
   period: string | null;
   subjectRef: string | null;
@@ -230,6 +237,7 @@ export interface RawBankMonth extends RawLocation {
   totalCredits: string | null;
   closingBalance: string | null;
   statedUnit: AmountUnit | null;
+  unitText: string | null;
   confidence: number;
   subjectRef: string | null;
 }
@@ -294,6 +302,7 @@ function readField(item: unknown): RawField | null {
     rawValue: record.rawValue,
     enumValue: optionalString(record.enumValue),
     statedUnit: readStatedUnit(record.statedUnit),
+    unitText: optionalString(record.unitText),
     confidence: record.confidence,
     period: optionalString(record.period),
     subjectRef: optionalString(record.subjectRef),
@@ -311,6 +320,7 @@ function readBankMonth(item: unknown): RawBankMonth | null {
     totalCredits: optionalString(record.totalCredits),
     closingBalance: optionalString(record.closingBalance),
     statedUnit: readStatedUnit(record.statedUnit),
+    unitText: optionalString(record.unitText),
     confidence: record.confidence,
     subjectRef: optionalString(record.subjectRef),
   };

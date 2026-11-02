@@ -112,7 +112,21 @@ export type FieldReasonCode =
   | 'ambiguous_unit'
   | 'period_unknown'
   | 'superseded_period'
-  | 'fallback_source';
+  | 'fallback_source'
+  /** Not found in the text the server read itself, or that text could not be read. */
+  | 'not_in_source'
+  /** An enum that a person always confirms: explicit requests and GST compliance. */
+  | 'enum_review_required'
+  /** The snippet has none of the evidence keywords defined for the option. */
+  | 'enum_no_evidence'
+  /** A positive figure on a signed field whose wording says loss, deficit or similar. */
+  | 'loss_wording'
+  /** The unit in rawValue, the stated unit, the unit text and the snippet do not agree. */
+  | 'unit_mismatch'
+  /** The snippet or unit text carries a non-INR unit. */
+  | 'non_inr_unit'
+  /** An annual flow field read from a part-year date, range or wording. */
+  | 'part_year_period';
 
 export type ExtractionErrorCode =
   | 'password_protected'
@@ -165,6 +179,15 @@ export interface SourceRef {
   snippet: string;
 }
 
+export type AmountUnit = 'rupees' | 'thousand' | 'lakh' | 'crore' | 'million';
+
+/**
+ * Outcome of checking a candidate against text the server read itself. Merge is pure and holds no
+ * document text, so this is set once at extraction and stored with the candidate.
+ * no_text: nothing to check against (image, scanned PDF). Absent reads the same.
+ */
+export type SourceCheck = 'verified' | 'failed' | 'no_text';
+
 /** One value, from one place in one document. */
 export interface ExtractedField {
   /** Stable within a document result: `${documentId}:${fieldId}:${n}`. */
@@ -182,6 +205,13 @@ export interface ExtractedField {
   period: string | null;
   /** Masked subject: account last 4, or person name for a credit report. Never a full account number. */
   subjectRef: string | null;
+  /** The model's reading of the table or page header. Null when it stated none. */
+  statedUnit?: AmountUnit | null;
+  /** Verbatim header text behind statedUnit, such as "(Rs. in lakhs)". Untrusted: render as text. */
+  unitText?: string | null;
+  sourceCheck?: SourceCheck;
+  /** Row text the server read beside the value, for signed fields only. Untrusted: render as text. */
+  rowLabel?: string | null;
   /** Present on server-computed values: the rule and the candidates it used. */
   derivation?: { ruleId: DerivationRuleId; fromCandidateIds: string[] };
 }

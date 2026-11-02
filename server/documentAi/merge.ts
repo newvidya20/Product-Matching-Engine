@@ -29,9 +29,15 @@ import { deriveCandidates } from './derive.ts';
 import type { RawBankMonth, RawField, RawLocation } from './prompt.ts';
 import {
   applySignPolicy,
+  createSourceVerifier,
   currencyEqual,
   fieldValuesEqual,
+  findEnumEvidence,
   gstinEmbeddedPan,
+  hasForeignUnit,
+  hasLossWording,
+  hasPartYearWording,
+  isFinancialYearLabel,
   normalizeComparableString,
   normalizeFinancialYear,
   normalizePeriod,
@@ -43,8 +49,14 @@ import {
   previousFinancialYear,
   rawValueInSnippet,
   significantDigits,
+  unitAgreesWithSnippet,
+  unitTextSupports,
   validateGstin,
   validatePan,
+  type AmountUnit,
+  type DocumentSource,
+  type SourceFinding,
+  type SourceVerifier,
   type Validated,
 } from './validators.ts';
 
@@ -99,11 +111,20 @@ function withinRange(definition: FieldDefinition, value: number): boolean {
   );
 }
 
+function parseFieldAmount(
+  definition: FieldDefinition,
+  rawValue: string,
+  documentType: DocumentType,
+  statedUnit: AmountUnit | null | undefined
+) {
+  return parseIndianAmount(rawValue, { statedUnit, documentType, amountNature: definition.amountNature });
+}
+
 function normalizeNumber(definition: FieldDefinition, raw: RawField, documentType: DocumentType): Normalized {
   let value: number;
   let ambiguousUnit = false;
   if (definition.unit === 'currency') {
-    const parsed = parseIndianAmount(raw.rawValue, { statedUnit: raw.statedUnit, documentType });
+    const parsed = parseFieldAmount(definition, raw.rawValue, documentType, raw.statedUnit);
     if (!parsed.ok) {
       return parsed.code === 'empty_value' ? { kind: 'absent' } : rejected;
     }
@@ -165,6 +186,8 @@ export interface DocumentContext {
   kind: AcceptedFileKind;
   /** Real sheet names, so a model-supplied name cannot point nowhere. */
   sheetNames: readonly string[];
+  /** What the server read from the file itself. Never leaves extraction. */
+  source: DocumentSource;
   injectionSuspected: boolean;
   today: string;
 }
@@ -238,6 +261,65 @@ function isNonInrRaw(definition: FieldDefinition, candidate: ExtractedField): bo
   return !parsed.ok && parsed.code === 'non_inr_currency';
 }
 
+function isReviewOnlyEnum(definition: FieldDefinition): boolean {
+  return definition.policy === 'explicit_request' || definition.alwaysReview === true;
+}
+
+/** Section 4.2: an enum is a judgement, so it needs its own evidence, or a person. */
+function enumReasons(definition: FieldDefinition, candidate: ExtractedField, value: FieldValue): FieldReasonCode[] {
+  if (isReviewOnlyEnum(definition)) return ['enum_review_required'];
+  return findEnumEvidence(definition, value, candidate.source.snippet).length > 0 ? [] : ['enum_no_evidence'];
+}
+
+/** A bank statement's trailing Cr marks a credit, except beside a limit (section 6.3). */
+function hasCreditMarker(definition: FieldDefinition, documentType: DocumentType): boolean {
+  return documentType === 'bank_statement' && definition.amountNature !== 'limit';
+}
+
+/** Section 6.3: the unit in rawValue, the stated unit and the page must all agree. */
+function unitReasons(definition: FieldDefinition, candidate: ExtractedField): FieldReasonCode[] {
+  const { snippet, documentType } = candidate.source;
+  const reasons: FieldReasonCode[] = [];
+  const unitText = candidate.unitText ?? '';
+  if (hasForeignUnit(`${snippet} ${unitText} ${candidate.rowLabel ?? ''}`)) reasons.push('non_inr_unit');
+
+  const statedUnit = candidate.statedUnit ?? null;
+  const parsed = parseFieldAmount(definition, candidate.rawValue, documentType, statedUnit);
+  const snippetAgrees =
+    !parsed.ok ||
+    unitAgreesWithSnippet({
+      rawValue: candidate.rawValue,
+      inlineUnit: parsed.inlineUnit,
+      statedUnit,
+      snippet,
+      creditMarker: hasCreditMarker(definition, documentType),
+    });
+  if (!snippetAgrees || (statedUnit !== null && !unitTextSupports(statedUnit, candidate.unitText))) {
+    reasons.push('unit_mismatch');
+  }
+  return reasons;
+}
+
+/** Section 4.3: only a full-year figure may fill an annual flow field. */
+function isPartYear(definition: FieldDefinition, candidate: ExtractedField): boolean {
+  if (!definition.annualFlow) return false;
+  if (candidate.period !== null && !isFinancialYearLabel(candidate.period)) return true;
+  return hasPartYearWording(`${candidate.source.snippet} ${candidate.unitText ?? ''}`);
+}
+
+/** The checks that read the document's wording. A derived value has no wording of its own. */
+function wordingReasons(definition: FieldDefinition, candidate: ExtractedField, value: FieldValue): FieldReasonCode[] {
+  const reasons: FieldReasonCode[] = [];
+  if (definition.valueType === 'enum') reasons.push(...enumReasons(definition, candidate, value));
+  if (definition.unit === 'currency') reasons.push(...unitReasons(definition, candidate));
+  if (isPartYear(definition, candidate)) reasons.push('part_year_period');
+  const wording = `${candidate.source.snippet} ${candidate.rowLabel ?? ''}`;
+  if (definition.signPolicy === 'signed' && typeof value === 'number' && value > 0 && hasLossWording(wording)) {
+    reasons.push('loss_wording');
+  }
+  return reasons;
+}
+
 function snippetShowsValue(definition: FieldDefinition, candidate: ExtractedField): boolean {
   const { snippet } = candidate.source;
   if (definition.valueType === 'enum') return snippet.trim().length > 0;
@@ -281,6 +363,10 @@ export function settleCandidate(
   if (ctx.injectedDocuments.has(candidate.source.documentId)) reasons.add('injection_suspected');
   if (!isDerived && definition.periodScoped && candidate.period === null) reasons.add('period_unknown');
   if (isDerived) reasons.add('derived_value');
+  if (candidate.sourceCheck === 'failed') reasons.add('not_in_source');
+  if (!isDerived && value !== null) {
+    for (const reason of wordingReasons(definition, candidate, value)) reasons.add(reason);
+  }
 
   const capped = reasons.size > 0 || definition.target.kind === 'review_only';
   return {
@@ -289,6 +375,34 @@ export function settleCandidate(
     reasons: [...reasons],
     status: isRejected ? 'rejected_validation' : capped ? 'needs_verification' : 'auto_applied',
   };
+}
+
+/** Compares the candidate with what the server read. The answer travels with it, since merge cannot. */
+function checkAgainstSource(
+  verify: SourceVerifier,
+  definition: FieldDefinition,
+  raw: RawField,
+  source: SourceRef,
+  value: FieldValue | null
+): SourceFinding {
+  if (value === null) return { check: 'no_text', rowLabel: null };
+  const parsed =
+    definition.unit === 'currency'
+      ? parseFieldAmount(definition, raw.rawValue, source.documentType, raw.statedUnit)
+      : null;
+  return verify({
+    valueType: definition.valueType,
+    rawValue: raw.rawValue,
+    value,
+    snippet: source.snippet,
+    unitText: raw.unitText,
+    sheetName: source.sheetName,
+    cellRef: source.cellRef,
+    inlineUnit: parsed?.ok ? parsed.inlineUnit : null,
+    creditMarker: hasCreditMarker(definition, source.documentType),
+    evidence: definition.valueType === 'enum' ? findEnumEvidence(definition, value, source.snippet) : [],
+    wantRowLabel: definition.signPolicy === 'signed',
+  });
 }
 
 /** Parses and normalises the model's output. The status set here is provisional: merge re-settles it. */
@@ -303,6 +417,7 @@ export function buildCandidates(
     today: ctx.today,
     injectedDocuments: new Set(ctx.injectionSuspected ? [ctx.documentId] : []),
   };
+  const verify = createSourceVerifier(ctx.source);
   let droppedLowConfidence = 0;
 
   for (const raw of rawFields) {
@@ -327,14 +442,18 @@ export function buildCandidates(
     const n = counters.get(definition.fieldId) ?? 0;
     counters.set(definition.fieldId, n + 1);
 
+    const source = buildSource(raw, ctx);
+    const value = isValue ? normalized.value : null;
+    const finding = checkAgainstSource(verify, definition, raw, source, value);
+
     const settled = settleCandidate(
       {
         candidateId: `${ctx.documentId}:${definition.fieldId}:${n}`,
         fieldId: definition.fieldId,
-        value: isValue ? normalized.value : null,
+        value,
         rawValue: raw.rawValue,
         confidence,
-        source: buildSource(raw, ctx),
+        source,
         status: 'needs_verification',
         reasons: isValue && normalized.ambiguousUnit ? ['ambiguous_unit'] : [],
         period:
@@ -342,6 +461,10 @@ export function buildCandidates(
             ? String(normalized.value)
             : normalizePeriod(raw.period, ctx.today),
         subjectRef: maskSubjectRef(raw.subjectRef, ctx.documentType),
+        statedUnit: raw.statedUnit,
+        unitText: raw.unitText,
+        sourceCheck: finding.check,
+        rowLabel: finding.rowLabel,
       },
       settleContext
     );
@@ -350,16 +473,34 @@ export function buildCandidates(
   return { fields, droppedLowConfidence };
 }
 
-function parseBankAmount(raw: string | null, row: RawBankMonth): number | null {
+function parseBankAmount(raw: string | null, row: RawBankMonth, verify: SourceVerifier): number | null {
   if (raw === null) return null;
   const parsed = parseIndianAmount(raw, { statedUnit: row.statedUnit, documentType: 'bank_statement' });
+  if (!parsed.ok || parsed.ambiguousUnit) return null;
+  if (hasForeignUnit(`${row.snippet} ${row.unitText ?? ''}`)) return null;
+  if (row.statedUnit !== null && !unitTextSupports(row.statedUnit, row.unitText)) return null;
   // The figure must be on the page the snippet quotes. A model total that is not there is a guess.
-  return parsed.ok && !parsed.ambiguousUnit && rawValueInSnippet(raw, row.snippet, 'number') ? parsed.value : null;
+  if (!rawValueInSnippet(raw, row.snippet, 'number')) return null;
+  const finding = verify({
+    valueType: 'number',
+    rawValue: raw,
+    value: parsed.value,
+    snippet: row.snippet,
+    unitText: row.unitText,
+    sheetName: row.sheetName,
+    cellRef: row.cellRef,
+    inlineUnit: parsed.inlineUnit,
+    creditMarker: true,
+    evidence: [],
+    wantRowLabel: false,
+  });
+  return finding.check === 'failed' ? null : parsed.value;
 }
 
 /** The server parses the amounts. Rows that say nothing usable are dropped, never repaired. */
 export function buildBankMonthlyTotals(rows: RawBankMonth[], ctx: DocumentContext): BankMonthlyTotal[] {
   if (ctx.documentType !== 'bank_statement') return [];
+  const verify = createSourceVerifier(ctx.source);
   const totals: BankMonthlyTotal[] = [];
   for (const row of rows) {
     const confidence = roundConfidence(row.confidence);
@@ -367,8 +508,8 @@ export function buildBankMonthlyTotals(rows: RawBankMonth[], ctx: DocumentContex
     const month = row.month.trim();
     const monthStart = /^\d{4}-(?:0[1-9]|1[0-2])$/.test(month) ? `${month}-01` : null;
     if (!monthStart || monthStart > ctx.today) continue;
-    const totalCredits = parseBankAmount(row.totalCredits, row);
-    const closingBalance = parseBankAmount(row.closingBalance, row);
+    const totalCredits = parseBankAmount(row.totalCredits, row, verify);
+    const closingBalance = parseBankAmount(row.closingBalance, row, verify);
     if (totalCredits === null && closingBalance === null) continue;
     totals.push({
       month,
@@ -571,6 +712,11 @@ function resolveField(
     };
   }
 
+  // Section 4.3: a part-year figure never beats a full-year one, and never casts doubt on it.
+  const fullYear = eligible.filter((candidate) => !candidate.reasons.includes('part_year_period'));
+  const contenders = fullYear.length > 0 ? fullYear : eligible;
+  const setAside = new Set(eligible.filter((candidate) => !contenders.includes(candidate)));
+
   // Runs before the period logic: two accounts are not two periods of one account.
   const subjects = new Set(
     eligible.flatMap((candidate) =>
@@ -578,7 +724,7 @@ function resolveField(
     )
   );
   if (subjects.size > 1) {
-    const suggested = strongest(fieldId, eligible, facts);
+    const suggested = strongest(fieldId, contenders, facts);
     return {
       multipleSubjects: true,
       result: {
@@ -596,11 +742,13 @@ function resolveField(
     };
   }
 
-  let group = eligible;
-  let listed = candidates;
+  let group = contenders;
+  let listed = candidates.map((candidate) =>
+    setAside.has(candidate) ? { ...candidate, reasons: [...candidate.reasons, 'superseded_period' as const] } : candidate
+  );
   let undated: ExtractedField[] = [];
   if (isPeriodGrouped(definition)) {
-    const dated = eligible.filter((candidate) => periodEndDate(candidate.period) !== null);
+    const dated = contenders.filter((candidate) => periodEndDate(candidate.period) !== null);
     if (dated.length > 0) {
       const latestEnd = dated.reduce(
         (latest, candidate) => {
@@ -610,10 +758,11 @@ function resolveField(
         ''
       );
       group = dated.filter((candidate) => periodEndDate(candidate.period) === latestEnd);
-      undated = eligible.filter((candidate) => periodEndDate(candidate.period) === null);
+      undated = contenders.filter((candidate) => periodEndDate(candidate.period) === null);
       listed = candidates.map((candidate) => {
         const end = periodEndDate(candidate.period);
-        return end !== null && end < latestEnd && candidate.status !== 'rejected_validation'
+        const superseded = end !== null && end < latestEnd && candidate.status !== 'rejected_validation';
+        return superseded || setAside.has(candidate)
           ? { ...candidate, reasons: [...candidate.reasons, 'superseded_period' as const] }
           : candidate;
       });
@@ -661,7 +810,10 @@ function resolveField(
 /** An older statement's revenue, for exactly the prior year, is that year's previous revenue. */
 function previousRevenueCandidates(candidates: ExtractedField[]): ExtractedField[] {
   const revenues = candidates.filter(
-    (candidate) => candidate.fieldId === FIELD.revenue && candidate.status !== 'rejected_validation'
+    (candidate) =>
+      candidate.fieldId === FIELD.revenue &&
+      candidate.status !== 'rejected_validation' &&
+      !candidate.reasons.includes('part_year_period')
   );
   const latestPeriod = revenues.reduce<string | null>((latest, candidate) => {
     const end = periodEndDate(candidate.period);
@@ -739,12 +891,12 @@ function applyTurnoverCrossCheck(
   const chosen = revenue.candidates.find((candidate) => candidate.candidateId === revenue.suggestedCandidateId);
   if (!chosen?.period || typeof revenue.value !== 'number') return mirror;
 
-  const eligibleRevenue = revenue.candidates.filter(
-    (candidate) => candidate.period === chosen.period && candidate.status !== 'rejected_validation'
-  );
-  const eligibleGst = gst.candidates.filter(
-    (candidate) => candidate.period === chosen.period && candidate.status !== 'rejected_validation'
-  );
+  const comparable = (candidate: ExtractedField) =>
+    candidate.period === chosen.period &&
+    candidate.status !== 'rejected_validation' &&
+    !candidate.reasons.includes('part_year_period');
+  const eligibleRevenue = revenue.candidates.filter(comparable);
+  const eligibleGst = gst.candidates.filter(comparable);
   const differs = eligibleGst.some(
     (candidate) => !currencyEqual(revenue.value as number, candidate.value as number)
   );

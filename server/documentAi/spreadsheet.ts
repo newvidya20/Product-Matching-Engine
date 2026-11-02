@@ -1,10 +1,11 @@
 /**
- * XLSX and CSV reading for Document AI. Uses JSZip directly, because the parser in
- * server/pdfExtractionService.ts is private and drops sheet names and cell references.
- * Throws on a corrupt file with JSZip's own text: pipeline.ts maps that to a code and drops it.
+ * What the server reads from a file by itself: XLSX, CSV and the PDF text layer. Uses JSZip directly,
+ * because the parser in server/pdfExtractionService.ts is private and drops sheet names and cell
+ * references. Throws on a corrupt spreadsheet with JSZip's own text: pipeline.ts maps that to a code.
  */
 import JSZip from 'jszip';
 import { DOCUMENT_AI_LIMITS, type SpreadsheetPreview } from '../../src/types/documentAi.ts';
+import type { DocumentSource, SourceRow } from './validators.ts';
 
 export interface SheetCell {
   /** 'B12' for XLSX, 'row:12' for CSV. */
@@ -12,12 +13,16 @@ export interface SheetCell {
   /** 0-based. */
   column: number;
   text: string;
+  /** In a hidden column. */
+  hidden?: boolean;
 }
 
 export interface SheetRow {
   /** 1-based, as the file numbers it. */
   rowNumber: number;
   cells: SheetCell[];
+  /** Hidden in the file, or of zero height. */
+  hidden?: boolean;
 }
 
 export interface ParsedSheet {
@@ -85,6 +90,9 @@ function columnLetters(index: number): string {
 
 // ------------------------------------------------------------------- Workbook
 
+/** The last column an XLSX sheet can have. Stops a forged `max` from looping forever. */
+const MAX_SHEET_COLUMNS = 16_384;
+
 const BUILTIN_DATE_FORMATS = new Set([14, 15, 16, 17, 18, 19, 20, 21, 22, 27, 30, 36, 45, 46, 47, 50, 57]);
 
 function isDateFormatCode(code: string): boolean {
@@ -149,14 +157,31 @@ function readCellText(attributes: Record<string, string>, inner: string, ctx: Wo
   }
 }
 
+function isHiddenFlag(value: string | undefined): boolean {
+  return value === '1' || value === 'true';
+}
+
+function readHiddenColumns(xml: string): Set<number> {
+  const hidden = new Set<number>();
+  for (const match of xml.matchAll(/<(?:\w+:)?col\b([^>]*?)\/?>/g)) {
+    const attributes = readAttributes(match[1]);
+    if (!isHiddenFlag(attributes.hidden)) continue;
+    const last = Math.min(Number(attributes.max) || 0, MAX_SHEET_COLUMNS);
+    for (let column = Number(attributes.min) || 1; column <= last; column += 1) hidden.add(column - 1);
+  }
+  return hidden;
+}
+
 function readSheetRows(xml: string, ctx: WorkbookContext): SheetRow[] {
   const rows: SheetRow[] = [];
+  const hiddenColumns = readHiddenColumns(xml);
   // Empty elements are self-closing. A `<c[\s>]...</c>` match would swallow the next cell.
   const rowPattern = /<(?:\w+:)?row\b([^>]*?)(?:\/>|>([\s\S]*?)<\/(?:\w+:)?row>)/g;
   const cellPattern = /<(?:\w+:)?c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/(?:\w+:)?c>)/g;
   let previousRow = 0;
   for (const rowMatch of xml.matchAll(rowPattern)) {
-    const rowNumber = Number(readAttributes(rowMatch[1]).r) || previousRow + 1;
+    const rowAttributes = readAttributes(rowMatch[1]);
+    const rowNumber = Number(rowAttributes.r) || previousRow + 1;
     previousRow = rowNumber;
     if (!rowMatch[2]) continue;
     const cells: SheetCell[] = [];
@@ -167,9 +192,14 @@ function readSheetRows(xml: string, ctx: WorkbookContext): SheetRow[] {
       const column = letters ? columnIndex(letters) : nextColumn;
       nextColumn = column + 1;
       const text = cellMatch[2] ? readCellText(attributes, cellMatch[2], ctx).trim() : '';
-      if (text) cells.push({ ref: `${columnLetters(column)}${rowNumber}`, column, text });
+      if (text) {
+        const cell: SheetCell = { ref: `${columnLetters(column)}${rowNumber}`, column, text };
+        cells.push(hiddenColumns.has(column) ? { ...cell, hidden: true } : cell);
+      }
     }
-    if (cells.length > 0) rows.push({ rowNumber, cells });
+    const zeroHeight = rowAttributes.ht !== undefined && Number(rowAttributes.ht) === 0;
+    const hidden = isHiddenFlag(rowAttributes.hidden) || zeroHeight;
+    if (cells.length > 0) rows.push(hidden ? { rowNumber, cells, hidden } : { rowNumber, cells });
   }
   return rows;
 }
@@ -291,15 +321,28 @@ function renderSheet(sheet: ParsedSheet, kind: 'xlsx' | 'csv'): string {
 }
 
 export interface SpreadsheetText {
-  /** Visible sheets only, capped. Hidden sheets feed nothing a reviewer cannot see on the page. */
+  /** Visible cells only, capped. Hidden content feeds nothing a reviewer cannot see on the page. */
   promptText: string;
   /** Every sheet, hidden included, uncapped. For the injection scan only. */
   scanText: string;
   visibleSheetNames: string[];
+  /** Visible cells, so a value that exists only in a hidden row fails the source check. */
+  sourceRows: SourceRow[];
+}
+
+function visiblePart(sheet: ParsedSheet): ParsedSheet {
+  const rows = sheet.rows
+    .filter((row) => !row.hidden)
+    .map((row) => ({ ...row, cells: row.cells.filter((cell) => !cell.hidden) }))
+    .filter((row) => row.cells.length > 0);
+  return { ...sheet, rows };
 }
 
 export function renderSpreadsheetText(parsed: ParsedSpreadsheet): SpreadsheetText {
-  const visible = parsed.sheets.filter((sheet) => !sheet.hidden && sheet.rows.length > 0);
+  const visible = parsed.sheets
+    .filter((sheet) => !sheet.hidden)
+    .map(visiblePart)
+    .filter((sheet) => sheet.rows.length > 0);
   return {
     promptText: visible
       .map((sheet) => renderSheet(sheet, parsed.kind))
@@ -307,7 +350,106 @@ export function renderSpreadsheetText(parsed: ParsedSpreadsheet): SpreadsheetTex
       .slice(0, MAX_PROMPT_TEXT_CHARS),
     scanText: parsed.sheets.map((sheet) => renderSheet(sheet, parsed.kind)).join('\n\n'),
     visibleSheetNames: visible.map((sheet) => sheet.name),
+    sourceRows: visible.flatMap((sheet) =>
+      sheet.rows.map((row) => ({
+        sheetName: sheet.name,
+        cells: row.cells.map(({ ref, text }) => ({ ref, text })),
+      }))
+    ),
   };
+}
+
+// ------------------------------------------------------------------ PDF text layer
+
+/** Below this, a PDF has no real text layer: a scanner's watermark, say. */
+const MIN_PDF_TEXT_CHARS = 50;
+const PDF_READ_TIMEOUT_MS = 20_000;
+
+interface PdfTextRun {
+  text: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Rebuilds printed lines. pdf.js can split one figure into several items, and a stray space would
+ * break `12,50,000` into tokens that match nothing, so only a real gap counts as a space.
+ */
+export function assemblePdfLines(runs: readonly PdfTextRun[]): string[] {
+  const byLine = new Map<number, PdfTextRun[]>();
+  for (const run of runs) {
+    const key = Math.round(run.y);
+    byLine.set(key, [...(byLine.get(key) ?? []), run]);
+  }
+  return [...byLine.entries()]
+    .sort(([a], [b]) => b - a)
+    .map(([, line]) => {
+      let text = '';
+      let end = Number.NEGATIVE_INFINITY;
+      for (const run of [...line].sort((a, b) => a.x - b.x)) {
+        if (text && run.x - end > 0.2 * Math.max(run.height, 1)) text += ' ';
+        text += run.text;
+        end = run.x + run.width;
+      }
+      return text.trim();
+    })
+    .filter(Boolean);
+}
+
+async function readPdfLines(bytes: Uint8Array, signal: AbortSignal): Promise<string[]> {
+  const { getDocument } = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  // pdf.js detaches the buffer it is given, and these bytes still go to the model.
+  const task = getDocument({
+    data: bytes.slice(),
+    disableFontFace: true,
+    useSystemFonts: false,
+    verbosity: 0,
+  });
+  try {
+    const document = await task.promise;
+    const lines: string[] = [];
+    for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
+      if (signal.aborted) throw new DOMException('Extraction was aborted.', 'AbortError');
+      const page = await document.getPage(pageNumber);
+      const content = await page.getTextContent();
+      const runs = content.items.flatMap((item): PdfTextRun[] =>
+        'str' in item && item.str
+          ? [{ text: item.str, x: item.transform[4], y: item.transform[5], width: item.width, height: item.height }]
+          : []
+      );
+      lines.push(...assemblePdfLines(runs));
+      page.cleanup();
+    }
+    return lines;
+  } finally {
+    await task.destroy();
+  }
+}
+
+/**
+ * The text layer of a PDF. A scan has none, which is `no_text`. A parse failure or timeout is
+ * `unreadable`, never `no_text`: a file must not escape the check by breaking the parser.
+ */
+export async function readPdfSource(bytes: Uint8Array, signal: AbortSignal): Promise<DocumentSource> {
+  const timeout = AbortSignal.timeout(PDF_READ_TIMEOUT_MS);
+  const stop = AbortSignal.any([signal, timeout]);
+  let onStop = () => {};
+  const stopped = new Promise<never>((_, reject) => {
+    onStop = () => reject(new DOMException('PDF read stopped.', 'AbortError'));
+    stop.addEventListener('abort', onStop, { once: true });
+  });
+  try {
+    const lines = await Promise.race([readPdfLines(bytes, stop), stopped]);
+    const characters = lines.join('').replace(/\s/g, '').length;
+    return characters < MIN_PDF_TEXT_CHARS ? { kind: 'no_text' } : { kind: 'pdf', lines };
+  } catch {
+    if (signal.aborted) throw new DOMException('Extraction was aborted.', 'AbortError');
+    return { kind: 'unreadable' };
+  } finally {
+    stop.removeEventListener('abort', onStop);
+  }
 }
 
 /** Rows and columns keep their real positions, so a cellRef from Review can be found by eye. */
