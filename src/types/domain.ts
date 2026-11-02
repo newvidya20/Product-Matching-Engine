@@ -443,6 +443,8 @@ export interface BorrowerAssessment {
   advisorNotes: string;
   customAttributes: KeyValueAttribute[];
   financialProfile?: BorrowerFinancialProfile;
+  /** Sent on create/update to link a Document AI session. See docs/contracts.md section 8. */
+  documentSessionId?: string;
   status: AssessmentStatus;
   isFictionalDemo: boolean;
   createdAt: string;
