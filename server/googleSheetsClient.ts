@@ -550,6 +550,17 @@ function createCellReader(
   };
 }
 
+/** Zero-based column index to A1 letters (0 -> A, 26 -> AA). */
+function sheetColumnLetters(index: number): string {
+  let n = index;
+  let out = '';
+  do {
+    out = String.fromCharCode(65 + (n % 26)) + out;
+    n = Math.floor(n / 26) - 1;
+  } while (n >= 0);
+  return out;
+}
+
 interface SpreadsheetMetadataResponse {
   spreadsheetId: string;
   spreadsheetUrl?: string;
@@ -748,6 +759,7 @@ export class GoogleSheetsApiClient {
     );
 
     const headerUpdates: Array<{ range: string; values: string[][] }> = [];
+    const gridExpansions: Array<Record<string, unknown>> = [];
     ALL_REQUIRED_TAB_NAMES.forEach((tabName, idx) => {
       const existingRows = checkValues.valueRanges?.[idx]?.values || [];
       if (existingRows.length === 0) {
@@ -775,9 +787,40 @@ export class GoogleSheetsApiClient {
             range: `'${tabName}'!A1`,
             values: [canonical],
           });
+        } else if (missingAny) {
+          // Tab has data rows: only append missing trailing headers, and only when the existing header row is
+          // an exact leading run of the canonical one. Data rows are never touched.
+          const isPrefix =
+            row1.length > 0 &&
+            row1.length < canonical.length &&
+            row1.every((c, i) => c === canonical[i].toLowerCase());
+          if (isPrefix) {
+            headerUpdates.push({
+              range: `'${tabName}'!${sheetColumnLetters(row1.length)}1`,
+              values: [canonical.slice(row1.length)],
+            });
+            const grid = (meta.sheets || []).find((sh) => sh.properties?.title === tabName)?.properties;
+            const have = grid?.gridProperties?.columnCount;
+            if (typeof grid?.sheetId === 'number' && typeof have === 'number' && have < canonical.length) {
+              gridExpansions.push({
+                appendDimension: {
+                  sheetId: grid.sheetId,
+                  dimension: 'COLUMNS',
+                  length: canonical.length - have,
+                },
+              });
+            }
+          }
         }
       }
     });
+
+    if (gridExpansions.length > 0) {
+      await this.request(
+        `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}:batchUpdate`,
+        { method: 'POST', body: JSON.stringify({ requests: gridExpansions }) }
+      );
+    }
 
     if (headerUpdates.length > 0) {
       await this.request(

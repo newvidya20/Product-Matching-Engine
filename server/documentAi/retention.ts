@@ -35,10 +35,9 @@ export async function runRetention(now: Date = new Date()): Promise<{ files: num
           continue;
         }
         for (const doc of await listDocuments(sessionId)) {
-          if (doc.fileDeletedAt) continue;
+          // Documents already deleted by a user still have results and snippets to expire.
           if (new Date(doc.uploadedAt).getTime() < fileCutoff) {
-            await expireDocument(sessionId, doc.documentId);
-            files += 1;
+            if (await expireDocument(sessionId, doc.documentId)) files += 1;
           }
         }
       } catch {

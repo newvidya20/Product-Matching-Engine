@@ -22,6 +22,8 @@ services:
         sync: false
       - key: DOCUMENT_AI_ADMIN_CODE
         sync: false
+      - key: DOCUMENT_AI_SESSION_SECRET
+        generateValue: true
       - key: DOCUMENT_AI_DATA_DIR
         sync: false
       - key: DOCUMENT_AI_ENABLED

@@ -390,13 +390,16 @@ trusted, so document routes get a server-held secret.
   `crypto.timingSafeEqual` over SHA-256 digests.
 - `POST /auth/session` with `CreateAuthSessionRequest`. On success set cookie `lb_docai_session`:
   `HttpOnly; SameSite=Strict; Path=/api/document-ai; Max-Age=43200`, plus `Secure` when `NODE_ENV=production`.
-- Value: `v1.<base64url JSON {sub, email, name, role, exp}>.<base64url HMAC-SHA256>`. The key is
-  SHA-256 of `lb-docai-session:` + access code + admin code, so changing a code ends every session. The middleware
+- Value: `v1.<base64url JSON {sub, email, name, role, exp}>.<base64url HMAC-SHA256>`. The payload also holds `cv`, a keyed
+  digest of the role's current code, so changing a code ends that role's sessions. The HMAC key is a dedicated secret,
+  never derived from a code: `DOCUMENT_AI_SESSION_SECRET` if set, otherwise a random secret generated once and persisted
+  with mode 0600 as `session-secret` under the data dir. With no admin code, no admin session can exist. The middleware
   parses the `Cookie` header by hand; no cookie-parser.
 - `actorEmail` and `actorDisplayName` come from the client's `currentUser`. They are attribution only, marked as
   self-reported, and carry no privilege.
-- Throttle: 10 failed attempts per 15 minutes, per process, then 429 `too_many_attempts`. Behind Render's proxy, `req.ip`
-  is unreliable, so the counter is global.
+- Throttle: 10 failed attempts per 15 minutes per client, then 429 `too_many_attempts` for that client, plus a global
+  ceiling of 200 failures per 15 minutes so one client cannot block everyone. The client key is the socket address
+  locally, and the last `X-Forwarded-For` hop (the one Render's proxy appends) when `NODE_ENV=production`. Per process.
 - Middleware `requireDocumentAuth`, in `auth.ts`, guards everything except `GET /auth/status`, `POST /auth/session`, and
   `POST /auth/logout`. It sets `res.locals.documentActor: DocumentActor`. All authenticated staff can reach all
   sessions, as the app has no per-user scoping.

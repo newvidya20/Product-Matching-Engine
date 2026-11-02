@@ -33,12 +33,14 @@ import {
 import { extractPolicyDraftFromPdfBase64 } from './server/pdfExtractionService.ts';
 import { createDocumentAiRouter } from './server/documentAi/router.ts';
 import { logActivity } from './server/documentAi/activity.ts';
+import { hasValidDocumentSession } from './server/documentAi/auth.ts';
 import { recoverInterruptedJobs } from './server/documentAi/jobs.ts';
 import { startRetention } from './server/documentAi/retention.ts';
 import {
   initStore as initDocumentAiStore,
   linkSessionToAssessment,
   purgeSessionForAssessment,
+  unlinkSessionForAssessment,
 } from './server/documentAi/store.ts';
 import { DOCUMENT_SESSION_ID_PATTERN } from './src/types/documentAi.ts';
 import type {
@@ -2602,8 +2604,12 @@ async function startServer() {
           );
         }
         saveDatabase(db);
-        const purgedSessionId = await purgeSessionForAssessment(assessmentId);
-        if (purgedSessionId) {
+        // Requires a valid Document AI session to purge KYC files; otherwise only unlink and leave retention to expire them.
+        const mayPurge = hasValidDocumentSession(req);
+        const purgedSessionId = mayPurge
+          ? await purgeSessionForAssessment(assessmentId)
+          : await unlinkSessionForAssessment(assessmentId);
+        if (purgedSessionId && mayPurge) {
           void logActivity({
             type: 'unlinked_session_purged',
             actor: authCtx.user?.email || 'system',

@@ -24,6 +24,7 @@ import type {
   DocumentExtractionSuccess,
   DocumentSessionRecord,
   DocumentSessionState,
+  DocumentType,
   ExtractionJob,
   MergeSessionOutput,
   SessionEdits,
@@ -295,6 +296,28 @@ export async function purgeSessionForAssessment(assessmentId: string): Promise<s
   }
 }
 
+/** Unlinks the session of a deleted assessment but leaves its files to retention. Never throws. */
+export async function unlinkSessionForAssessment(assessmentId: string): Promise<string | null> {
+  try {
+    const rec = await findSessionByAssessment(assessmentId);
+    if (!rec) return null;
+    return await withSessionLock(rec.sessionId, async () => {
+      const cur = await getSession(rec.sessionId);
+      if (!cur || cur.assessmentId !== assessmentId) return null;
+      await writeJson(sessionFile(rec.sessionId), {
+        ...cur,
+        assessmentId: null,
+        linkedAt: null,
+        updatedAt: new Date().toISOString(),
+      });
+      if (assessmentIndex.get(assessmentId) === rec.sessionId) assessmentIndex.delete(assessmentId);
+      return rec.sessionId;
+    });
+  } catch {
+    return null;
+  }
+}
+
 // ------------------------------------------------------------- documents
 
 export async function listDocuments(sessionId: string): Promise<StoredDocument[]> {
@@ -334,7 +357,7 @@ export async function addDocument(args: {
   return withSessionLock(args.sessionId, async () => {
     const { created } = await createSessionUnlocked(args.sessionId, args.actorEmail);
     const docs = await listDocuments(args.sessionId);
-    const dup = docs.find((d) => d.sha256 === sha256);
+    const dup = docs.find((d) => d.sha256 === sha256 && !d.fileDeletedAt);
     if (dup) return { ok: true as const, document: dup, duplicate: true, sessionCreated: created };
     const live = docs.filter((d) => !d.fileDeletedAt);
     if (live.length >= DOCUMENT_AI_LIMITS.maxFilesPerSession) {
@@ -459,7 +482,8 @@ export function saveResultAndRemerge(
 ): Promise<StoredDocument | null> {
   return withSessionLock(sessionId, async () => {
     const d = await getDocument(sessionId, documentId);
-    if (!d) return null; // deleted mid-job: discard
+    // Deleted (any mode) or expired mid-job: discard. The record outlives a delete, so check the marker.
+    if (!d || d.fileDeletedAt) return null;
     await writeJson(resultFile(sessionId, documentId), result);
     mutateDoc(d);
     await writeJson(docFile(sessionId, documentId), d);
@@ -532,17 +556,53 @@ export function deleteDocumentFile(
   });
 }
 
-/** Retention: bytes and result gone, record kept with reason, re-merged. Edits are left alone. */
-export function expireDocument(sessionId: string, documentId: string): Promise<void> {
+/**
+ * Retention: bytes and result gone, record kept with reason, re-merged. Edits are left alone.
+ * A document already deleted by a user keeps its original reason, but its result is still expired.
+ * Returns true if anything was removed.
+ */
+export function expireDocument(sessionId: string, documentId: string): Promise<boolean> {
   return withSessionLock(sessionId, async () => {
     const doc = await getDocument(sessionId, documentId);
-    if (!doc) return;
+    if (!doc) return false;
+    const hadResult = (await getResult(sessionId, documentId)) !== null;
+    if (doc.fileDeletedAt && !hadResult) return false;
     await removeBytes(doc);
     await fsp.rm(resultFile(sessionId, documentId), { force: true });
-    doc.fileDeletedAt = doc.fileDeletedAt || new Date().toISOString();
-    doc.fileDeletedReason = 'retention';
+    if (!doc.fileDeletedAt) {
+      doc.fileDeletedAt = new Date().toISOString();
+      doc.fileDeletedReason = 'retention';
+    }
+    if (doc.status === 'extracted') doc.status = 'uploaded';
     await writeJson(docFile(sessionId, documentId), doc);
     await remergeUnlocked(sessionId);
+    return true;
+  });
+}
+
+/**
+ * Document type override: rewrites the stored result's type (document and every candidate source) so the
+ * result never carries the old type, then re-merges (docs/contracts.md section 2).
+ */
+export function overrideDocumentType(
+  sessionId: string,
+  documentId: string,
+  documentType: DocumentType
+): Promise<StoredDocument | null> {
+  return withSessionLock(sessionId, async () => {
+    const doc = await getDocument(sessionId, documentId);
+    if (!doc) return null;
+    doc.documentType = documentType;
+    doc.documentTypeOverridden = true;
+    await writeJson(docFile(sessionId, documentId), doc);
+    const result = await getResult(sessionId, documentId);
+    if (result && result.ok) {
+      result.documentType = documentType;
+      for (const f of result.fields) f.source.documentType = documentType;
+      await writeJson(resultFile(sessionId, documentId), result);
+    }
+    await remergeUnlocked(sessionId);
+    return doc;
   });
 }
 

@@ -29,7 +29,7 @@ import type {
 import { logActivity } from './activity.ts';
 import { authStatus, createAuthSession, getActor, logout, requireDocumentAuth, sendError } from './auth.ts';
 import { validateUpload } from './fileValidation.ts';
-import { JobInProgressError, startExtraction } from './jobs.ts';
+import { abortDocumentExtraction, JobInProgressError, startExtraction } from './jobs.ts';
 import { readSpreadsheetPreview } from './pipeline.ts';
 import {
   addDocument,
@@ -50,7 +50,7 @@ import {
   readFileBytes,
   sanitizeOriginalName,
   saveSettings,
-  updateDocument,
+  overrideDocumentType,
   updateEdits,
 } from './store.ts';
 
@@ -263,10 +263,7 @@ export function createDocumentAiRouter(options: DocumentAiRouterOptions): expres
     if (typeof documentType !== 'string' || !(DOCUMENT_TYPES as readonly string[]).includes(documentType)) {
       return sendError(res, 400, 'invalid_request', 'documentType is not recognised.');
     }
-    const updated = await updateDocument(sessionId, documentId, (d) => {
-      d.documentType = documentType as DocumentType;
-      d.documentTypeOverridden = true;
-    });
+    const updated = await overrideDocumentType(sessionId, documentId, documentType as DocumentType);
     if (!updated) return sendError(res, 404, 'not_found', 'Document not found.');
     void logActivity({
       type: 'document_type_overridden',
@@ -321,7 +318,12 @@ export function createDocumentAiRouter(options: DocumentAiRouterOptions): expres
     }
     const bytes = await readFileBytes(doc);
     if (!bytes) return sendError(res, 404, 'file_missing', 'The file is no longer stored.');
-    const preview = await readSpreadsheetPreview(new Uint8Array(bytes), doc.kind);
+    let preview;
+    try {
+      preview = await readSpreadsheetPreview(new Uint8Array(bytes), doc.kind);
+    } catch {
+      return sendError(res, 422, 'unreadable_document', 'This spreadsheet could not be read.');
+    }
     res.setHeader('Cache-Control', 'private, no-store');
     void logActivity({ type: 'file_previewed', actor: actor.email, sessionId, documentId, fileName: doc.originalName });
     res.json(preview);
@@ -336,6 +338,7 @@ export function createDocumentAiRouter(options: DocumentAiRouterOptions): expres
     }
     const doc = await getDocument(sessionId, documentId);
     if (!doc) return sendError(res, 404, 'not_found', 'Document not found.');
+    abortDocumentExtraction(sessionId, documentId);
     const outcome = await deleteDocumentFile(sessionId, documentId, mode);
     if (!outcome.found) return sendError(res, 404, 'not_found', 'Document not found.');
     void logActivity({

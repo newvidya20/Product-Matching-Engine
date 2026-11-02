@@ -16,6 +16,7 @@ import { extractDocument } from './pipeline.ts';
 import {
   getActiveJob,
   getDocument,
+  getResult,
   listDocuments,
   listJobs,
   listSessionIds,
@@ -35,6 +36,12 @@ interface QueuedTask {
 }
 
 const queue: QueuedTask[] = [];
+const inFlight = new Map<string, AbortController>();
+
+/** Aborts a running extraction for a document that is being deleted. Its result is discarded either way. */
+export function abortDocumentExtraction(sessionId: string, documentId: string): void {
+  inFlight.get(`${sessionId}:${documentId}`)?.abort();
+}
 let running = 0;
 
 export class JobInProgressError extends Error {
@@ -55,9 +62,9 @@ export async function startExtraction(
   let selected: StoredDocument[];
   if (Array.isArray(request.documentIds) && request.documentIds.length > 0) {
     const wanted = new Set(request.documentIds);
-    selected = docs.filter((d) => wanted.has(d.documentId));
+    selected = docs.filter((d) => wanted.has(d.documentId) && !d.fileDeletedAt);
   } else {
-    selected = docs.filter((d) => d.status !== 'extracted');
+    selected = docs.filter((d) => d.status !== 'extracted' && !d.fileDeletedAt);
   }
   if (!request.force) {
     selected = selected.filter((d) => d.status !== 'extracted');
@@ -109,9 +116,22 @@ function pump(): void {
 async function processDocument(job: ExtractionJob, documentId: string, actorEmail: string): Promise<void> {
   const { sessionId } = job;
   const doc = await getDocument(sessionId, documentId);
-  if (!doc) return; // deleted while queued
+  if (!doc || doc.fileDeletedAt) return; // deleted while queued
+
+  // A document deleted mid-job keeps its record; restore a status that matches what is stored.
+  const settleDeleted = async () => {
+    const hasResult = (await getResult(sessionId, documentId)) !== null;
+    await updateDocument(sessionId, documentId, (d) => {
+      if (d.status === 'queued' || d.status === 'extracting') d.status = hasResult ? 'extracted' : 'uploaded';
+    });
+  };
 
   const fail = async (code: ExtractionErrorCode) => {
+    const current = await getDocument(sessionId, documentId);
+    if (!current || current.fileDeletedAt) {
+      await settleDeleted();
+      return; // deleted during the job: not a failure to report
+    }
     await updateDocument(sessionId, documentId, (d) => {
       d.status = 'failed';
       d.errorCode = code;
@@ -138,6 +158,8 @@ async function processDocument(job: ExtractionJob, documentId: string, actorEmai
   });
 
   const controller = new AbortController();
+  const flightKey = `${sessionId}:${documentId}`;
+  inFlight.set(flightKey, controller);
   const timer = setTimeout(() => controller.abort(), PER_FILE_TIMEOUT_MS);
   try {
     const result = await extractDocument({
@@ -158,7 +180,10 @@ async function processDocument(job: ExtractionJob, documentId: string, actorEmai
       d.errorCode = null;
       if (!d.documentTypeOverridden) d.documentType = result.documentType;
     });
-    if (!saved) return; // deleted mid-extraction: result discarded
+    if (!saved) {
+      await settleDeleted(); // deleted or expired mid-extraction: result discarded
+      return;
+    }
     const byStatus: Record<string, number> = {};
     for (const f of result.fields) byStatus[f.status] = (byStatus[f.status] || 0) + 1;
     void logActivity({
@@ -185,6 +210,7 @@ async function processDocument(job: ExtractionJob, documentId: string, actorEmai
   } catch {
     await fail(controller.signal.aborted ? 'llm_timeout' : 'llm_failed');
   } finally {
+    if (inFlight.get(flightKey) === controller) inFlight.delete(flightKey);
     clearTimeout(timer);
   }
 }

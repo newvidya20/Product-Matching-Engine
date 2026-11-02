@@ -51,17 +51,42 @@ function isCsv(b: Uint8Array): boolean {
   }
 }
 
+/** Inflates one entry, counting real bytes. Resolves the count, or null as soon as `budget` is exceeded. */
+function inflatedSize(entry: JSZip.JSZipObject, budget: number): Promise<number | null> {
+  return new Promise((resolve) => {
+    let total = 0;
+    let settled = false;
+    const stream = entry.nodeStream('nodebuffer');
+    const done = (v: number | null) => {
+      if (settled) return;
+      settled = true;
+      resolve(v);
+    };
+    stream.on('data', (chunk: Buffer) => {
+      total += chunk.length;
+      if (total > budget) {
+        stream.pause();
+        stream.removeAllListeners('data');
+        (stream as unknown as { destroy?: () => void }).destroy?.();
+        done(null);
+      }
+    });
+    stream.on('end', () => done(total));
+    stream.on('error', () => done(null));
+  });
+}
+
 async function isSafeXlsx(b: Uint8Array): Promise<boolean> {
   try {
     const zip = await JSZip.loadAsync(b);
     if (!zip.file('[Content_Types].xml') || !zip.file('xl/workbook.xml')) return false;
-    let total = 0;
+    // Declared sizes are attacker-controlled, so the cap is enforced on bytes actually inflated.
+    let remaining = DOCUMENT_AI_LIMITS.maxXlsxUncompressedBytes;
     for (const entry of Object.values(zip.files)) {
       if (entry.dir) continue;
-      const size = (entry as unknown as { _data?: { uncompressedSize?: number } })._data?.uncompressedSize;
-      if (typeof size !== 'number') return false; // cannot prove it is small: refuse
-      total += size;
-      if (total > DOCUMENT_AI_LIMITS.maxXlsxUncompressedBytes) return false;
+      const size = await inflatedSize(entry, remaining);
+      if (size === null) return false;
+      remaining -= size;
     }
     return true;
   } catch {
