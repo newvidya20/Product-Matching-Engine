@@ -108,6 +108,20 @@ function candidateSignature(result: FieldResult | undefined): string {
   return result ? result.candidates.map((c) => c.candidateId).join(',') : '';
 }
 
+/** Saved non-default values on a reopened draft count as the person's own. Pure, needs no network. */
+function preexistingEntries(form: FormState): EditedFieldEntry[] {
+  const at = new Date().toISOString();
+  const entries: EditedFieldEntry[] = [];
+  for (const definition of FIELD_DEFINITIONS) {
+    if (!definition.extractable || !isFormBacked(definition)) continue;
+    if (definition.target.kind === 'dynamic' && definition.target.purpose !== form.fundingPurpose) continue;
+    if (readField(form, definition) !== (definition.defaultValue ?? '')) {
+      entries.push({ fieldId: definition.fieldId, origin: 'preexisting_value', at });
+    }
+  }
+  return entries;
+}
+
 export interface UseDocumentAiFormOptions {
   createBlank: () => FormState;
   editingAssessment: BorrowerAssessment | null;
@@ -133,7 +147,27 @@ export function useDocumentAiForm({
     if (!isEditing) writeStoredSession(sessionIdRef.current);
   }
   const sessionExistsRef = useRef(false);
+  // Bumped whenever the session is swapped, so late results from the old one can be dropped.
+  const generationRef = useRef(0);
+  const editingRef = useRef<BorrowerAssessment | null>(editingAssessment);
+  const lookupDoneRef = useRef(!editingAssessment);
+  const loadedRef = useRef(false);
+  const loadFailuresRef = useRef(0);
+  const loadTimer = useRef<number | null>(null);
+  // Fields this page applied itself: the only ones apply logic may later revert.
+  const localAppliedRef = useRef<Set<string>>(new Set());
+  const seededRef = useRef(false);
   const pendingRef = useRef<PendingEdits>(emptyPending());
+  // Reopened draft: protect saved values straight from the assessment, before any network call.
+  if (!seededRef.current) {
+    seededRef.current = true;
+    if (editingAssessment) {
+      for (const entry of preexistingEntries(formRef.current)) {
+        editedRef.current[entry.fieldId] = entry;
+        pendingRef.current.setEdited[entry.fieldId] = entry;
+      }
+    }
+  }
   const flushTimer = useRef<number | null>(null);
   const flushChain = useRef<Promise<void>>(Promise.resolve());
   const flushAttempts = useRef(0);
@@ -179,10 +213,12 @@ export function useDocumentAiForm({
       if (pending.clearApplied.size) request.clearApplied = [...pending.clearApplied];
       if (Object.keys(request).length === 0) return;
       pendingRef.current = emptyPending();
+      const sid = sessionIdRef.current;
       try {
-        await documentAiClient.putEdits(sessionIdRef.current, request);
+        await documentAiClient.putEdits(sid, request);
         flushAttempts.current = 0;
       } catch {
+        if (sid !== sessionIdRef.current) return; // the session was swapped; these edits are moot
         // Put it back without overwriting anything newer, then retry with backoff.
         const next = pendingRef.current;
         for (const entry of setEdited) {
@@ -242,6 +278,7 @@ export function useDocumentAiForm({
         }
         if (id in applied) {
           delete applied[id];
+          localAppliedRef.current.delete(id);
           delete pendingRef.current.setApplied[id];
           pendingRef.current.clearApplied.add(id);
         }
@@ -263,15 +300,18 @@ export function useDocumentAiForm({
       fields,
       editedFieldIds: new Set(Object.keys(editedRef.current)),
       applied: appliedRef.current,
+      revertableFieldIds: localAppliedRef.current,
     });
     if (out.form !== formRef.current) commitForm(() => out.form);
     appliedRef.current = out.applied;
     const pending = pendingRef.current;
     for (const entry of out.setApplied) {
+      localAppliedRef.current.add(entry.fieldId);
       pending.setApplied[entry.fieldId] = entry;
       pending.clearApplied.delete(entry.fieldId);
     }
     for (const id of out.clearApplied) {
+      localAppliedRef.current.delete(id);
       delete pending.setApplied[id];
       pending.clearApplied.add(id);
     }
@@ -290,11 +330,21 @@ export function useDocumentAiForm({
 
   const hydrate = useCallback(
     (state: DocumentSessionState, apply: boolean) => {
+      // State for any session other than the current one (e.g. in flight across a Reset) is ignored.
+      if (state.session.sessionId !== sessionIdRef.current) return;
       docStateRef.current = state;
       sessionExistsRef.current = true;
       // Server copy first, then anything not yet flushed on top of it.
       const pending = pendingRef.current;
-      const edited = { ...state.edits.editedFields, ...editedRef.current, ...pending.setEdited };
+      // A reopen-time guess never overwrites what the server already knows about the field.
+      for (const [id, entry] of Object.entries(pending.setEdited)) {
+        if (entry.origin === 'preexisting_value' && id in state.edits.editedFields) delete pending.setEdited[id];
+      }
+      const edited = { ...state.edits.editedFields };
+      for (const [id, entry] of Object.entries({ ...editedRef.current, ...pending.setEdited })) {
+        if (entry.origin === 'preexisting_value' && id in state.edits.editedFields) continue;
+        edited[id] = entry;
+      }
       for (const id of pending.clearEdited) delete edited[id];
       editedRef.current = edited;
       const applied = { ...state.edits.appliedFields, ...pending.setApplied };
@@ -316,24 +366,28 @@ export function useDocumentAiForm({
   }, []);
 
   const refreshSession = useCallback(async (): Promise<DocumentSessionState | null> => {
-    const state = await documentAiClient.getSession(sessionIdRef.current);
+    const sid = sessionIdRef.current;
+    const state = await documentAiClient.getSession(sid);
+    if (sid !== sessionIdRef.current) return null;
     if (state && mountedRef.current) hydrate(state, true);
     return state;
   }, [hydrate]);
 
   const startExtraction = useCallback(
     async (documentIds?: string[], force = false) => {
+      const sid = sessionIdRef.current;
       try {
-        const { job: started } = await documentAiClient.startExtraction(sessionIdRef.current, {
+        const { job: started } = await documentAiClient.startExtraction(sid, {
           ...(documentIds ? { documentIds } : {}),
           ...(force ? { force: true } : {}),
         });
-        if (!mountedRef.current) return;
+        if (!mountedRef.current || sid !== sessionIdRef.current) return;
         setJob(started);
         setPollTimedOut(false);
         await refreshSession().catch(() => undefined);
         beginPolling(started.jobId);
       } catch (error) {
+        if (sid !== sessionIdRef.current) return;
         if (error instanceof DocumentAiError && error.code === 'job_in_progress' && error.jobId) {
           extractAgainRef.current = true;
           setPollTimedOut(false);
@@ -364,14 +418,15 @@ export function useDocumentAiForm({
   const beginPolling = useCallback(
     (jobId: string) => {
       stopPolling();
+      const sid = sessionIdRef.current;
       const handle = { jobId, startedAt: Date.now(), timer: null as number | null, failures: 0 };
       pollRef.current = handle;
       const tick = async () => {
-        if (pollRef.current !== handle || !mountedRef.current) return;
+        if (pollRef.current !== handle || !mountedRef.current || sid !== sessionIdRef.current) return;
         const elapsed = Date.now() - handle.startedAt;
         try {
-          const { job: latest } = await documentAiClient.getJob(sessionIdRef.current, jobId);
-          if (pollRef.current !== handle || !mountedRef.current) return;
+          const { job: latest } = await documentAiClient.getJob(sid, jobId);
+          if (pollRef.current !== handle || !mountedRef.current || sid !== sessionIdRef.current) return;
           handle.failures = 0;
           setJob(latest);
           if (TERMINAL_JOB_STATUSES.includes(latest.status)) {
@@ -396,64 +451,79 @@ export function useDocumentAiForm({
 
   // ----------------------------------------------------------------- Mount
 
+  /**
+   * Finds and loads the session. A failed lookup is not "no session": it must not create a second one, so
+   * uploads wait until it succeeds, and it is retried here with backoff and again on demand.
+   */
+  const loadSession = useCallback(async (): Promise<boolean> => {
+    const generation = generationRef.current;
+    const stale = () => !mountedRef.current || generationRef.current !== generation;
+    try {
+      const assessment = editingRef.current;
+      if (assessment && !lookupDoneRef.current) {
+        const found = await documentAiClient.findSession(assessment.id);
+        if (stale()) return false;
+        lookupDoneRef.current = true;
+        if (found.session) {
+          sessionIdRef.current = found.session.sessionId;
+          setSessionIdState(found.session.sessionId);
+        }
+      }
+      const state = await documentAiClient.getSession(sessionIdRef.current);
+      if (stale()) return false;
+      loadedRef.current = true;
+      loadFailuresRef.current = 0;
+      if (state) {
+        // Saved values win on reopen: the first hydrate must not apply anything.
+        skipApplyRef.current = Boolean(editingRef.current);
+        hydrate(state, true);
+        skipApplyRef.current = false;
+        if (assessment && !state.session.assessmentId) {
+          documentAiClient.linkSession(state.session.sessionId, assessment.id).catch((error) => {
+            if (mountedRef.current) setNotice(`Could not link the saved draft to its documents. ${errorMessage(error)}`);
+          });
+        }
+        if (state.activeJob && !TERMINAL_JOB_STATUSES.includes(state.activeJob.status)) {
+          setJob(state.activeJob);
+          beginPolling(state.activeJob.jobId);
+        }
+      }
+      // Marks recorded from the assessment before the session was known can go to the server now.
+      scheduleFlush();
+      bump();
+      return true;
+    } catch (error) {
+      if (stale()) return false;
+      setNotice(errorMessage(error));
+      loadFailuresRef.current += 1;
+      if (loadFailuresRef.current <= 5) {
+        loadTimer.current = window.setTimeout(() => void loadSession(), 2000 * 2 ** loadFailuresRef.current);
+      }
+      return false;
+    } finally {
+      if (!stale()) setLoadingSession(false);
+    }
+  }, [beginPolling, bump, hydrate, scheduleFlush]);
+
   useEffect(() => {
     mountedRef.current = true;
-    let cancelled = false;
-    (async () => {
-      try {
-        if (editingAssessment) {
-          const found = await documentAiClient.findSession(editingAssessment.id).catch(() => null);
-          if (cancelled) return;
-          if (found?.session) {
-            sessionIdRef.current = found.session.sessionId;
-            setSessionIdState(found.session.sessionId);
-          }
-        }
-        const state = await documentAiClient.getSession(sessionIdRef.current);
-        if (cancelled) return;
-        if (state) {
-          // Saved values win on reopen: the first hydrate must not apply anything.
-          skipApplyRef.current = isEditing;
-          hydrate(state, true);
-          skipApplyRef.current = false;
-          if (editingAssessment && !state.session.assessmentId) {
-            void documentAiClient.linkSession(state.session.sessionId, editingAssessment.id).catch(() => undefined);
-          }
-          if (state.activeJob && !TERMINAL_JOB_STATUSES.includes(state.activeJob.status)) {
-            setJob(state.activeJob);
-            beginPolling(state.activeJob.jobId);
-          }
-        }
-        if (editingAssessment) {
-          // Anything already on the saved draft counts as the person's own.
-          const form = formRef.current;
-          let changed = false;
-          for (const definition of FIELD_DEFINITIONS) {
-            if (!definition.extractable || !isFormBacked(definition)) continue;
-            if (definition.target.kind === 'dynamic' && definition.target.purpose !== form.fundingPurpose) continue;
-            if (definition.fieldId in editedRef.current || definition.fieldId in appliedRef.current) continue;
-            if (readField(form, definition) !== (definition.defaultValue ?? '')) {
-              markEdited(definition.fieldId, 'preexisting_value');
-              changed = true;
-            }
-          }
-          if (changed) bump();
-        }
-      } catch (error) {
-        if (!cancelled) setNotice(errorMessage(error));
-      } finally {
-        if (!cancelled) setLoadingSession(false);
-      }
-    })();
+    void loadSession();
     return () => {
-      cancelled = true;
       mountedRef.current = false;
+      if (loadTimer.current !== null) window.clearTimeout(loadTimer.current);
       stopPolling();
       void flushEdits();
     };
     // Runs once per mount: the editing assessment cannot change without a remount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /** Loads the session if an earlier attempt failed. True when it is ready to use. */
+  const ensureSession = useCallback(async (): Promise<boolean> => {
+    if (loadedRef.current) return true;
+    if (loadTimer.current !== null) window.clearTimeout(loadTimer.current);
+    return loadSession();
+  }, [loadSession]);
 
   // ------------------------------------------------------------ Field edits
 
@@ -524,8 +594,39 @@ export function useDocumentAiForm({
 
   // ------------------------------------------------------- Demo, reset, save
 
+  /** Swaps in a fresh, unlinked session and drops everything tied to the old one. Form untouched. */
+  const resetSession = useCallback(() => {
+    generationRef.current += 1;
+    stopPolling();
+    if (flushTimer.current !== null) window.clearTimeout(flushTimer.current);
+    if (loadTimer.current !== null) window.clearTimeout(loadTimer.current);
+    const next = newSessionId();
+    sessionIdRef.current = next;
+    writeStoredSession(next);
+    editingRef.current = null;
+    lookupDoneRef.current = true;
+    loadedRef.current = true;
+    sessionExistsRef.current = false;
+    pendingRef.current = emptyPending();
+    editedRef.current = {};
+    appliedRef.current = {};
+    localAppliedRef.current = new Set();
+    docStateRef.current = null;
+    extractAgainRef.current = false;
+    setSessionIdState(next);
+    setDocState(null);
+    setJob(null);
+    setUploads([]);
+    setDismissed({});
+    setNotice(null);
+    setPollTimedOut(false);
+    setLoadingSession(false);
+  }, [stopPolling]);
+
+  /** `detach` leaves the saved record: the form then belongs to a new session and a new assessment. */
   const loadDemo = useCallback(
-    (demo: FormState) => {
+    (demo: FormState, options: { detach?: boolean } = {}) => {
+      if (options.detach) resetSession();
       commitForm(() => demo);
       // The demo replaces everything, so earlier autofill no longer describes the form.
       dropEditState(Object.keys(appliedRef.current).filter((id) => !(id in editedRef.current)));
@@ -538,48 +639,54 @@ export function useDocumentAiForm({
       }
       bump();
     },
-    [bump, commitForm, dropEditState, markEdited]
+    [bump, commitForm, dropEditState, markEdited, resetSession]
   );
 
   const reset = useCallback(
     (blank: FormState) => {
-      stopPolling();
-      if (flushTimer.current !== null) window.clearTimeout(flushTimer.current);
-      const next = newSessionId();
-      sessionIdRef.current = next;
-      if (!isEditing) writeStoredSession(next);
-      sessionExistsRef.current = false;
-      pendingRef.current = emptyPending();
-      editedRef.current = {};
-      appliedRef.current = {};
-      docStateRef.current = null;
-      extractAgainRef.current = false;
+      resetSession();
       commitForm(() => blank);
-      setSessionIdState(next);
-      setDocState(null);
-      setJob(null);
-      setUploads([]);
-      setDismissed({});
-      setNotice(null);
-      setPollTimedOut(false);
       bump();
     },
-    [bump, commitForm, isEditing, stopPolling]
+    [bump, commitForm, resetSession]
   );
 
-  /** Call before saving: flushes edits, and says whether the session should be linked. */
+  /**
+   * Call before saving: flushes edits, and says whether the session should be linked. A failed flush
+   * throws, because a typed edit that never reaches the server would lose its protection.
+   */
   const prepareForSave = useCallback(async (): Promise<{ documentSessionId?: string }> => {
-    await flushEdits();
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await flushEdits();
+      const p = pendingRef.current;
+      const outstanding =
+        Object.keys(p.setEdited).length + Object.keys(p.setApplied).length + p.clearEdited.size + p.clearApplied.size;
+      if (!sessionExistsRef.current || outstanding === 0) break;
+      if (attempt === 1) {
+        throw new Error('Document AI could not record your changes to the extracted fields. Check your connection and save again.');
+      }
+    }
     return sessionExistsRef.current ? { documentSessionId: sessionIdRef.current } : {};
   }, [flushEdits]);
 
-  /** After a save. Links as a fallback (the server also links from the body) and clears the stored session. */
-  const afterSave = useCallback(async (assessmentId: string) => {
-    writeStoredSession(null);
+  /**
+   * After a save. Links as a fallback (the server also links from the body) and clears the stored session
+   * if it still holds this one. Returns a message when the link failed, since the files would be purged.
+   */
+  const afterSave = useCallback(async (assessmentId: string): Promise<string | null> => {
+    const sid = sessionIdRef.current;
+    if (readStoredSession() === sid) writeStoredSession(null);
     const linked = docStateRef.current?.session.assessmentId;
     if (sessionExistsRef.current && linked !== assessmentId) {
-      await documentAiClient.linkSession(sessionIdRef.current, assessmentId).catch(() => undefined);
+      try {
+        await documentAiClient.linkSession(sid, assessmentId);
+      } catch (error) {
+        const message = `Saved, but the uploaded documents could not be linked to this assessment and may be removed. ${errorMessage(error)}`;
+        if (mountedRef.current) setNotice(message);
+        return message;
+      }
     }
+    return null;
   }, []);
 
   // --------------------------------------------------------------- Documents
@@ -587,11 +694,18 @@ export function useDocumentAiForm({
   const uploadFiles = useCallback(
     async (files: File[]) => {
       setNotice(null);
+      if (!(await ensureSession())) {
+        setNotice('Could not load the documents for this assessment yet. Try again in a moment.');
+        return;
+      }
+      const sid = sessionIdRef.current;
+      const same = () => mountedRef.current && sessionIdRef.current === sid;
       const existing = docStateRef.current?.documents.filter((d) => !d.fileDeletedAt) ?? [];
       let count = existing.length;
       let totalBytes = existing.reduce((sum, d) => sum + d.sizeBytes, 0);
       let uploaded = 0;
       for (const file of files) {
+        if (!same()) return; // the session changed (Reset): do not send the rest to the new one
         const key = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
         const extension = file.name.split('.').pop()?.toLowerCase() ?? '';
         let rejection: string | null = null;
@@ -618,10 +732,11 @@ export function useDocumentAiForm({
         setUploads((items) => [...items, { key, name: file.name, status: 'uploading' }]);
         try {
           const base64 = await fileToBase64(file);
-          const response = await documentAiClient.uploadDocument(sessionIdRef.current, {
+          const response = await documentAiClient.uploadDocument(sid, {
             fileName: file.name,
             base64,
           });
+          if (!same()) return;
           sessionExistsRef.current = true;
           if (response.duplicate) {
             setUploads((items) =>
@@ -634,19 +749,20 @@ export function useDocumentAiForm({
             setUploads((items) => items.filter((i) => i.key !== key));
           }
         } catch (error) {
+          if (!same()) return;
           setUploads((items) =>
             items.map((i) => (i.key === key ? { ...i, status: 'error', message: errorMessage(error) } : i))
           );
         }
       }
-      if (!mountedRef.current) return;
+      if (!same()) return;
       if (sessionExistsRef.current) {
         await refreshSession().catch((error) => setNotice(errorMessage(error)));
         void flushEdits();
       }
       if (uploaded > 0) await startExtraction();
     },
-    [flushEdits, refreshSession, startExtraction]
+    [ensureSession, flushEdits, refreshSession, startExtraction]
   );
 
   const dismissUpload = useCallback((key: string) => {
@@ -655,8 +771,9 @@ export function useDocumentAiForm({
 
   const removeDocument = useCallback(
     async (documentId: string, mode: DeleteDocumentMode) => {
-      const response = await documentAiClient.deleteDocument(sessionIdRef.current, documentId, mode);
-      if (!mountedRef.current) return;
+      const sid = sessionIdRef.current;
+      const response = await documentAiClient.deleteDocument(sid, documentId, mode);
+      if (!mountedRef.current || sid !== sessionIdRef.current) return;
       if (mode === 'file_and_clear_fields') {
         // Blank what this document filled, unless the person has since made it their own.
         const ids = response.clearFieldIds.filter((id) => !(id in editedRef.current));
@@ -669,7 +786,10 @@ export function useDocumentAiForm({
           }, current)
         );
         const applied = { ...appliedRef.current };
-        for (const id of ids) delete applied[id];
+        for (const id of ids) {
+          delete applied[id];
+          localAppliedRef.current.delete(id);
+        }
         appliedRef.current = applied;
       }
       hydrate(response.state, true);
@@ -680,7 +800,9 @@ export function useDocumentAiForm({
   const changeDocumentType = useCallback(
     async (documentId: string, documentType: DocumentType) => {
       try {
-        const state = await documentAiClient.updateDocument(sessionIdRef.current, documentId, { documentType });
+        const sid = sessionIdRef.current;
+        const state = await documentAiClient.updateDocument(sid, documentId, { documentType });
+        if (sid !== sessionIdRef.current) return;
         if (mountedRef.current) hydrate(state, true);
         await startExtraction([documentId], true);
       } catch (error) {
@@ -698,6 +820,10 @@ export function useDocumentAiForm({
   const refresh = useCallback(async () => {
     setPollTimedOut(false);
     try {
+      if (!loadedRef.current) {
+        await ensureSession();
+        return;
+      }
       const state = await refreshSession();
       if (state?.activeJob && !TERMINAL_JOB_STATUSES.includes(state.activeJob.status)) {
         setJob(state.activeJob);
@@ -706,7 +832,7 @@ export function useDocumentAiForm({
     } catch (error) {
       setNotice(errorMessage(error));
     }
-  }, [beginPolling, refreshSession]);
+  }, [beginPolling, ensureSession, refreshSession]);
 
   // ---------------------------------------------------------------- Context
 

@@ -291,7 +291,12 @@ export function ReviewPanel(props: ReviewPanelProps) {
                     </p>
                   )}
                   <Reasons reasons={result.reasons} />
-                  {result.candidates[0] && <SourceText field={result.candidates[0]} />}
+                  {(() => {
+                    const shown =
+                      result.candidates.find((c) => c.candidateId === result.suggestedCandidateId) ??
+                      result.candidates[0];
+                    return shown ? <SourceText field={shown} /> : null;
+                  })()}
                   <div className="flex flex-wrap gap-2">
                     {!invalid && writable && !wrongPurpose && (
                       <button

@@ -21,6 +21,12 @@ export interface ApplyInput {
   /** Field IDs a person owns, as of now. */
   editedFieldIds: ReadonlySet<string>;
   applied: Record<string, AppliedFieldEntry>;
+  /**
+   * Fields this page auto-applied itself. Only these may be reverted to the default when their source
+   * result changes; a value that came from a reopened draft is never reverted or blanked.
+   * Omit to allow reverting every applied field.
+   */
+  revertableFieldIds?: ReadonlySet<string>;
   now?: string;
 }
 
@@ -40,6 +46,10 @@ export function dynamicFieldIdsForPurpose(purpose: FundingPurposeCategory): stri
   return FIELD_DEFINITIONS.filter(
     (d) => d.target.kind === 'dynamic' && d.target.purpose === purpose
   ).map((d) => d.fieldId);
+}
+
+function hasDynamicAnswer(form: FormState): boolean {
+  return Object.values(form.dynamicPurposeAnswers ?? {}).some((v) => String(v ?? '').trim() !== '');
 }
 
 function defaultFor(definition: FieldDefinition): string {
@@ -69,6 +79,7 @@ export function applyFieldResults(input: ApplyInput): ApplyOutput {
   const clearApplied = new Set<string>();
   const clearEdited = new Set<string>();
 
+  const canRevert = (fieldId: string) => !input.revertableFieldIds || input.revertableFieldIds.has(fieldId);
   const record = (fieldId: string, candidateId: string) => {
     const entry: AppliedFieldEntry = { fieldId, candidateId, at };
     applied[fieldId] = entry;
@@ -111,7 +122,8 @@ export function applyFieldResults(input: ApplyInput): ApplyOutput {
       if (fieldId === 'fundingPurpose') {
         if (!(FUNDING_PURPOSE_VALUES as readonly string[]).includes(next)) continue;
         if (next !== form.fundingPurpose) {
-          // The purpose changed: its old questions go, with their edited and applied entries.
+          // Only a person's change of purpose clears answers. With any answer present, leave it for review.
+          if (hasDynamicAnswer(form)) continue;
           for (const oldId of dynamicFieldIdsForPurpose(form.fundingPurpose)) {
             unrecord(oldId);
             if (edited.delete(oldId)) clearEdited.add(oldId);
@@ -124,7 +136,8 @@ export function applyFieldResults(input: ApplyInput): ApplyOutput {
       record(fieldId, candidateId);
     } else if (fieldId in applied) {
       // Contradicted or withdrawn: back to the default, shown as a conflict or suggestion.
-      form = writeField(form, definition, defaultFor(definition));
+      // A value this page did not apply stays as saved; only the stale mark goes.
+      if (canRevert(fieldId)) form = writeField(form, definition, defaultFor(definition));
       unrecord(fieldId);
     }
   }
@@ -135,7 +148,7 @@ export function applyFieldResults(input: ApplyInput): ApplyOutput {
     const definition = getFieldDefinition(fieldId);
     if (!definition || !isFormBacked(definition)) continue;
     if (definition.target.kind === 'dynamic' && definition.target.purpose !== form.fundingPurpose) continue;
-    form = writeField(form, definition, defaultFor(definition));
+    if (canRevert(fieldId)) form = writeField(form, definition, defaultFor(definition));
     unrecord(fieldId);
   }
 
@@ -143,6 +156,7 @@ export function applyFieldResults(input: ApplyInput): ApplyOutput {
   if (
     'collateralAvailable' in applied &&
     !edited.has('collateralAvailable') &&
+    canRevert('collateralAvailable') &&
     input.fields.collateralAvailable?.status !== 'auto_applied' &&
     !COLLATERAL_DETAIL_IDS.some((id) => id in applied)
   ) {
