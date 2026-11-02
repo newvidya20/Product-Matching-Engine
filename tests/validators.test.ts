@@ -28,6 +28,7 @@ import {
   parseIndianAmount,
   parsePercent,
   rawValueInSnippet,
+  scaleHeaderConflict,
   unitAgreesWithSnippet,
   unitTextSupports,
   validateGstin,
@@ -482,6 +483,21 @@ describe('unit evidence (contract 6.3)', () => {
     assert.equal(agrees('1,23,456', 'Revenue 1,23,456, FY 2024-25'), true);
   });
 
+  it('keeps a header printed after a date or a year', () => {
+    const snippet = 'Year ended 31.03.2025 Lakhs Revenue 12,50,000';
+    assert.equal(agrees('12,50,000', snippet), false);
+    assert.equal(agrees('12,50,000', snippet, 'lakh'), true);
+    for (const stamp of ['31-03-2025', '31/03/2025', '31.03.25', '31 March 2025', 'Mar-25', 'FY25', 'FY 2024-25', '2024-25', '2025']) {
+      assert.equal(agrees('12,50,000', `${stamp} Lakhs Revenue 12,50,000`), false, stamp);
+    }
+  });
+
+  it('still takes a unit after a real figure, decimals and grouped four digit figures included', () => {
+    assert.equal(agrees('12,50,000', 'Rs. 12,50,000 against a limit of 1.2025 lakh'), true);
+    assert.equal(agrees('12,50,000', 'Rs. 12,50,000 against a limit of 2,025 lakh'), true);
+    assert.equal(agrees('2,025', 'Requested 2,025 lakh'), false);
+  });
+
   it('requires unit text that says the same as the stated unit', () => {
     assert.equal(unitTextSupports('lakh', '(Rs. in lakhs)'), true);
     assert.equal(unitTextSupports('lakh', 'Rs. in Lacs'), true);
@@ -742,6 +758,102 @@ describe('source verifier (contract 4.2, 12)', () => {
 
   it('fails closed on a PDF the parser could not read', () => {
     assert.equal(createSourceVerifier({ kind: 'unreadable' })(query({})).check, 'failed');
+  });
+});
+
+describe('scale headers in the file (contract 6.3)', () => {
+  const headersOf = (line: string, creditMarker = false) =>
+    createSourceVerifier({ kind: 'pdf', lines: [line, 'Revenue 12,50,000'] })({
+      valueType: 'number',
+      rawValue: '12,50,000',
+      value: 1250000,
+      snippet: 'Revenue 12,50,000',
+      unitText: null,
+      page: 1,
+      sheetName: null,
+      cellRef: null,
+      inlineUnit: null,
+      creditMarker,
+      evidence: [],
+      wantRowLabel: false,
+    }).scaleHeaders;
+
+  it('reads the header forms', () => {
+    const cases: Array<[string, AmountUnit]> = [
+      ["(Rs. in '000)", 'thousand'],
+      ['(Rs. ’000)', 'thousand'],
+      ["INR '000", 'thousand'],
+      ["Amounts in ₹ '000", 'thousand'],
+      ['(Rupees in thousands)', 'thousand'],
+      ["('000)", 'thousand'],
+      ['Balance Sheet (In Lakhs)', 'lakh'],
+      ['Rs. in Lacs', 'lakh'],
+      ['(₹ in lakh)', 'lakh'],
+      ['Statement of Profit and Loss in Lakhs', 'lakh'],
+      ['Lakhs', 'lakh'],
+      ['Particulars 31.03.2025 Lakhs 31.03.2024 Lakhs', 'lakh'],
+      ['Figures are stated in crores', 'crore'],
+      ['Rs. in Cr.', 'crore'],
+      ['(₹ Crore)', 'crore'],
+      ['Rs. Mn', 'million'],
+      ['INR million', 'million'],
+      ['Amount in Rs. Mn.', 'million'],
+    ];
+    for (const [line, unit] of cases) assert.deepEqual(headersOf(line), [unit], line);
+  });
+
+  it('does not read ordinary prose as a header', () => {
+    for (const line of [
+      'The company serves over a thousand customers across India',
+      'Thousands of customers rely on our products',
+      'We reach customers in thousands of homes',
+      'Crores of rupees were invested in lakhs of units',
+      'In 2024 thousands of orders were shipped',
+      'Revenue grew by a million units',
+      'A sanctioned limit of Rs. 5 lakh and Rs. 2 crore',
+      'Rupees Twelve Lakh Fifty Thousand only',
+      'Rs. 1,000 was paid, and 12,000 more',
+      'He paid in rupees. Thousand more followed',
+      'Paid over 10 crore in sales',
+      'Dr / Cr',
+      'Hours in lakhs of man days',
+    ]) {
+      assert.equal(headersOf(line), undefined, line);
+    }
+  });
+
+  it('does not take a wrapped line for a header', () => {
+    const verify = createSourceVerifier({ kind: 'pdf', lines: ['We count our customers in thousands', 'of towns', 'Revenue 12,50,000'] });
+    const finding = verify({
+      valueType: 'number', rawValue: '12,50,000', value: 1250000, snippet: '12,50,000', unitText: null,
+      sheetName: null, cellRef: null, inlineUnit: null, creditMarker: false, evidence: [], wantRowLabel: false,
+    });
+    assert.equal(finding.scaleHeaders, undefined);
+  });
+
+  it("leaves a bank statement's credit marker out, and keeps a spelled-out unit", () => {
+    assert.deepEqual(headersOf('Closing Balance Rs. Cr'), ['crore']);
+    assert.equal(headersOf('Closing Balance Rs. Cr', true), undefined);
+    assert.deepEqual(headersOf('(Rs. in crores)', true), ['crore']);
+  });
+
+  it('caps by what the file says against what was applied', () => {
+    assert.equal(scaleHeaderConflict('rupees', undefined), null);
+    assert.equal(scaleHeaderConflict('rupees', []), null);
+    assert.equal(scaleHeaderConflict('lakh', ['lakh']), null);
+    assert.equal(scaleHeaderConflict('rupees', ['thousand']), 'unit_mismatch');
+    assert.equal(scaleHeaderConflict('crore', ['lakh', 'thousand']), 'unit_mismatch');
+    assert.equal(scaleHeaderConflict('lakh', ['lakh', 'crore']), 'ambiguous_unit');
+  });
+
+  it('reports headers for numbers only', () => {
+    const verify = createSourceVerifier({ kind: 'pdf', lines: ['(Rs. in lakhs)', 'ABC Traders'] });
+    const finding = verify({
+      valueType: 'string', rawValue: 'ABC Traders', value: 'ABC Traders', snippet: 'ABC Traders', unitText: null,
+      sheetName: null, cellRef: null, inlineUnit: null, creditMarker: false, evidence: [], wantRowLabel: false,
+    });
+    assert.equal(finding.check, 'verified');
+    assert.equal(finding.scaleHeaders, undefined);
   });
 });
 

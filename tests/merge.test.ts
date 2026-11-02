@@ -456,9 +456,151 @@ function extractAndMerge(raw: RawField[], ctx: DocumentContext): MergeSessionOut
 }
 
 const pdfSource = (...lines: string[]): DocumentSource => ({ kind: 'pdf', lines });
+const pdfPages = (...pages: string[][]): DocumentSource => ({ kind: 'pdf', lines: pages.flat(), pages });
+const cells = (...rows: Array<[sheetName: string, ...texts: string[]]>): DocumentSource => ({
+  kind: 'cells',
+  rows: rows.map(([sheetName, ...texts], rowIndex) => ({
+    sheetName,
+    cells: texts.map((text, column) => ({ ref: `${'ABC'[column]}${rowIndex + 1}`, text })),
+  })),
+});
 
 const FIXTURE_DIR = fileURLToPath(new URL('./fixtures/', import.meta.url));
 const fixture = (name: string) => new Uint8Array(readFileSync(`${FIXTURE_DIR}${name}`));
+
+describe('scale headers outside the snippet (contract 6.3)', () => {
+  const capped = (r: FieldResult, reason: 'unit_mismatch' | 'ambiguous_unit' = 'unit_mismatch') => {
+    assert.equal(r.status, 'needs_verification');
+    assert.ok(r.reasons.includes(reason), r.reasons.join());
+  };
+  const lakhRaw = { statedUnit: 'lakh', unitText: '(Rs. in lakhs)' } as const;
+
+  it("caps Rs 12.5 lakh under a page header of (Rs. in '000)", () => {
+    const r = result(extractAndMerge([rawField({})], context(pdfSource("(Rs. in '000)", 'Revenue from operations 12,50,000'))), REVENUE);
+    capped(r);
+    assert.equal(r.candidates[0]?.value, 1250000);
+    assert.deepEqual(r.candidates[0]?.scaleHeaders, ['thousand']);
+  });
+
+  it('reads the header in the N6 layout, off the snippet', () => {
+    const source = pdfSource('Year ended 31.03.2025 Lakhs', 'Revenue from operations 12,50,000');
+    capped(result(extractAndMerge([rawField({})], context(source)), REVENUE));
+  });
+
+  it('reads the cited page, not the rest of the file', () => {
+    const source = pdfPages(['(Rs. in lakhs)', 'Notes 9,99,000'], ['Revenue from operations 12,50,000']);
+    const r = result(extractAndMerge([rawField({ page: 2 })], context(source)), REVENUE);
+    assert.equal(r.status, 'auto_applied');
+    capped(result(extractAndMerge([rawField({ rawValue: '9,99,000', snippet: 'Notes 9,99,000' })], context(source)), REVENUE));
+  });
+
+  it('reads all of the file when the page is not cited, or does not hold the value', () => {
+    const source = pdfPages(['(Rs. in lakhs)', 'Notes 9,99,000'], ['Revenue from operations 12,50,000']);
+    for (const page of [null, 1, 99, 0, -1]) {
+      capped(result(extractAndMerge([rawField({ page })], context(source)), REVENUE));
+    }
+  });
+
+  it('leaves a value scaled by the header alone', () => {
+    const source = pdfSource('(Rs. in lakhs)', 'Revenue from operations 125.50');
+    const raw = rawField({ ...lakhRaw, rawValue: '125.50', snippet: 'Revenue from operations 125.50' });
+    const r = result(extractAndMerge([raw], context(source)), REVENUE);
+    assert.equal(r.status, 'auto_applied');
+    assert.equal(r.value, 12550000);
+  });
+
+  it('caps an inline unit that the header differs from', () => {
+    const source = pdfSource('(Rs. in lakhs)', 'Revenue from operations 1.25 Cr');
+    capped(result(extractAndMerge([rawField({ rawValue: '1.25 Cr', snippet: 'Revenue from operations 1.25 Cr' })], context(source)), REVENUE));
+  });
+
+  it('takes ambiguous_unit when a page holds two scales, and one is the scale applied', () => {
+    const source = pdfSource('(Rs. in lakhs)', 'Revenue from operations 125.50', 'Summary (Rs. in crores)');
+    const raw = rawField({ ...lakhRaw, rawValue: '125.50', snippet: 'Revenue from operations 125.50' });
+    capped(result(extractAndMerge([raw], context(source)), REVENUE), 'ambiguous_unit');
+  });
+
+  it('does not cap a figure over prose on the page', () => {
+    const source = pdfSource(
+      'The company serves over a thousand customers, and thousands of orders ship daily',
+      'Revenue from operations 12,50,000'
+    );
+    const r = result(extractAndMerge([rawField({})], context(source)), REVENUE);
+    assert.equal(r.status, 'auto_applied');
+    assert.equal(r.candidates[0]?.scaleHeaders, undefined);
+  });
+
+  it('reads the cited sheet of a workbook', () => {
+    const source = cells(['Sheet1', 'Revenue', '1250000'], ['Notes', '(Rs. in lakhs)']);
+    const raw = rawField({ sheetName: 'Sheet1', cellRef: 'B1', rawValue: '1250000', snippet: 'Revenue 1250000' });
+    const ctx = { ...context(source, 'financial_statement', 'xlsx'), sheetNames: ['Sheet1', 'Notes'] };
+    assert.equal(result(extractAndMerge([raw], ctx), REVENUE).status, 'auto_applied');
+  });
+
+  it('caps a header in the cited sheet, outside the row', () => {
+    const source = cells(['Sheet1', "Rs. in '000"], ['Sheet1', 'Revenue', '1250000']);
+    const raw = rawField({ sheetName: 'Sheet1', cellRef: 'B2', rawValue: '1250000', snippet: 'Revenue 1250000' });
+    capped(result(extractAndMerge([raw], context(source, 'financial_statement', 'xlsx')), REVENUE));
+  });
+
+  it('reads all of a CSV, or a workbook with no sheet cited', () => {
+    const source = cells(['Sheet1', 'Revenue', '1250000'], ['Notes', '(Rs. in lakhs)']);
+    const raw = rawField({ rawValue: '1250000', snippet: 'Revenue 1250000' });
+    capped(result(extractAndMerge([raw], context(source, 'financial_statement', 'xlsx')), REVENUE));
+    capped(result(extractAndMerge([raw], context(source, 'financial_statement', 'csv')), REVENUE));
+  });
+
+  it('keeps the cap through a later merge, which cannot re-read the file', () => {
+    const { fields } = buildCandidates([rawField({})], context(pdfSource("(Rs. in '000)", 'Revenue 12,50,000')));
+    const stored = structuredClone(fields);
+    capped(result(run([successDocument(DOC_STATEMENT, 'financial_statement', stored)]), REVENUE));
+  });
+
+  it('leaves a scan as the documented limit', () => {
+    const r = result(extractAndMerge([rawField({})], context({ kind: 'no_text' })), REVENUE);
+    assert.equal(r.status, 'auto_applied');
+  });
+
+  it('leaves fields that are not currency alone', () => {
+    const cibil = rawField({ fieldId: PERSONAL_CIBIL, rawValue: '750', snippet: 'Score 750', period: null });
+    const { fields } = buildCandidates([cibil], context(pdfSource('(Rs. in lakhs)', 'Score 750'), 'credit_report'));
+    assert.equal(fields[0]?.scaleHeaders, undefined);
+  });
+
+  it('drops a bank month under a header it was not scaled by, and keeps Cr as the credit marker', () => {
+    const row: RawBankMonth = {
+      month: '2025-05',
+      totalCredits: '2,40,000.00',
+      closingBalance: null,
+      statedUnit: null,
+      unitText: null,
+      confidence: 0.95,
+      subjectRef: '4321',
+      page: 1,
+      sheetName: null,
+      cellRef: null,
+      snippet: 'Total credits: 2,40,000.00',
+    };
+    assert.deepEqual(buildBankMonthlyTotals([row], context(pdfSource('(Rs. in lakhs)', 'Total credits: 2,40,000.00'), 'bank_statement')), []);
+    const [kept] = buildBankMonthlyTotals([row], context(pdfSource('Balance Rs. Cr', 'Total credits: 2,40,000.00'), 'bank_statement'));
+    assert.equal(kept?.totalCredits, 240000);
+  });
+
+  it('keeps PDF text by page when it reads a file', async () => {
+    const item = (str: string, y: number) => ({ str, transform: [1, 0, 0, 1, 0, y], width: 100, height: 10 });
+    const texts = [[item('(Rs. in lakhs) Notes to the accounts for the year, in fictional form', 700)], [item('Revenue from operations 12,50,000', 700)]];
+    const document = {
+      numPages: 2,
+      getPage: async (n: number) => ({ getTextContent: async () => ({ items: texts[n - 1] }), cleanup: () => undefined }),
+    };
+    const loadEngine = async () => engine(Promise.resolve(document) as Promise<never>);
+    const source = await readPdfSource(new Uint8Array(4), new AbortController().signal, { loadEngine });
+    assert.ok(source.kind === 'pdf');
+    assert.equal(source.pages?.length, 2);
+    assert.equal(source.lines.length, 2);
+    assert.equal(result(extractAndMerge([rawField({ page: 2 })], context(source)), REVENUE).status, 'auto_applied');
+  });
+});
 
 describe('source text check (contract 4.2, 12)', () => {
   const signal = new AbortController().signal;

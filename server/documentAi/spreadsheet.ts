@@ -422,7 +422,7 @@ async function readPdfLines(
   bytes: Uint8Array,
   signal: AbortSignal,
   loadEngine: () => Promise<PdfEngine>
-): Promise<string[]> {
+): Promise<string[][]> {
   let engine: PdfEngine;
   try {
     engine = await loadEngine();
@@ -442,7 +442,7 @@ async function readPdfLines(
   signal.addEventListener('abort', destroyOnStop, { once: true });
   try {
     const document = await task.promise;
-    const lines: string[] = [];
+    const pages: string[][] = [];
     for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
       if (signal.aborted) throw new DOMException('Extraction was aborted.', 'AbortError');
       const page = await document.getPage(pageNumber);
@@ -452,10 +452,10 @@ async function readPdfLines(
           ? [{ text: item.str, x: item.transform[4], y: item.transform[5], width: item.width, height: item.height }]
           : []
       );
-      lines.push(...assemblePdfLines(runs));
+      pages.push(assemblePdfLines(runs));
       page.cleanup();
     }
-    return lines;
+    return pages;
   } finally {
     signal.removeEventListener('abort', destroyOnStop);
     await task.destroy();
@@ -487,9 +487,10 @@ export async function readPdfSource(
     stop.addEventListener('abort', onStop, { once: true });
   });
   try {
-    const lines = await Promise.race([readPdfLines(bytes, stop, loadEngine), stopped]);
+    const pages = await Promise.race([readPdfLines(bytes, stop, loadEngine), stopped]);
+    const lines = pages.flat();
     const characters = lines.join('').replace(/\s/g, '').length;
-    return characters < MIN_PDF_TEXT_CHARS ? { kind: 'no_text' } : { kind: 'pdf', lines };
+    return characters < MIN_PDF_TEXT_CHARS ? { kind: 'no_text' } : { kind: 'pdf', lines, pages };
   } catch (error) {
     if (signal.aborted) throw new DOMException('Extraction was aborted.', 'AbortError');
     const reason = readFailure(error, timeout.aborted);

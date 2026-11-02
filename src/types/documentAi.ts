@@ -220,6 +220,8 @@ export interface ExtractedField {
   rowLabel?: string | null;
   /** A negative the server read at the value, on signed and currency fields. Absent when it read none. */
   sourceSign?: SourceSign | null;
+  /** Scale headers the server read on the cited page or sheet, for currency fields. Absent when it read none. */
+  scaleHeaders?: AmountUnit[];
   /** Present on server-computed values: the rule and the candidates it used. */
   derivation?: { ruleId: DerivationRuleId; fromCandidateIds: string[] };
 }
@@ -439,6 +441,7 @@ export const ACTIVITY_EVENT_TYPES = [
   'auth_logout',
   'session_created',
   'session_linked',
+  'session_detached',
   'file_uploaded',
   'file_rejected',
   'file_previewed',

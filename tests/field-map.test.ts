@@ -357,6 +357,12 @@ describe('enum evidence and review (contract 4.2)', () => {
 describe('collateral evidence (contract 4.2)', () => {
   const evidence = getFieldDefinition('collateralAvailable')?.enumEvidence?.yes;
 
+  it('lists a stated answer of no as a denial', () => {
+    for (const phrase of ['collateral offered no', 'security offered nil']) {
+      assert.ok(evidence?.none?.includes(phrase), phrase);
+    }
+  });
+
   it('lists the denials of collateral that cancel its keywords', () => {
     for (const phrase of ['no collateral', 'no security', 'without collateral', 'collateral free', 'unsecured']) {
       assert.ok(evidence?.none?.includes(phrase), phrase);

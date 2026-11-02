@@ -49,6 +49,7 @@ import {
   previousFinancialYear,
   rawValueInSnippet,
   significantDigits,
+  scaleHeaderConflict,
   unitAgreesWithSnippet,
   unitTextSupports,
   validateGstin,
@@ -299,6 +300,11 @@ function unitReasons(definition: FieldDefinition, candidate: ExtractedField): Fi
   if (!snippetAgrees || (statedUnit !== null && !unitTextSupports(statedUnit, candidate.unitText))) {
     reasons.push('unit_mismatch');
   }
+  if (parsed.ok) {
+    const applied = parsed.inlineUnit ?? statedUnit ?? 'rupees';
+    const conflict = scaleHeaderConflict(applied, candidate.scaleHeaders);
+    if (conflict) reasons.push(conflict);
+  }
   return reasons;
 }
 
@@ -397,6 +403,7 @@ function checkAgainstSource(
     value,
     snippet: source.snippet,
     unitText: raw.unitText,
+    page: source.page,
     sheetName: source.sheetName,
     cellRef: source.cellRef,
     inlineUnit: parsed?.ok ? parsed.inlineUnit : null,
@@ -467,6 +474,7 @@ export function buildCandidates(
         sourceCheck: finding.check,
         rowLabel: finding.rowLabel,
         ...(finding.sourceSign ? { sourceSign: finding.sourceSign } : {}),
+        ...(finding.scaleHeaders && definition.unit === 'currency' ? { scaleHeaders: finding.scaleHeaders } : {}),
       },
       settleContext
     );
@@ -498,6 +506,7 @@ function parseBankAmount(raw: string | null, row: RawBankMonth, verify: SourceVe
     value: parsed.value,
     snippet: row.snippet,
     unitText: row.unitText,
+    page: row.page,
     sheetName: row.sheetName,
     cellRef: row.cellRef,
     inlineUnit: parsed.inlineUnit,
@@ -505,7 +514,9 @@ function parseBankAmount(raw: string | null, row: RawBankMonth, verify: SourceVe
     evidence: [],
     wantRowLabel: false,
   });
-  return finding.check === 'failed' ? null : parsed.value;
+  if (finding.check === 'failed') return null;
+  const applied = parsed.inlineUnit ?? row.statedUnit ?? 'rupees';
+  return scaleHeaderConflict(applied, finding.scaleHeaders) ? null : parsed.value;
 }
 
 /**

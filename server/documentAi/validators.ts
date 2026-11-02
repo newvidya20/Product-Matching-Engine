@@ -429,13 +429,32 @@ const UNIT_WORDS: ReadonlyArray<{ pattern: RegExp; unit: AmountUnit }> = [
 
 const ADJACENT_UNIT = /(\d[\d,]*(?:\.\d+)?)\)?\s*(crores?|crs?|lakhs?|lacs?|l|millions?|mn|thousands?|k)\b/gi;
 
+const MONTH_WORD = String.raw`(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)`;
+/** `31.03.2025`, `31 March 2025`, `Mar-25`, `FY25`, `FY 2024-25`, `2024-25`. A column heading, never an amount. */
+const PERIOD_STAMP = [
+  String.raw`(?<![\d.,])\d{1,2}[./-]\d{1,2}[./-](?:\d{4}|\d{2})`,
+  String.raw`(?<![a-z])${MONTH_WORD}\.?(?:[\s,]*\d{4}|\s*['-]\s*\d{2})`,
+  String.raw`(?<![a-z])f\.?\s*y\.?\s*'?\d{2,4}(?:\s*[-/]\s*\d{2,4})?`,
+  String.raw`(?<![\d.,])(?:19|20)\d{2}\s*[-/]\s*\d{2,4}`,
+].join('|');
+const ENDS_IN_PERIOD = new RegExp(String.raw`(?:${PERIOD_STAMP}|(?<![\d.,])(?:19|20)\d{2})$`, 'i');
+const LONGEST_PERIOD_TEXT = 32;
+
+/** Does the figure ending at `end` belong to a date or a year? A unit after one heads a column. */
+function isPeriodFigure(text: string, end: number): boolean {
+  return ENDS_IN_PERIOD.test(text.slice(Math.max(0, end - LONGEST_PERIOD_TEXT), end));
+}
+
 /**
  * Units printed directly after one of these figures. With `creditMarker`, a bare Cr is the bank
  * statement's credit marker and says nothing about the unit.
  */
 function adjacentUnits(text: string, tokens: readonly string[], creditMarker: boolean): AmountUnit[] {
   const units: AmountUnit[] = [];
-  for (const [, figure, word] of cleanText(text).matchAll(ADJACENT_UNIT)) {
+  const clean = cleanText(text);
+  for (const match of clean.matchAll(ADJACENT_UNIT)) {
+    const [, figure, word] = match;
+    if (isPeriodFigure(clean, match.index + figure.length)) continue;
     if (!numericTokens(figure).some((token) => tokens.includes(token))) continue;
     if (creditMarker && /^cr$/i.test(word)) continue;
     const unit = UNIT_WORDS.find((entry) => entry.pattern.test(word))?.unit;
@@ -464,7 +483,11 @@ const WORDED_AMOUNT =
  * spelled out in words, is not a header, and neither is a bank statement's credit marker.
  */
 function headerUnitsIn(text: string, creditMarker: boolean): AmountUnit[] {
-  const figuresRemoved = cleanText(text).replace(WORDED_AMOUNT, ' ').replace(ADJACENT_UNIT, ' ');
+  const figuresRemoved = cleanText(text)
+    .replace(WORDED_AMOUNT, ' ')
+    .replace(ADJACENT_UNIT, (match: string, figure: string, _word: string, offset: number, whole: string) =>
+      isPeriodFigure(whole, offset + figure.length) ? match : ' '
+    );
   return headerUnits(creditMarker ? figuresRemoved.replace(/\bcr\b/gi, ' ') : figuresRemoved);
 }
 
@@ -493,6 +516,72 @@ export function unitAgreesWithSnippet(input: {
   // No inline unit, yet the page prints one: the model dropped it, or the header is contradicted.
   if (statedUnit === null) return adjacent.length === 0;
   return adjacent.length === 0 || adjacent.includes(statedUnit);
+}
+
+// ------------------------------------------------- Scale headers in a whole page
+
+const RUPEE_WORD = String.raw`(?<![a-z])(?:₹|rs\.?|inr|rupees?)`;
+/** Not part of a longer figure or word, and not `thousands of customers`. */
+const SCALE_END = String.raw`(?![a-z0-9]|[.,]\d)(?!\s+of\b)`;
+
+/** `words` stand alone. `spellings` add what is safe only beside a rupee mark or the word `in`. */
+const SCALE_SPELLINGS: ReadonlyArray<{ unit: AmountUnit; words: string; spellings: string; extra?: readonly string[] }> = [
+  { unit: 'crore', words: 'crores?', spellings: String.raw`crores?|crs?\.?` },
+  { unit: 'lakh', words: 'lakhs?|lacs?', spellings: 'lakhs?|lacs?' },
+  { unit: 'million', words: 'millions?', spellings: String.raw`millions?|mns?\.?` },
+  {
+    unit: 'thousand',
+    words: 'thousands?',
+    spellings: `thousands?|'?000'?s?`,
+    extra: [String.raw`(?<![\w,.'])'000'?s?(?![a-z0-9]|[.,]\d)`, String.raw`(?<![\d,.])000'?s(?![a-z0-9])`],
+  },
+];
+
+/**
+ * Deliberately stricter than headerUnits, which reads only what the model quoted. This reads a
+ * whole page, so a bare unit word must not count: `over a thousand customers` is not a header.
+ */
+const SCALE_HEADERS = SCALE_SPELLINGS.map(({ unit, words, spellings, extra = [] }) => {
+  const marked = String.raw`(?:${RUPEE_WORD}\s*)?`;
+  return {
+    unit,
+    pattern: new RegExp(
+      [
+        // Rs. in lakhs, Rs. Mn, INR '000, ₹ / Crore
+        String.raw`${RUPEE_WORD}\s*[/:(-]?\s*(?:in\s+)?(?:${spellings})${SCALE_END}`,
+        // Figures in lakhs, Amounts are stated in Rs. crores
+        String.raw`(?<![a-z])(?:amounts?|figures?|values?|numbers?)\s+(?:(?:are|is|stated|shown|expressed|presented|given|reported)\s+)*in\s+${marked}(?:${spellings})${SCALE_END}`,
+        // (in lakhs), (Lakhs)
+        String.raw`[(\[]\s*in\s+${marked}(?:${spellings})\s*[)\]]`,
+        String.raw`[(\[]\s*(?:${words})\s*[)\]]`,
+        // Statement of Profit and Loss in Lakhs, as the end of a printed line
+        String.raw`(?<![a-z])in\s+${marked}(?:${words})${SCALE_END}[ \t]*:?[ \t]*$`,
+        // A line or a cell holding nothing else
+        String.raw`^[ \t]*(?:${words})${SCALE_END}[ \t]*$`,
+        // Particulars 31.03.2025 Lakhs 31.03.2024 Lakhs
+        String.raw`(?:${PERIOD_STAMP})\s*\)?\s*(?:${words})${SCALE_END}`,
+        ...extra,
+      ].join('|'),
+      'im'
+    ),
+  };
+});
+
+/** Lines stay on their own lines, so `$` means the end of a printed line or a cell. */
+function readScaleHeaders(lines: readonly string[], creditMarker: boolean): AmountUnit[] {
+  const text = lines.map((line) => cleanText(line).replace(/[‘’`]/g, "'")).join('\n');
+  const scoped = creditMarker ? text.replace(/(?<![a-z])cr\b\.?/gi, ' ') : text;
+  return SCALE_HEADERS.filter(({ pattern }) => pattern.test(scoped)).map(({ unit }) => unit);
+}
+
+/** Section 6.3: the outcome of comparing the scale applied with the headers read from the file. */
+export function scaleHeaderConflict(
+  applied: AmountUnit,
+  headers: readonly AmountUnit[] | null | undefined
+): 'unit_mismatch' | 'ambiguous_unit' | null {
+  if (!headers || headers.length === 0) return null;
+  if (!headers.includes(applied)) return 'unit_mismatch';
+  return headers.length > 1 ? 'ambiguous_unit' : null;
 }
 
 /** A stated unit counts only if the quoted header says the same. */
@@ -601,7 +690,8 @@ export type DocumentSource =
   | { kind: 'no_text' }
   | { kind: 'unreadable'; reason?: PdfReadFailure }
   | { kind: 'cells'; rows: readonly SourceRow[] }
-  | { kind: 'pdf'; lines: readonly string[] };
+  /** `pages` holds the same lines by page. Without it the lines are read as one page. */
+  | { kind: 'pdf'; lines: readonly string[]; pages?: ReadonlyArray<readonly string[]> };
 
 export interface SourceQuery {
   valueType: 'number' | 'string' | 'enum';
@@ -609,6 +699,8 @@ export interface SourceQuery {
   value: FieldValue | null;
   snippet: string;
   unitText: string | null;
+  /** The 1-based PDF page cited. Decides where scale headers are read. */
+  page?: number | null;
   sheetName: string | null;
   cellRef: string | null;
   inlineUnit: AmountUnit | null;
@@ -624,6 +716,8 @@ export interface SourceFinding {
   rowLabel: string | null;
   /** Read off the file with wantRowLabel. Kept apart from rowLabel, which is cut at 300 characters. */
   sourceSign?: SourceSign | null;
+  /** Numbers only: scale headers on the cited page or sheet. Absent when there are none. */
+  scaleHeaders?: AmountUnit[];
 }
 
 export type SourceVerifier = (query: SourceQuery) => SourceFinding;
@@ -652,6 +746,28 @@ function joinLabel(parts: readonly string[]): string | null {
   return [...new Set(parts)].join(' | ').slice(0, MAX_ROW_LABEL) || null;
 }
 
+/** Scale headers of a page or sheet, read once. `credit` leaves out a bank statement's Cr marker. */
+interface ScaleScope {
+  plain: readonly AmountUnit[];
+  credit: readonly AmountUnit[];
+}
+
+function readScaleScope(lines: readonly string[]): ScaleScope {
+  return { plain: readScaleHeaders(lines, false), credit: readScaleHeaders(lines, true) };
+}
+
+function wholeFileScope(scopes: readonly ScaleScope[]): ScaleScope {
+  return {
+    plain: [...new Set(scopes.flatMap((scope) => scope.plain))],
+    credit: [...new Set(scopes.flatMap((scope) => scope.credit))],
+  };
+}
+
+function scaleFinding(scope: ScaleScope, query: SourceQuery): Pick<SourceFinding, 'scaleHeaders'> {
+  const units = query.creditMarker ? scope.credit : scope.plain;
+  return query.valueType === 'number' && units.length > 0 ? { scaleHeaders: [...units] } : {};
+}
+
 function cellVerifier(rows: readonly SourceRow[]): SourceVerifier {
   const indexed = rows.flatMap((row, rowIndex) =>
     row.cells.map((cell) => ({
@@ -665,6 +781,14 @@ function cellVerifier(rows: readonly SourceRow[]): SourceVerifier {
     }))
   );
   const wholeText = indexed.map((cell) => cell.text).join(' ');
+  const sheetLines = new Map<string, string[]>();
+  for (const row of rows) {
+    const lines = sheetLines.get(row.sheetName) ?? [row.sheetName];
+    sheetLines.set(row.sheetName, lines);
+    lines.push(...row.cells.map((cell) => cell.text));
+  }
+  const sheetScopes = new Map([...sheetLines].map(([name, lines]) => [name, readScaleScope(lines)]));
+  const fileScope = wholeFileScope([...sheetScopes.values()]);
 
   return (query) => {
     const unitText = query.unitText === null ? null : compact(query.unitText);
@@ -690,7 +814,10 @@ function cellVerifier(rows: readonly SourceRow[]): SourceVerifier {
     const citedMatches = cited.filter(holdsValue);
     const found = citedMatches.length > 0 ? citedMatches : indexed.filter(holdsValue);
     if (found.length === 0) return NOT_VERIFIED;
-    if (!query.wantRowLabel) return { check: 'verified', rowLabel: null };
+    // A sheet that does not hold the value is a wrong citation, and must not narrow the search.
+    const citedSheet = found.some((cell) => cell.sheetName === query.sheetName);
+    const scale = scaleFinding((citedSheet && sheetScopes.get(query.sheetName ?? '')) || fileScope, query);
+    if (!query.wantRowLabel) return { check: 'verified', rowLabel: null, ...scale };
 
     const foundRows = new Set(found.map((cell) => cell.rowIndex));
     const rowCells = indexed.filter((cell) => foundRows.has(cell.rowIndex));
@@ -698,11 +825,11 @@ function cellVerifier(rows: readonly SourceRow[]): SourceVerifier {
     let sourceSign: SourceSign | null = null;
     if (found.some((cell) => cell.negative)) sourceSign = 'negative_figure';
     else if (rowCells.some((cell) => cell.negative)) sourceSign = 'negative_in_row';
-    return { check: 'verified', rowLabel: joinLabel(labels.map((cell) => cell.text)), sourceSign };
+    return { check: 'verified', rowLabel: joinLabel(labels.map((cell) => cell.text)), sourceSign, ...scale };
   };
 }
 
-function pdfVerifier(lines: readonly string[]): SourceVerifier {
+function pdfVerifier(lines: readonly string[], pageLines: ReadonlyArray<readonly string[]>): SourceVerifier {
   const wholeText = lines.join(' ');
   const compacted = compact(wholeText);
   // Built once: a candidate looks its lines up here, so it does not rescan the whole document.
@@ -715,6 +842,8 @@ function pdfVerifier(lines: readonly string[]): SourceVerifier {
       else linesByToken.set(token, [lineIndex]);
     }
   });
+  const pages = pageLines.map((page) => ({ tokens: new Set(page.flatMap(numericTokens)), scope: readScaleScope(page) }));
+  const documentScope = wholeFileScope(pages.map((page) => page.scope));
 
   return (query) => {
     if (query.unitText !== null && !compacted.includes(compact(query.unitText))) return NOT_VERIFIED;
@@ -734,11 +863,16 @@ function pdfVerifier(lines: readonly string[]): SourceVerifier {
       .filter((lineIndex) => rawTokens.every((token) => lineTokens[lineIndex].has(token)))
       .map((lineIndex) => lines[lineIndex]);
     if (!unitsAllow(query, rowLines.join(' '), rawTokens)) return NOT_VERIFIED;
-    if (!query.wantRowLabel) return { check: 'verified', rowLabel: null };
+    // A page that does not hold the value is a wrong citation, and must not narrow the search.
+    const cited = pages[(query.page ?? 0) - 1];
+    const citedPage = cited !== undefined && rawTokens.every((token) => cited.tokens.has(token));
+    const scale = scaleFinding(citedPage ? cited.scope : documentScope, query);
+    if (!query.wantRowLabel) return { check: 'verified', rowLabel: null, ...scale };
     return {
       check: 'verified',
       rowLabel: joinLabel(rowLines),
       sourceSign: rowLines.some(hasNegativeFigure) ? 'negative_in_row' : null,
+      ...scale,
     };
   };
 }
@@ -749,7 +883,7 @@ export function createSourceVerifier(source: DocumentSource): SourceVerifier {
     case 'cells':
       return cellVerifier(source.rows);
     case 'pdf':
-      return pdfVerifier(source.lines);
+      return pdfVerifier(source.lines, source.pages ?? [source.lines]);
     case 'unreadable':
       return () => NOT_VERIFIED;
     default:
