@@ -3,6 +3,7 @@ import { Moon, Save, SunMedium } from 'lucide-react';
 import { useAppState } from '../context/AppStateContext';
 import { PageHeader } from '../components/ui/Primitives';
 import type { SystemSettings } from '../types/domain';
+import { DocumentAiSettingsCard } from '../components/documentAi/DocumentAiSettingsCard';
 
 export function SettingsModule() {
   const { state, saveSettings } = useAppState();
@@ -120,6 +121,8 @@ export function SettingsModule() {
           {state.isMutating ? 'Saving...' : 'Save Local Settings'}
         </button>
       </form>
+
+      <DocumentAiSettingsCard user={state.currentUser} />
     </div>
   );
 }
