@@ -114,6 +114,8 @@ function AssessmentForm({
     editingAssessment ? { id: editingAssessment.id, referenceCode: editingAssessment.referenceCode } : null
   );
   const savedIdRef = useRef<string | null>(editingAssessment?.id ?? null);
+  // Bumped on every detach (Reset, Populate Demo) so a save started earlier never binds the form to its record.
+  const detachGenRef = useRef(0);
   const [moreOpen, setMoreOpen] = useState(false);
   const [previewDoc, setPreviewDoc] = useState<StoredDocument | null>(null);
   const [deleteDoc, setDeleteDoc] = useState<StoredDocument | null>(null);
@@ -151,6 +153,7 @@ function AssessmentForm({
 
   /** Leaves the saved record: the next Save creates a new one and the heading stops saying Edit Draft. */
   const detachFromSaved = (): boolean => {
+    detachGenRef.current += 1;
     const wasSaved = savedIdRef.current !== null;
     savedIdRef.current = null;
     setSaved(null);
@@ -250,13 +253,10 @@ function AssessmentForm({
       return;
     }
 
-    let link: { documentSessionId?: string };
-    try {
-      link = await ai.prepareForSave();
-    } catch (error) {
-      setValidationError(error instanceof Error ? error.message : 'Could not save your changes. Try again.');
-      return;
-    }
+    const startedGen = detachGenRef.current;
+    // Never blocks the save: a Document AI failure only produces a notice.
+    const { warning, ...link } = await ai.prepareForSave();
+    if (warning) notify('error', warning);
     // Built after the flush, from the ref, so edits made while it ran are saved.
     const payload: Partial<BorrowerAssessment> = {
       ...buildAssessmentPayload(ai.formRef.current, asDraft),
@@ -267,6 +267,7 @@ function AssessmentForm({
     if (existingId) {
       const updated = await updateAssessment(existingId, payload);
       if (!updated) return;
+      if (detachGenRef.current !== startedGen) return;
       void ai.afterSave(updated.id).then((message) => message && notify('error', message));
       if (!asDraft) openAssessmentInEngine(updated.id);
       return;
@@ -276,6 +277,8 @@ function AssessmentForm({
     // may rely on component state. Everything below uses refs and module-level calls only.
     const created = await createAssessment(payload, !asDraft);
     if (!created) return;
+    // Reset or Populate Demo ran while the create was in flight: the record exists, but this form is no longer it.
+    if (detachGenRef.current !== startedGen) return;
     savedIdRef.current = created.id;
     void ai.afterSave(created.id).then((message) => message && notify('error', message));
     setSaved({ id: created.id, referenceCode: created.referenceCode });
