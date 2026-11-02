@@ -319,6 +319,66 @@ describe('enum options (contract 3 and 6)', () => {
   });
 });
 
+describe('enum evidence and review (contract 4.2)', () => {
+  const alwaysReviewed = (d: FieldDefinition) => d.policy === 'explicit_request' || d.alwaysReview === true;
+
+  it('always reviews GST compliance and every explicit request enum', () => {
+    assert.equal(byId('financialProfile.gstComplianceStatus').alwaysReview, true);
+    assert.equal(byId('fundingPurpose').policy, 'explicit_request');
+  });
+
+  it('defines evidence for every option that can auto-apply, and for those enums only', () => {
+    for (const definition of DIRECT_FIELDS.filter((d) => d.valueType === 'enum')) {
+      if (alwaysReviewed(definition)) {
+        assert.equal(definition.enumEvidence, undefined, `${definition.fieldId} is always reviewed`);
+        continue;
+      }
+      const reachable = definition.allowedValues.filter(
+        (option) =>
+          option !== 'not_provided' &&
+          (definition.policy !== 'positive_only' || option === 'yes' || option === 'available')
+      );
+      assert.ok(reachable.length > 0, definition.fieldId);
+      for (const option of reachable) {
+        assert.ok(definition.enumEvidence?.[option]?.any.length, `${definition.fieldId} ${option} has no evidence`);
+      }
+    }
+  });
+
+  it('keys evidence by real options', () => {
+    for (const definition of FIELD_DEFINITIONS) {
+      for (const option of Object.keys(definition.enumEvidence ?? {})) {
+        assert.ok(definition.allowedValues.includes(option), `${definition.fieldId} ${option}`);
+      }
+    }
+  });
+});
+
+describe('annual flow fields (contract 4.3)', () => {
+  it('marks exactly the fields that cover a whole year', () => {
+    const actual = FIELD_DEFINITIONS.filter((d) => d.annualFlow).map(fid).sort();
+    assert.deepEqual(actual, [
+      'financialProfile.amortization',
+      'financialProfile.annualRevenue',
+      'financialProfile.annualScheduledPrincipalRepayments',
+      'financialProfile.depreciation',
+      'financialProfile.ebit',
+      'financialProfile.ebitda',
+      'financialProfile.gstAnnualTurnover',
+      'financialProfile.interestExpense',
+      'financialProfile.netProfitAfterTax',
+      'financialProfile.operatingCashFlow',
+      'financialProfile.previousAnnualRevenue',
+    ]);
+  });
+
+  it('keeps balance-sheet fields point-in-time', () => {
+    for (const key of ['currentAssets', 'currentLiabilities', 'totalAssets', 'tangibleNetWorth', 'shareholdersEquity']) {
+      assert.equal(byId(`financialProfile.${key}`).annualFlow, undefined, key);
+    }
+  });
+});
+
 describe('numeric rules and signs (contract 4.6, 4.7)', () => {
   const signed = [
     'financialProfile.netProfitAfterTax',

@@ -2,12 +2,12 @@
  * Pure validators and normalisers for Document AI (docs/contracts.md section 6).
  * No I/O, no clock, no env. Nothing here throws, and nothing logs.
  */
-import type { DocumentType, FieldValue } from '../../src/types/documentAi.ts';
+import type { AmountUnit, DocumentType, FieldValue, SourceCheck } from '../../src/types/documentAi.ts';
 import type { FieldDefinition, NumericUnit, SignPolicy } from '../../src/documentAi/fieldMap.ts';
 import { DOCUMENT_AI_THRESHOLDS } from '../../src/types/documentAi.ts';
 
 export type Validated<T> = { ok: true; value: T } | { ok: false; code: string };
-export type AmountUnit = 'rupees' | 'thousand' | 'lakh' | 'crore' | 'million';
+export type { AmountUnit };
 
 export const AMOUNT_UNITS: readonly AmountUnit[] = ['rupees', 'thousand', 'lakh', 'crore', 'million'];
 
@@ -99,12 +99,15 @@ function parsePlainNumber(text: string): number | null {
 }
 
 type IndianAmountResult =
-  | { ok: true; value: number; ambiguousUnit: boolean }
+  | { ok: true; value: number; ambiguousUnit: boolean; inlineUnit: AmountUnit | null }
   | { ok: false; code: string };
+
+/** Below this, a financial statement figure with no stated unit could be in rupees or in lakh. */
+const STATEMENT_UNIT_FLOOR = 100_000;
 
 export function parseIndianAmount(
   raw: string,
-  ctx: { statedUnit?: AmountUnit | null; documentType: DocumentType }
+  ctx: { statedUnit?: AmountUnit | null; documentType: DocumentType; amountNature?: 'limit' }
 ): IndianAmountResult {
   if (typeof raw !== 'string') return fail('invalid_number');
   let text = cleanText(raw);
@@ -144,8 +147,9 @@ export function parseIndianAmount(
         negative = true;
         bankMarkerSeen = true;
         text = text.replace(/\s*dr\.?$/i, '').trim();
-      } else if (/(?<=[\d)\s])cr\.?$/i.test(text)) {
-        // The credit marker, not crore. `Crs` and `Crore` fall through and stay units.
+      } else if (ctx.amountNature !== 'limit' && /(?<=[\d)\s])cr\.?$/i.test(text)) {
+        // The credit marker, not crore. `Crs` and `Crore` fall through and stay units, as does
+        // any Cr on a limit: a sanctioned limit is not a balance or a transaction.
         bankMarkerSeen = true;
         text = text.replace(/\s*cr\.?$/i, '').trim();
       }
@@ -174,20 +178,25 @@ export function parseIndianAmount(
   if (!Number.isFinite(scaled) || scaled > Number.MAX_SAFE_INTEGER) return fail('out_of_range');
 
   const unitsDisagree = inlineUnit !== null && statedUnit !== null && inlineUnit !== statedUnit;
+  const unitless = inlineUnit === null && statedUnit === null && magnitude !== 0;
   const unitlessDecimal =
-    inlineUnit === null &&
-    statedUnit === null &&
-    magnitude !== 0 &&
+    unitless &&
     magnitude < 1000 &&
     text.includes('.') &&
     ctx.documentType !== 'bank_statement' &&
     ctx.documentType !== 'gst_return';
+  const unitlessStatementFigure =
+    unitless && ctx.documentType === 'financial_statement' && magnitude < STATEMENT_UNIT_FLOOR;
+  // `50,00,000.00 Cr` beside a limit on a bank statement may still be a credit marker. Say so.
+  const limitMaybeMarked =
+    isBank && ctx.amountNature === 'limit' && inlineUnit === 'crore' && magnitude >= STATEMENT_UNIT_FLOOR;
 
   return {
     ok: true,
     // `(0.00)` must not become -0.
     value: negative && scaled !== 0 ? -scaled : scaled,
-    ambiguousUnit: unitsDisagree || unitlessDecimal,
+    ambiguousUnit: unitsDisagree || unitlessDecimal || unitlessStatementFigure || limitMaybeMarked,
+    inlineUnit,
   };
 }
 
@@ -388,8 +397,8 @@ export function significantDigits(value: FieldValue): number {
 function numericTokens(text: string): string[] {
   return (text.match(/\d[\d,]*(?:\.\d+)?/g) ?? []).map((token) => {
     const plain = token.replace(/,/g, '');
-    const canonical = plain.includes('.') ? plain.replace(/\.?0+$/, '') : plain;
-    return canonical.replace('.', '');
+    // The decimal point stays, so 1.25 is never "found" in 12.5.
+    return plain.includes('.') ? plain.replace(/\.?0+$/, '') : plain;
   });
 }
 
@@ -407,4 +416,270 @@ export function rawValueInSnippet(rawValue: string, snippet: string, valueType: 
   const fold = (text: string) => cleanText(text).toLowerCase();
   const needle = fold(rawValue);
   return needle.length > 0 && fold(snippet).includes(needle);
+}
+
+// ------------------------------------------------------------- Unit evidence
+
+const UNIT_WORDS: ReadonlyArray<{ pattern: RegExp; unit: AmountUnit }> = [
+  { pattern: /^(?:crores?|crs?)$/i, unit: 'crore' },
+  { pattern: /^(?:lakhs?|lacs?|l)$/i, unit: 'lakh' },
+  { pattern: /^(?:millions?|mn)$/i, unit: 'million' },
+  { pattern: /^(?:thousands?|k)$/i, unit: 'thousand' },
+];
+
+const ADJACENT_UNIT = /(\d[\d,]*(?:\.\d+)?)\)?\s*(crores?|crs?|lakhs?|lacs?|l|millions?|mn|thousands?|k)\b/gi;
+
+/**
+ * Units printed directly after one of these figures. With `creditMarker`, a bare Cr is the bank
+ * statement's credit marker and says nothing about the unit.
+ */
+function adjacentUnits(text: string, tokens: readonly string[], creditMarker: boolean): AmountUnit[] {
+  const units: AmountUnit[] = [];
+  for (const [, figure, word] of cleanText(text).matchAll(ADJACENT_UNIT)) {
+    if (!numericTokens(figure).some((token) => tokens.includes(token))) continue;
+    if (creditMarker && /^cr$/i.test(word)) continue;
+    const unit = UNIT_WORDS.find((entry) => entry.pattern.test(word))?.unit;
+    if (unit) units.push(unit);
+  }
+  return units;
+}
+
+/** Scaled units named anywhere in header text. A lone `L` or `K` is not a header. */
+function headerUnits(text: string): AmountUnit[] {
+  const clean = cleanText(text).replace(/[‘’`]/g, "'");
+  const units: AmountUnit[] = [];
+  if (/\b(?:crores?|crs?)\b/i.test(clean)) units.push('crore');
+  if (/\b(?:lakhs?|lacs?)\b/i.test(clean)) units.push('lakh');
+  if (/\b(?:millions?|mn)\b/i.test(clean)) units.push('million');
+  if (/\bthousands?\b|(?<![\d,.])'?000s?\b/i.test(clean)) units.push('thousand');
+  return units;
+}
+
+/** Section 6.3: the unit the server is about to apply must not contradict the page. */
+export function unitAgreesWithSnippet(input: {
+  rawValue: string;
+  inlineUnit: AmountUnit | null;
+  statedUnit: AmountUnit | null;
+  snippet: string;
+  creditMarker: boolean;
+}): boolean {
+  const { rawValue, inlineUnit, statedUnit, snippet, creditMarker } = input;
+  const adjacent = adjacentUnits(snippet, numericTokens(rawValue), creditMarker);
+  if (inlineUnit !== null) {
+    if (adjacent.includes(inlineUnit)) return true;
+    return adjacent.length === 0 && headerUnits(snippet).includes(inlineUnit);
+  }
+  // No inline unit, yet the page prints one: the model dropped it, or the header is contradicted.
+  if (statedUnit === null) return adjacent.length === 0;
+  return adjacent.length === 0 || adjacent.includes(statedUnit);
+}
+
+/** A stated unit counts only if the quoted header says the same. */
+export function unitTextSupports(statedUnit: AmountUnit, unitText: string | null | undefined): boolean {
+  if (!unitText) return false;
+  const scaled = headerUnits(unitText);
+  if (scaled.length > 0) return scaled.includes(statedUnit);
+  return statedUnit === 'rupees' && /₹|\b(?:rs|re|inr|rupees?)\b/i.test(cleanText(unitText));
+}
+
+const FOREIGN_CODES = /(?<![A-Za-z])(?:USD|EUR|GBP|AED|SGD|JPY|CAD|AUD|CHF|CNY|HKD|SAR|NZD|ZAR|QAR|KWD|OMR)(?![A-Za-z])/;
+const FOREIGN_WORDS = /[$€£¥]|\b(?:dollars?|euros?|pounds?\s+sterling|dirhams?|yen)\b/i;
+
+/** Case-sensitive codes: `Aud.` and `Sar` turn up in Indian documents and are not currencies. */
+export function hasForeignUnit(text: string): boolean {
+  return FOREIGN_CODES.test(text) || FOREIGN_WORDS.test(text);
+}
+
+// -------------------------------------------------------------- Wording checks
+
+/** The name of a statement says nothing about the figure. A row label does. */
+const STATEMENT_TITLE = /statement\s+of\s+profit\s*(?:and|&)\s*loss|profit\s*(?:and|&)\s*loss\s+(?:account|a\/c|statement)/gi;
+const LOSS_WORDING = /\b(?:loss(?:es)?|deficit|deficiency|negative|shortfall|erosion|eroded|debit\s+balance)\b/i;
+
+export function hasLossWording(text: string): boolean {
+  return LOSS_WORDING.test(cleanText(text).replace(STATEMENT_TITLE, ' '));
+}
+
+const PART_YEAR_WORDING = new RegExp(
+  [
+    String.raw`\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven)[\s-]+months?\b`,
+    String.raw`\b(?!12\b)\d{1,2}[\s-]*months?\s+(?:ended|ending|to)\b`,
+    String.raw`\b(?:[369]m|q[1-4]|h[12])\b`,
+    String.raw`\bhalf[\s-]*year(?:ly)?\b`,
+    String.raw`\bquarter\s+(?:ended|ending)\b`,
+    String.raw`\bquarterly\s+(?:results?|figures?|statement)\b`,
+    String.raw`\b(?:ytd|year[\s-]+to[\s-]+date)\b`,
+    String.raw`\b(?:part[\s-]+year|stub\s+period|period\s+(?:ended|ending))\b`,
+    String.raw`\binterim\s+(?:period|results?|financials?|statements?)\b`,
+    String.raw`\bapr(?:il)?\s*(?:to|-)\s*(?:jun|sep|dec|may|jul|aug|oct|nov|jan|feb)`,
+  ].join('|'),
+  'i'
+);
+
+export function hasPartYearWording(text: string): boolean {
+  return PART_YEAR_WORDING.test(cleanText(text));
+}
+
+function containsPhrase(text: string, phrase: string): boolean {
+  return ` ${normalizeComparableString(text)} `.includes(` ${normalizeComparableString(phrase)} `);
+}
+
+/** The evidence keywords of `value` found in `text`. Empty when none, or when a `none` phrase is there. */
+export function findEnumEvidence(definition: FieldDefinition, value: FieldValue, text: string): string[] {
+  const rule = definition.enumEvidence?.[String(value)];
+  if (!rule) return [];
+  if (rule.none?.some((phrase) => containsPhrase(text, phrase))) return [];
+  return rule.any.filter((phrase) => containsPhrase(text, phrase));
+}
+
+// ---------------------------------------------- Check against server-read text
+
+export interface SourceRow {
+  sheetName: string;
+  cells: ReadonlyArray<{ ref: string; text: string }>;
+}
+
+/**
+ * What the server itself read from a file. `no_text` has nothing to check against: an image or a
+ * scanned PDF. `unreadable` is a PDF the parser gave up on, and fails closed, so that a file built
+ * to break the parser cannot escape the check.
+ */
+export type DocumentSource =
+  | { kind: 'no_text' }
+  | { kind: 'unreadable' }
+  | { kind: 'cells'; rows: readonly SourceRow[] }
+  | { kind: 'pdf'; lines: readonly string[] };
+
+export interface SourceQuery {
+  valueType: 'number' | 'string' | 'enum';
+  rawValue: string;
+  value: FieldValue | null;
+  snippet: string;
+  unitText: string | null;
+  sheetName: string | null;
+  cellRef: string | null;
+  inlineUnit: AmountUnit | null;
+  creditMarker: boolean;
+  /** Enum only: the evidence keywords found in the snippet, which must really be in the file. */
+  evidence: readonly string[];
+  /** Signed fields only: return the row's text, for the loss wording check. */
+  wantRowLabel: boolean;
+}
+
+export interface SourceFinding {
+  check: SourceCheck;
+  rowLabel: string | null;
+}
+
+export type SourceVerifier = (query: SourceQuery) => SourceFinding;
+
+const MAX_ROW_LABEL = 300;
+const NOT_VERIFIED: SourceFinding = { check: 'failed', rowLabel: null };
+
+/** Case and whitespace insensitive: PDF text breaks lines where the model's quote does not. */
+function compact(text: string): string {
+  return cleanText(text).toLowerCase().replace(/[‘’`]/g, "'").replace(/\s+/g, '');
+}
+
+function textMatches(query: SourceQuery, haystack: string): boolean {
+  const wanted = [query.rawValue, query.value === null ? '' : String(query.value)].map(compact).filter(Boolean);
+  return wanted.some((needle) => haystack.includes(needle));
+}
+
+/** A figure printed with another unit beside it is not the figure the model reported. */
+function unitsAllow(query: SourceQuery, text: string, tokens: readonly string[]): boolean {
+  if (query.inlineUnit === null) return true;
+  const adjacent = adjacentUnits(text, tokens, query.creditMarker);
+  return adjacent.length === 0 || adjacent.includes(query.inlineUnit);
+}
+
+function joinLabel(parts: readonly string[]): string | null {
+  return [...new Set(parts)].join(' | ').slice(0, MAX_ROW_LABEL) || null;
+}
+
+function cellVerifier(rows: readonly SourceRow[]): SourceVerifier {
+  const indexed = rows.flatMap((row, rowIndex) =>
+    row.cells.map((cell) => ({
+      rowIndex,
+      sheetName: row.sheetName,
+      ref: cell.ref,
+      text: cell.text,
+      tokens: new Set(numericTokens(cell.text)),
+      compacted: compact(cell.text),
+    }))
+  );
+  const wholeText = indexed.map((cell) => cell.text).join(' ');
+
+  return (query) => {
+    const unitText = query.unitText === null ? null : compact(query.unitText);
+    if (unitText !== null && !indexed.some((cell) => cell.compacted.includes(unitText))) return NOT_VERIFIED;
+    if (query.valueType === 'enum' && query.evidence.length > 0) {
+      return query.evidence.some((phrase) => containsPhrase(wholeText, phrase))
+        ? { check: 'verified', rowLabel: null }
+        : NOT_VERIFIED;
+    }
+
+    const tokens = numericTokens(query.rawValue);
+    const holdsValue = (cell: (typeof indexed)[number]) =>
+      query.valueType === 'number'
+        ? tokens.length > 0 && tokens.every((token) => cell.tokens.has(token)) && unitsAllow(query, cell.text, tokens)
+        : textMatches(query, cell.compacted);
+    const cited = indexed.filter(
+      (cell) =>
+        (query.sheetName === null || cell.sheetName === query.sheetName) &&
+        (query.cellRef === null || cell.ref === query.cellRef)
+    );
+    // The cell it cites, when that holds the value. Otherwise any visible cell: the raw value must
+    // still be somewhere a reviewer can see it, and a hidden row is not in `rows` at all.
+    const citedMatches = cited.filter(holdsValue);
+    const found = citedMatches.length > 0 ? citedMatches : indexed.filter(holdsValue);
+    if (found.length === 0) return NOT_VERIFIED;
+    if (!query.wantRowLabel) return { check: 'verified', rowLabel: null };
+
+    const foundRows = new Set(found.map((cell) => cell.rowIndex));
+    const labels = indexed.filter((cell) => foundRows.has(cell.rowIndex) && /[A-Za-z]/.test(cell.text));
+    return { check: 'verified', rowLabel: joinLabel(labels.map((cell) => cell.text)) };
+  };
+}
+
+function pdfVerifier(lines: readonly string[]): SourceVerifier {
+  const wholeText = lines.join(' ');
+  const compacted = compact(wholeText);
+  const tokens = new Set(numericTokens(wholeText));
+
+  return (query) => {
+    if (query.unitText !== null && !compacted.includes(compact(query.unitText))) return NOT_VERIFIED;
+    if (
+      query.valueType === 'enum' &&
+      query.evidence.length > 0 &&
+      !query.evidence.some((phrase) => containsPhrase(wholeText, phrase))
+    ) {
+      return NOT_VERIFIED;
+    }
+    const rawTokens = numericTokens(query.rawValue);
+    if (![...rawTokens, ...numericTokens(query.snippet)].every((token) => tokens.has(token))) return NOT_VERIFIED;
+    if (query.valueType === 'number' && rawTokens.length === 0) return NOT_VERIFIED;
+    if (query.valueType === 'string' && !textMatches(query, compacted)) return NOT_VERIFIED;
+
+    const rowLines = lines.filter((line) => {
+      const lineTokens = numericTokens(line);
+      return rawTokens.length > 0 && rawTokens.every((token) => lineTokens.includes(token));
+    });
+    if (!unitsAllow(query, rowLines.join(' '), rawTokens)) return NOT_VERIFIED;
+    return { check: 'verified', rowLabel: query.wantRowLabel ? joinLabel(rowLines) : null };
+  };
+}
+
+/** Section 4.2: checks a candidate against text the server read, never against the model's quote. */
+export function createSourceVerifier(source: DocumentSource): SourceVerifier {
+  switch (source.kind) {
+    case 'cells':
+      return cellVerifier(source.rows);
+    case 'pdf':
+      return pdfVerifier(source.lines);
+    case 'unreadable':
+      return () => NOT_VERIFIED;
+    default:
+      return () => ({ check: 'no_text', rowLabel: null });
+  }
 }
