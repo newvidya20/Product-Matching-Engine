@@ -73,27 +73,39 @@ function signingKey(): Buffer {
   const file = path.join(getRoot(), 'session-secret');
   if (cachedSecret && cachedSecret.file === file) return cachedSecret.key;
   let hex = '';
+  let exists = false;
   try {
     hex = fs.readFileSync(file, 'utf-8').trim();
+    exists = true;
   } catch {
     hex = '';
   }
-  if (!/^[0-9a-f]{64}$/.test(hex)) {
-    hex = crypto.randomBytes(32).toString('hex');
+  const valid = (v: string) => /^[0-9a-f]{64}$/.test(v);
+  if (!valid(hex)) {
+    const fresh = crypto.randomBytes(32).toString('hex');
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
     const tmp = `${file}.${crypto.randomBytes(6).toString('hex')}.tmp`;
-    fs.writeFileSync(tmp, hex, { mode: 0o600 });
+    fs.writeFileSync(tmp, fresh, { mode: 0o600 });
     try {
-      fs.linkSync(tmp, file); // fails if another writer won the race; then read theirs
+      if (!exists) {
+        try {
+          fs.linkSync(tmp, file); // fails if another writer won the race; then read theirs
+        } catch {
+          /* keep existing */
+        }
+      } else {
+        fs.renameSync(tmp, file); // existing content is invalid: replace it
+      }
     } catch {
-      /* keep existing */
+      /* fall through to re-read */
     }
     fs.rmSync(tmp, { force: true });
     try {
       hex = fs.readFileSync(file, 'utf-8').trim();
     } catch {
-      /* use ours */
+      hex = '';
     }
+    if (!valid(hex)) hex = fresh; // unreadable or still invalid: use ours for this process
   }
   const key = Buffer.from(hex, 'hex');
   cachedSecret = { file, key };
@@ -199,8 +211,12 @@ export function hasValidDocumentSession(req: Request): boolean {
   return resolveActor(req).actor !== null;
 }
 
-function cookieAttrs(): string {
-  return `HttpOnly; SameSite=Strict; Path=/api/document-ai${isProduction() ? '; Secure' : ''}`;
+/** Path=/api so the cookie also reaches DELETE /api/assessments/:id (needed to authorize the KYC purge). */
+const COOKIE_PATH = '/api';
+const LEGACY_COOKIE_PATH = '/api/document-ai';
+
+function cookieAttrs(path: string = COOKIE_PATH): string {
+  return `HttpOnly; SameSite=Strict; Path=${path}${isProduction() ? '; Secure' : ''}`;
 }
 
 // eslint-disable-next-line no-control-regex
@@ -270,10 +286,10 @@ export function createAuthSession(req: Request, res: Response): void {
     cv: codeVersion(role),
     exp: Math.floor(now / 1000) + MAX_AGE_SECONDS,
   };
-  res.setHeader(
-    'Set-Cookie',
-    `${COOKIE_NAME}=${makeCookieValue(payload)}; ${cookieAttrs()}; Max-Age=${MAX_AGE_SECONDS}`
-  );
+  res.setHeader('Set-Cookie', [
+    `${COOKIE_NAME}=${makeCookieValue(payload)}; ${cookieAttrs()}; Max-Age=${MAX_AGE_SECONDS}`,
+    `${COOKIE_NAME}=; ${cookieAttrs(LEGACY_COOKIE_PATH)}; Max-Age=0`,
+  ]);
   void logActivity({ type: 'auth_session_created', actor: email, code: role });
   const out: AuthStatusResponse = { authenticated: true, configured: true, actor: actorFromCookie(payload) };
   res.json(out);
@@ -281,7 +297,10 @@ export function createAuthSession(req: Request, res: Response): void {
 
 export function logout(req: Request, res: Response): void {
   const { actor } = resolveActor(req);
-  res.setHeader('Set-Cookie', `${COOKIE_NAME}=; ${cookieAttrs()}; Max-Age=0`);
+  res.setHeader('Set-Cookie', [
+    `${COOKIE_NAME}=; ${cookieAttrs()}; Max-Age=0`,
+    `${COOKIE_NAME}=; ${cookieAttrs(LEGACY_COOKIE_PATH)}; Max-Age=0`,
+  ]);
   if (actor) void logActivity({ type: 'auth_logout', actor: actor.email, code: actor.via });
   res.status(204).end();
 }

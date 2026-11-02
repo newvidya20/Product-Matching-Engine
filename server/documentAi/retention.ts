@@ -11,6 +11,7 @@ import {
   getSettings,
   listDocuments,
   listSessionIds,
+  removeOrphanSessionDir,
 } from './store.ts';
 
 const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
@@ -27,7 +28,14 @@ export async function runRetention(now: Date = new Date()): Promise<{ files: num
     for (const sessionId of await listSessionIds()) {
       try {
         const session = await getSession(sessionId);
-        if (!session) continue;
+        if (!session) {
+          // A directory without session.json can never be retained or listed; remove it.
+          if (await removeOrphanSessionDir(sessionId)) {
+            sessions += 1;
+            void logActivity({ type: 'unlinked_session_purged', actor: 'system', sessionId, code: 'orphan_directory' });
+          }
+          continue;
+        }
         const purgeable = session.detachedAt
           ? new Date(session.detachedAt).getTime() < fileCutoff
           : !session.assessmentId && new Date(session.createdAt).getTime() < sessionCutoff;

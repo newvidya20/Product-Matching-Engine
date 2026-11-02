@@ -127,15 +127,20 @@ async function processDocument(job: ExtractionJob, documentId: string, actorEmai
   };
 
   const fail = async (code: ExtractionErrorCode) => {
-    const current = await getDocument(sessionId, documentId);
-    if (!current || current.fileDeletedAt) {
-      await settleDeleted();
-      return; // deleted during the job: not a failure to report
-    }
-    await updateDocument(sessionId, documentId, (d) => {
+    // Decide inside the document lock so a delete committed meanwhile is never overwritten with 'failed'.
+    let deleted = false;
+    const updated = await updateDocument(sessionId, documentId, (d) => {
+      if (d.fileDeletedAt) {
+        deleted = true;
+        return;
+      }
       d.status = 'failed';
       d.errorCode = code;
     });
+    if (!updated || deleted) {
+      await settleDeleted();
+      return; // deleted during the job: not a failure to report
+    }
     job.errors.push({ documentId, code });
     void logActivity({
       type: 'extraction_document_failed',

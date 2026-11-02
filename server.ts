@@ -2609,13 +2609,14 @@ async function startServer() {
         const purgedSessionId = mayPurge
           ? await purgeSessionForAssessment(assessmentId)
           : await unlinkSessionForAssessment(assessmentId);
-        if (purgedSessionId && mayPurge) {
+        if (purgedSessionId) {
           void logActivity({
             type: 'unlinked_session_purged',
             actor: authCtx.user?.email || 'system',
             sessionId: purgedSessionId,
             assessmentId,
-            code: 'assessment_deleted',
+            // Detached sessions keep their files until retention expires them.
+            code: mayPurge ? 'assessment_deleted' : 'assessment_deleted_detached',
           });
         }
         res.json({ success: true });

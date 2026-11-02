@@ -338,8 +338,9 @@ export function createDocumentAiRouter(options: DocumentAiRouterOptions): expres
     }
     const doc = await getDocument(sessionId, documentId);
     if (!doc) return sendError(res, 404, 'not_found', 'Document not found.');
-    abortDocumentExtraction(sessionId, documentId);
+    // Commit the delete first so an aborted job sees fileDeletedAt and does not record a failure.
     const outcome = await deleteDocumentFile(sessionId, documentId, mode);
+    abortDocumentExtraction(sessionId, documentId);
     if (!outcome.found) return sendError(res, 404, 'not_found', 'Document not found.');
     void logActivity({
       type: 'file_deleted',

@@ -87,7 +87,16 @@ async function ensureDir(dir: string): Promise<void> {
   await fsp.mkdir(dir, { recursive: true, mode: DIR_MODE });
 }
 
+/** Session-scoped files are only written while session.json exists, so a purged session is never recreated. */
+function sessionGone(file: string): boolean {
+  const rel = path.relative(path.join(getRoot(), 'sessions'), file).split(path.sep);
+  if (rel.length < 2 || rel[0] === '..' || path.isAbsolute(rel[0])) return false;
+  if (rel.length === 2 && rel[1] === 'session.json') return false;
+  return !fs.existsSync(path.join(getRoot(), 'sessions', rel[0], 'session.json'));
+}
+
 async function atomicWrite(file: string, data: string | Uint8Array): Promise<void> {
+  if (sessionGone(file)) return;
   await ensureDir(path.dirname(file));
   const tmp = `${file}.${crypto.randomBytes(6).toString('hex')}.tmp`;
   try {
@@ -267,7 +276,7 @@ export async function linkSessionToAssessment(sessionId: string, assessmentId: s
     const other = assessmentIndex.get(assessmentId);
     if (other && other !== sessionId) return { ok: false as const, reason: 'assessment_has_session' as const };
     const now = new Date().toISOString();
-    const next = { ...rec, assessmentId, linkedAt: now, updatedAt: now };
+    const next = { ...rec, assessmentId, linkedAt: now, detachedAt: null, updatedAt: now };
     await writeJson(sessionFile(sessionId), next);
     assessmentIndex.set(assessmentId, sessionId);
     return { ok: true as const, record: next, changed: true };
@@ -281,6 +290,15 @@ export async function deleteSessionDir(sessionId: string): Promise<void> {
       assessmentIndex.delete(rec.assessmentId);
     }
     await fsp.rm(sessionDir(sessionId), { recursive: true, force: true });
+  });
+}
+
+/** Retention: removes a session directory that has no session.json. Returns true if removed. */
+export function removeOrphanSessionDir(sessionId: string): Promise<boolean> {
+  return withSessionLock(sessionId, async () => {
+    if (await getSession(sessionId)) return false;
+    await fsp.rm(sessionDir(sessionId), { recursive: true, force: true });
+    return true;
   });
 }
 
