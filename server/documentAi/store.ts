@@ -293,10 +293,21 @@ export async function deleteSessionDir(sessionId: string): Promise<void> {
   });
 }
 
-/** Retention: removes a session directory that has no session.json. Returns true if removed. */
+/**
+ * Retention: removes a session directory only when session.json is genuinely absent (ENOENT).
+ * Any other read error or a parse failure skips the directory. Returns true if removed.
+ */
 export function removeOrphanSessionDir(sessionId: string): Promise<boolean> {
   return withSessionLock(sessionId, async () => {
-    if (await getSession(sessionId)) return false;
+    try {
+      JSON.parse(await fsp.readFile(sessionFile(sessionId), 'utf-8'));
+      return false; // readable and valid: not an orphan
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+        console.warn('[document-ai] retention_skipped_unreadable_session');
+        return false;
+      }
+    }
     await fsp.rm(sessionDir(sessionId), { recursive: true, force: true });
     return true;
   });

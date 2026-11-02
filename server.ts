@@ -2611,11 +2611,11 @@ async function startServer() {
           : await unlinkSessionForAssessment(assessmentId);
         if (purgedSessionId) {
           void logActivity({
-            type: 'unlinked_session_purged',
+            // Detached sessions keep their files until retention expires them.
+            type: mayPurge ? 'unlinked_session_purged' : 'session_detached',
             actor: authCtx.user?.email || 'system',
             sessionId: purgedSessionId,
             assessmentId,
-            // Detached sessions keep their files until retention expires them.
             code: mayPurge ? 'assessment_deleted' : 'assessment_deleted_detached',
           });
         }
