@@ -10,6 +10,7 @@ import type {
   DocumentExtractionSuccess,
   ExtractedField,
   FieldValue,
+  SourceCheck,
   SourceRef,
 } from '../../src/types/documentAi.ts';
 import {
@@ -32,6 +33,8 @@ interface DerivedInput {
   period: string | null;
   subjectRef?: string | null;
   discriminator?: number;
+  /** Merge caps on this, so an input that could not be checked stays visible on the result. */
+  sourceCheck?: SourceCheck;
 }
 
 function derivedCandidate(input: DerivedInput): ExtractedField {
@@ -47,6 +50,7 @@ function derivedCandidate(input: DerivedInput): ExtractedField {
     period: input.period,
     subjectRef: input.subjectRef ?? null,
     derivation: { ruleId: input.ruleId, fromCandidateIds: input.fromCandidateIds },
+    ...(input.sourceCheck ? { sourceCheck: input.sourceCheck } : {}),
   };
 }
 
@@ -192,6 +196,7 @@ function deriveBankAverage(
         period: lastDayOfMonth(lastMonth),
         subjectRef: last.row.subjectRef,
         discriminator,
+        sourceCheck: entries.some(([, entry]) => entry.row.sourceCheck === 'failed') ? 'failed' : undefined,
       })
     );
     discriminator += 1;

@@ -35,7 +35,6 @@ import {
   findEnumEvidence,
   gstinEmbeddedPan,
   hasForeignUnit,
-  hasLossWording,
   hasPartYearWording,
   isFinancialYearLabel,
   normalizeComparableString,
@@ -46,6 +45,7 @@ import {
   parseMeasure,
   parsePercent,
   periodEndDate,
+  positiveValueDoubted,
   previousFinancialYear,
   rawValueInSnippet,
   significantDigits,
@@ -293,6 +293,8 @@ function unitReasons(definition: FieldDefinition, candidate: ExtractedField): Fi
       statedUnit,
       snippet,
       creditMarker: hasCreditMarker(definition, documentType),
+      rowText: candidate.rowLabel,
+      unitText: candidate.unitText,
     });
   if (!snippetAgrees || (statedUnit !== null && !unitTextSupports(statedUnit, candidate.unitText))) {
     reasons.push('unit_mismatch');
@@ -314,9 +316,8 @@ function wordingReasons(definition: FieldDefinition, candidate: ExtractedField, 
   if (definition.unit === 'currency') reasons.push(...unitReasons(definition, candidate));
   if (isPartYear(definition, candidate)) reasons.push('part_year_period');
   const wording = `${candidate.source.snippet} ${candidate.rowLabel ?? ''}`;
-  if (definition.signPolicy === 'signed' && typeof value === 'number' && value > 0 && hasLossWording(wording)) {
-    reasons.push('loss_wording');
-  }
+  const isPositiveSigned = definition.signPolicy === 'signed' && typeof value === 'number' && value > 0;
+  if (isPositiveSigned && positiveValueDoubted(wording, candidate.sourceSign)) reasons.push('loss_wording');
   return reasons;
 }
 
@@ -401,7 +402,7 @@ function checkAgainstSource(
     inlineUnit: parsed?.ok ? parsed.inlineUnit : null,
     creditMarker: hasCreditMarker(definition, source.documentType),
     evidence: definition.valueType === 'enum' ? findEnumEvidence(definition, value, source.snippet) : [],
-    wantRowLabel: definition.signPolicy === 'signed',
+    wantRowLabel: definition.signPolicy === 'signed' || definition.unit === 'currency',
   });
 }
 
@@ -465,6 +466,7 @@ export function buildCandidates(
         unitText: raw.unitText,
         sourceCheck: finding.check,
         rowLabel: finding.rowLabel,
+        ...(finding.sourceSign ? { sourceSign: finding.sourceSign } : {}),
       },
       settleContext
     );
@@ -479,6 +481,15 @@ function parseBankAmount(raw: string | null, row: RawBankMonth, verify: SourceVe
   if (!parsed.ok || parsed.ambiguousUnit) return null;
   if (hasForeignUnit(`${row.snippet} ${row.unitText ?? ''}`)) return null;
   if (row.statedUnit !== null && !unitTextSupports(row.statedUnit, row.unitText)) return null;
+  const unitAgrees = unitAgreesWithSnippet({
+    rawValue: raw,
+    inlineUnit: parsed.inlineUnit,
+    statedUnit: row.statedUnit,
+    snippet: row.snippet,
+    creditMarker: true,
+    unitText: row.unitText,
+  });
+  if (!unitAgrees) return null;
   // The figure must be on the page the snippet quotes. A model total that is not there is a guess.
   if (!rawValueInSnippet(raw, row.snippet, 'number')) return null;
   const finding = verify({
@@ -497,10 +508,17 @@ function parseBankAmount(raw: string | null, row: RawBankMonth, verify: SourceVe
   return finding.check === 'failed' ? null : parsed.value;
 }
 
-/** The server parses the amounts. Rows that say nothing usable are dropped, never repaired. */
+/**
+ * The server parses the amounts. Rows that say nothing usable are dropped, never repaired. A PDF the
+ * server could not read proves no row false, so its rows stay, marked failed: what is worked out
+ * from them then carries not_in_source to the reviewer, where a drop would leave nothing to see.
+ */
 export function buildBankMonthlyTotals(rows: RawBankMonth[], ctx: DocumentContext): BankMonthlyTotal[] {
   if (ctx.documentType !== 'bank_statement') return [];
-  const verify = createSourceVerifier(ctx.source);
+  const unreadable = ctx.source.kind === 'unreadable';
+  const verify: SourceVerifier = unreadable
+    ? () => ({ check: 'no_text', rowLabel: null })
+    : createSourceVerifier(ctx.source);
   const totals: BankMonthlyTotal[] = [];
   for (const row of rows) {
     const confidence = roundConfidence(row.confidence);
@@ -518,6 +536,7 @@ export function buildBankMonthlyTotals(rows: RawBankMonth[], ctx: DocumentContex
       subjectRef: maskSubjectRef(row.subjectRef, ctx.documentType),
       source: buildSource(row, ctx),
       confidence,
+      ...(unreadable ? { sourceCheck: 'failed' as const } : {}),
     });
   }
   return totals;
