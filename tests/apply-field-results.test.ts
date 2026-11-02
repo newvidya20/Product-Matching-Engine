@@ -57,3 +57,24 @@ describe('applyFieldResults review fixes', () => {
     assert.equal(out.form.creditScore, '');
   });
 });
+
+import { dropSeededMarksForApplied, nextStoredSession } from '../src/components/documentAi/seedMarks.ts';
+
+describe('seed marks and stored session', () => {
+  const entry = (fieldId: string, origin: string) => ({ fieldId, origin, at: 't' }) as never;
+
+  it('drops preexisting marks only for server-applied fields', () => {
+    const edited = { a: entry('a', 'preexisting_value'), b: entry('b', 'preexisting_value'), c: entry('c', 'typed') };
+    const pending = { a: edited.a, b: edited.b, c: edited.c };
+    const dropped = dropSeededMarksForApplied(edited, pending, ['a', 'c']);
+    assert.deepEqual(dropped, ['a']);
+    assert.deepEqual(Object.keys(edited).sort(), ['b', 'c']);
+    assert.deepEqual(Object.keys(pending).sort(), ['b', 'c']);
+  });
+
+  it('keeps the existing stored session unless it is empty', () => {
+    assert.equal(nextStoredSession('ds_old', 'ds_new'), 'ds_old');
+    assert.equal(nextStoredSession(null, 'ds_new'), 'ds_new');
+    assert.equal(nextStoredSession('', 'ds_new'), 'ds_new');
+  });
+});

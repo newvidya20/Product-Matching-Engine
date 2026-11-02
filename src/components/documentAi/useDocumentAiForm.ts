@@ -30,6 +30,7 @@ import {
   type FieldDefinition,
 } from '../../documentAi/fieldMap';
 import { applyFieldResults, dynamicFieldIdsForPurpose } from './applyFieldResults';
+import { dropSeededMarksForApplied, nextStoredSession } from './seedMarks';
 import type { DocAiFieldContextValue } from './FieldShell';
 import {
   assessmentToForm,
@@ -217,8 +218,13 @@ export function useDocumentAiForm({
       try {
         await documentAiClient.putEdits(sid, request);
         flushAttempts.current = 0;
-      } catch {
+      } catch (error) {
         if (sid !== sessionIdRef.current) return; // the session was swapped; these edits are moot
+        if (error instanceof DocumentAiError && error.status === 404) {
+          // The session is gone (for example a server restart): treat it as lost and stop retrying.
+          // Edits stay in memory, so they remain protected on this page.
+          sessionExistsRef.current = false;
+        }
         // Put it back without overwriting anything newer, then retry with backoff.
         const next = pendingRef.current;
         for (const entry of setEdited) {
@@ -238,7 +244,7 @@ export function useDocumentAiForm({
           if (!(id in next.setApplied)) next.clearApplied.add(id);
         }
         flushAttempts.current += 1;
-        if (flushAttempts.current <= 5 && mountedRef.current) {
+        if (sessionExistsRef.current && flushAttempts.current <= 5 && mountedRef.current) {
           flushTimer.current = window.setTimeout(() => void flushEdits(), 1000 * 2 ** flushAttempts.current);
         }
       }
@@ -295,6 +301,8 @@ export function useDocumentAiForm({
   const applyNow = useCallback(() => {
     const fields = docStateRef.current?.fields;
     if (!fields) return;
+    // A reopened draft stays fully protected until its session has been resolved.
+    if (editingRef.current && !loadedRef.current) return;
     const out = applyFieldResults({
       form: formRef.current,
       fields,
@@ -346,6 +354,11 @@ export function useDocumentAiForm({
         edited[id] = entry;
       }
       for (const id of pending.clearEdited) delete edited[id];
+      // Reopen-time guesses are void for fields a document applied: only explicit delete-and-clear may clear them.
+      const droppedSeeds = dropSeededMarksForApplied(edited, pending.setEdited, Object.keys(state.edits.appliedFields));
+      for (const id of droppedSeeds) {
+        if (id in state.edits.editedFields) pending.clearEdited.add(id);
+      }
       editedRef.current = edited;
       const applied = { ...state.edits.appliedFields, ...pending.setApplied };
       for (const id of pending.clearApplied) delete applied[id];
@@ -602,7 +615,7 @@ export function useDocumentAiForm({
     if (loadTimer.current !== null) window.clearTimeout(loadTimer.current);
     const next = newSessionId();
     sessionIdRef.current = next;
-    writeStoredSession(next);
+    writeStoredSession(nextStoredSession(readStoredSession(), next));
     editingRef.current = null;
     lookupDoneRef.current = true;
     loadedRef.current = true;
@@ -652,21 +665,28 @@ export function useDocumentAiForm({
   );
 
   /**
-   * Call before saving: flushes edits, and says whether the session should be linked. A failed flush
-   * throws, because a typed edit that never reaches the server would lose its protection.
+   * Call before saving: flushes edits and says whether the session should be linked. It never throws and
+   * never blocks the save. If the flush fails the edits stay in memory (protected on this page) and
+   * `warning` says document protection could not be stored.
    */
-  const prepareForSave = useCallback(async (): Promise<{ documentSessionId?: string }> => {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+  const prepareForSave = useCallback(async (): Promise<{ documentSessionId?: string; warning?: string }> => {
+    let warning: string | undefined;
+    try {
       await flushEdits();
-      const p = pendingRef.current;
-      const outstanding =
-        Object.keys(p.setEdited).length + Object.keys(p.setApplied).length + p.clearEdited.size + p.clearApplied.size;
-      if (!sessionExistsRef.current || outstanding === 0) break;
-      if (attempt === 1) {
-        throw new Error('Document AI could not record your changes to the extracted fields. Check your connection and save again.');
-      }
+      await flushEdits();
+    } catch {
+      /* flushEdits handles its own failures */
     }
-    return sessionExistsRef.current ? { documentSessionId: sessionIdRef.current } : {};
+    const p = pendingRef.current;
+    const outstanding =
+      Object.keys(p.setEdited).length + Object.keys(p.setApplied).length + p.clearEdited.size + p.clearApplied.size;
+    if (outstanding > 0 && (sessionExistsRef.current || docStateRef.current)) {
+      warning =
+        'Saved, but your changes to the extracted fields could not be stored with the documents. They stay protected on this page only.';
+      if (mountedRef.current) setNotice(warning);
+    }
+    const link = sessionExistsRef.current ? { documentSessionId: sessionIdRef.current } : {};
+    return warning ? { ...link, warning } : link;
   }, [flushEdits]);
 
   /**
