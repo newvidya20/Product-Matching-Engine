@@ -159,7 +159,31 @@ const CREDIT_REPORT_EVIDENCE: Readonly<Record<string, EnumEvidence>> = {
 };
 
 const COLLATERAL_EVIDENCE: Readonly<Record<string, EnumEvidence>> = {
-  yes: { any: ['collateral', 'security', 'mortgage', 'mortgaged', 'hypothecation', 'hypothecated', 'pledge', 'pledged', 'valuation'] },
+  yes: {
+    any: ['collateral', 'security', 'mortgage', 'mortgaged', 'hypothecation', 'hypothecated', 'pledge', 'pledged', 'valuation'],
+    none: [
+      'no collateral',
+      'no security',
+      'no mortgage',
+      'no pledge',
+      'no hypothecation',
+      'nil collateral',
+      'nil security',
+      'without collateral',
+      'without security',
+      'collateral free',
+      'collateral nil',
+      'collateral none',
+      'collateral not',
+      'security nil',
+      'security none',
+      'security not',
+      'not mortgaged',
+      'not pledged',
+      'not hypothecated',
+      'unsecured',
+    ],
+  },
 };
 
 // -------------------------------------------------------------- Builders

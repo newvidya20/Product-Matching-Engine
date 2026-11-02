@@ -2,7 +2,7 @@
  * Pure validators and normalisers for Document AI (docs/contracts.md section 6).
  * No I/O, no clock, no env. Nothing here throws, and nothing logs.
  */
-import type { AmountUnit, DocumentType, FieldValue, SourceCheck } from '../../src/types/documentAi.ts';
+import type { AmountUnit, DocumentType, FieldValue, SourceCheck, SourceSign } from '../../src/types/documentAi.ts';
 import type { FieldDefinition, NumericUnit, SignPolicy } from '../../src/documentAi/fieldMap.ts';
 import { DOCUMENT_AI_THRESHOLDS } from '../../src/types/documentAi.ts';
 
@@ -455,6 +455,19 @@ function headerUnits(text: string): AmountUnit[] {
   return units;
 }
 
+/** `Rupees Twelve Lakh Fifty Thousand only` spells one figure out. It says nothing about the table. */
+const WORDED_AMOUNT =
+  /\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred)[\s-]+(?:crores?|lakhs?|lacs?|millions?|thousands?)\b/gi;
+
+/**
+ * Units that head a table rather than belong to one figure: a unit printed after any figure, or
+ * spelled out in words, is not a header, and neither is a bank statement's credit marker.
+ */
+function headerUnitsIn(text: string, creditMarker: boolean): AmountUnit[] {
+  const figuresRemoved = cleanText(text).replace(WORDED_AMOUNT, ' ').replace(ADJACENT_UNIT, ' ');
+  return headerUnits(creditMarker ? figuresRemoved.replace(/\bcr\b/gi, ' ') : figuresRemoved);
+}
+
 /** Section 6.3: the unit the server is about to apply must not contradict the page. */
 export function unitAgreesWithSnippet(input: {
   rawValue: string;
@@ -462,8 +475,16 @@ export function unitAgreesWithSnippet(input: {
   statedUnit: AmountUnit | null;
   snippet: string;
   creditMarker: boolean;
+  /** The row the server read, and the quoted header. A unit named in either counts as much as the snippet. */
+  rowText?: string | null;
+  unitText?: string | null;
 }): boolean {
-  const { rawValue, inlineUnit, statedUnit, snippet, creditMarker } = input;
+  const { rawValue, inlineUnit, statedUnit, snippet, creditMarker, rowText, unitText } = input;
+  // Whatever the magnitude: a header the value was not scaled by means the value is on the wrong scale.
+  const applied = inlineUnit ?? statedUnit ?? 'rupees';
+  const headers = [snippet, rowText ?? '', unitText ?? ''].flatMap((text) => headerUnitsIn(text, creditMarker));
+  if (headers.some((unit) => unit !== applied)) return false;
+
   const adjacent = adjacentUnits(snippet, numericTokens(rawValue), creditMarker);
   if (inlineUnit !== null) {
     if (adjacent.includes(inlineUnit)) return true;
@@ -496,11 +517,38 @@ export function hasForeignUnit(text: string): boolean {
 const STATEMENT_TITLE = /statement\s+of\s+profit\s*(?:and|&)\s*loss|profit\s*(?:and|&)\s*loss\s+(?:account|a\/c|statement)/gi;
 const LOSS_WORDING = /\b(?:loss(?:es)?|deficit|deficiency|negative|shortfall|erosion|eroded|debit\s+balance)\b/i;
 
-/** Schedule III rows such as "Profit / (Loss) after tax": the brackets mark the convention, not a loss. */
+/** Schedule III rows such as "Profit / (Loss) after tax": the brackets in the label are a convention. */
 const PROFIT_OR_LOSS_ROW = /\bprofit\s*\/?\s*\(\s*loss\s*\)|\(\s*loss\s*\)\s*\/?\s*profit\b/gi;
 
 export function hasLossWording(text: string): boolean {
   return LOSS_WORDING.test(cleanText(text).replace(STATEMENT_TITLE, ' ').replace(PROFIT_OR_LOSS_ROW, ' '));
+}
+
+const FIGURE = String.raw`(?:\d[\d,]*(?:\.\d+)?|\.\d+)`;
+const RUPEE_MARK = String.raw`(?:₹|inr|rs\.?|re\.?)?`;
+const BRACKETED_FIGURE = new RegExp(
+  String.raw`\(\s*${RUPEE_MARK}\s*-?\s*${FIGURE}\s*(?:(?:crores?|crs?|lakhs?|lacs?|l|millions?|mn|thousands?|k)\b\.?)?\s*\)`,
+  'i'
+);
+/** `-12.50`, `- 12.50`, `12.50-`. Not `500/-`, a date, or a code such as `A-12`. */
+const MINUS_FIGURE = new RegExp(String.raw`(?<![\w)/-])-\s*${RUPEE_MARK}\s*${FIGURE}|\d-(?![\w-])`, 'i');
+const YEAR_RANGE = /\b(?:19|20)\d{2}\s*-\s*\d{2,4}\b/g;
+
+/** A figure printed bracketed or minus-signed. Words in brackets, such as `(Loss)`, do not count. */
+export function hasNegativeFigure(text: string): boolean {
+  const clean = cleanText(text).replace(YEAR_RANGE, ' ');
+  return BRACKETED_FIGURE.test(clean) || MINUS_FIGURE.test(clean);
+}
+
+/**
+ * Section 4.2: should a positive value on a signed field be doubted? The neutral `Profit / (Loss)`
+ * label is exempt only while nothing beside it is printed as a negative. `search`, because the
+ * pattern is global and `test` would carry its position over to the next call.
+ */
+export function positiveValueDoubted(wording: string, sourceSign: SourceSign | null | undefined): boolean {
+  if (sourceSign === 'negative_figure' || hasLossWording(wording)) return true;
+  if (cleanText(wording).search(PROFIT_OR_LOSS_ROW) < 0) return false;
+  return sourceSign === 'negative_in_row' || hasNegativeFigure(wording);
 }
 
 const PART_YEAR_WORDING = new RegExp(
@@ -547,9 +595,11 @@ export interface SourceRow {
  * scanned PDF. `unreadable` is a PDF the parser gave up on, and fails closed, so that a file built
  * to break the parser cannot escape the check.
  */
+export type PdfReadFailure = 'pdf_read_timeout' | 'pdf_engine_failed' | 'pdf_bad_document';
+
 export type DocumentSource =
   | { kind: 'no_text' }
-  | { kind: 'unreadable' }
+  | { kind: 'unreadable'; reason?: PdfReadFailure }
   | { kind: 'cells'; rows: readonly SourceRow[] }
   | { kind: 'pdf'; lines: readonly string[] };
 
@@ -565,13 +615,15 @@ export interface SourceQuery {
   creditMarker: boolean;
   /** Enum only: the evidence keywords found in the snippet, which must really be in the file. */
   evidence: readonly string[];
-  /** Signed fields only: return the row's text, for the loss wording check. */
+  /** Signed and currency fields: return the row's text, for the loss wording and unit checks. */
   wantRowLabel: boolean;
 }
 
 export interface SourceFinding {
   check: SourceCheck;
   rowLabel: string | null;
+  /** Read off the file with wantRowLabel. Kept apart from rowLabel, which is cut at 300 characters. */
+  sourceSign?: SourceSign | null;
 }
 
 export type SourceVerifier = (query: SourceQuery) => SourceFinding;
@@ -609,6 +661,7 @@ function cellVerifier(rows: readonly SourceRow[]): SourceVerifier {
       text: cell.text,
       tokens: new Set(numericTokens(cell.text)),
       compacted: compact(cell.text),
+      negative: hasNegativeFigure(cell.text),
     }))
   );
   const wholeText = indexed.map((cell) => cell.text).join(' ');
@@ -640,15 +693,28 @@ function cellVerifier(rows: readonly SourceRow[]): SourceVerifier {
     if (!query.wantRowLabel) return { check: 'verified', rowLabel: null };
 
     const foundRows = new Set(found.map((cell) => cell.rowIndex));
-    const labels = indexed.filter((cell) => foundRows.has(cell.rowIndex) && /[A-Za-z]/.test(cell.text));
-    return { check: 'verified', rowLabel: joinLabel(labels.map((cell) => cell.text)) };
+    const rowCells = indexed.filter((cell) => foundRows.has(cell.rowIndex));
+    const labels = rowCells.filter((cell) => /[A-Za-z]/.test(cell.text) || cell.negative);
+    let sourceSign: SourceSign | null = null;
+    if (found.some((cell) => cell.negative)) sourceSign = 'negative_figure';
+    else if (rowCells.some((cell) => cell.negative)) sourceSign = 'negative_in_row';
+    return { check: 'verified', rowLabel: joinLabel(labels.map((cell) => cell.text)), sourceSign };
   };
 }
 
 function pdfVerifier(lines: readonly string[]): SourceVerifier {
   const wholeText = lines.join(' ');
   const compacted = compact(wholeText);
-  const tokens = new Set(numericTokens(wholeText));
+  // Built once: a candidate looks its lines up here, so it does not rescan the whole document.
+  const lineTokens = lines.map((line) => new Set(numericTokens(line)));
+  const linesByToken = new Map<string, number[]>();
+  lineTokens.forEach((tokens, lineIndex) => {
+    for (const token of tokens) {
+      const found = linesByToken.get(token);
+      if (found) found.push(lineIndex);
+      else linesByToken.set(token, [lineIndex]);
+    }
+  });
 
   return (query) => {
     if (query.unitText !== null && !compacted.includes(compact(query.unitText))) return NOT_VERIFIED;
@@ -660,16 +726,20 @@ function pdfVerifier(lines: readonly string[]): SourceVerifier {
       return NOT_VERIFIED;
     }
     const rawTokens = numericTokens(query.rawValue);
-    if (![...rawTokens, ...numericTokens(query.snippet)].every((token) => tokens.has(token))) return NOT_VERIFIED;
+    if (![...rawTokens, ...numericTokens(query.snippet)].every((token) => linesByToken.has(token))) return NOT_VERIFIED;
     if (query.valueType === 'number' && rawTokens.length === 0) return NOT_VERIFIED;
     if (query.valueType === 'string' && !textMatches(query, compacted)) return NOT_VERIFIED;
 
-    const rowLines = lines.filter((line) => {
-      const lineTokens = numericTokens(line);
-      return rawTokens.length > 0 && rawTokens.every((token) => lineTokens.includes(token));
-    });
+    const rowLines = (linesByToken.get(rawTokens[0]) ?? [])
+      .filter((lineIndex) => rawTokens.every((token) => lineTokens[lineIndex].has(token)))
+      .map((lineIndex) => lines[lineIndex]);
     if (!unitsAllow(query, rowLines.join(' '), rawTokens)) return NOT_VERIFIED;
-    return { check: 'verified', rowLabel: query.wantRowLabel ? joinLabel(rowLines) : null };
+    if (!query.wantRowLabel) return { check: 'verified', rowLabel: null };
+    return {
+      check: 'verified',
+      rowLabel: joinLabel(rowLines),
+      sourceSign: rowLines.some(hasNegativeFigure) ? 'negative_in_row' : null,
+    };
   };
 }
 

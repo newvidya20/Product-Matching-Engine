@@ -5,7 +5,7 @@
  */
 import JSZip from 'jszip';
 import { DOCUMENT_AI_LIMITS, type SpreadsheetPreview } from '../../src/types/documentAi.ts';
-import type { DocumentSource, SourceRow } from './validators.ts';
+import type { DocumentSource, PdfReadFailure, SourceRow } from './validators.ts';
 
 export interface SheetCell {
   /** 'B12' for XLSX, 'row:12' for CSV. */
@@ -365,6 +365,24 @@ export function renderSpreadsheetText(parsed: ParsedSpreadsheet): SpreadsheetTex
 const MIN_PDF_TEXT_CHARS = 50;
 const PDF_READ_TIMEOUT_MS = 20_000;
 
+/** The errors pdf.js raises about a file. Anything else, a missing worker say, is the server's. */
+const PDF_DOCUMENT_ERRORS: ReadonlySet<string> = new Set([
+  'FormatError',
+  'InvalidPDFException',
+  'PasswordException',
+  'UnknownErrorException',
+]);
+
+type PdfEngine = Pick<typeof import('pdfjs-dist/legacy/build/pdf.mjs'), 'getDocument'>;
+
+export interface PdfReadOptions {
+  loadEngine?: () => Promise<PdfEngine>;
+  timeoutMs?: number;
+}
+
+/** pdf.js itself would not load. Says nothing about the file being read. */
+class PdfEngineError extends Error {}
+
 interface PdfTextRun {
   text: string;
   x: number;
@@ -381,14 +399,16 @@ export function assemblePdfLines(runs: readonly PdfTextRun[]): string[] {
   const byLine = new Map<number, PdfTextRun[]>();
   for (const run of runs) {
     const key = Math.round(run.y);
-    byLine.set(key, [...(byLine.get(key) ?? []), run]);
+    const line = byLine.get(key);
+    if (line) line.push(run);
+    else byLine.set(key, [run]);
   }
   return [...byLine.entries()]
     .sort(([a], [b]) => b - a)
     .map(([, line]) => {
       let text = '';
       let end = Number.NEGATIVE_INFINITY;
-      for (const run of [...line].sort((a, b) => a.x - b.x)) {
+      for (const run of line.sort((a, b) => a.x - b.x)) {
         if (text && run.x - end > 0.2 * Math.max(run.height, 1)) text += ' ';
         text += run.text;
         end = run.x + run.width;
@@ -398,15 +418,28 @@ export function assemblePdfLines(runs: readonly PdfTextRun[]): string[] {
     .filter(Boolean);
 }
 
-async function readPdfLines(bytes: Uint8Array, signal: AbortSignal): Promise<string[]> {
-  const { getDocument } = await import('pdfjs-dist/legacy/build/pdf.mjs');
+async function readPdfLines(
+  bytes: Uint8Array,
+  signal: AbortSignal,
+  loadEngine: () => Promise<PdfEngine>
+): Promise<string[]> {
+  let engine: PdfEngine;
+  try {
+    engine = await loadEngine();
+  } catch {
+    throw new PdfEngineError();
+  }
+  if (signal.aborted) throw new DOMException('Extraction was aborted.', 'AbortError');
   // pdf.js detaches the buffer it is given, and these bytes still go to the model.
-  const task = getDocument({
+  const task = engine.getDocument({
     data: bytes.slice(),
     disableFontFace: true,
     useSystemFonts: false,
     verbosity: 0,
   });
+  // A stuck parse never reaches `finally`, so a timeout has to free the task itself.
+  const destroyOnStop = () => void task.destroy().catch(() => undefined);
+  signal.addEventListener('abort', destroyOnStop, { once: true });
   try {
     const document = await task.promise;
     const lines: string[] = [];
@@ -424,16 +457,29 @@ async function readPdfLines(bytes: Uint8Array, signal: AbortSignal): Promise<str
     }
     return lines;
   } finally {
+    signal.removeEventListener('abort', destroyOnStop);
     await task.destroy();
   }
 }
 
+function readFailure(error: unknown, timedOut: boolean): PdfReadFailure {
+  if (timedOut) return 'pdf_read_timeout';
+  if (error instanceof PdfEngineError) return 'pdf_engine_failed';
+  return error instanceof Error && PDF_DOCUMENT_ERRORS.has(error.name) ? 'pdf_bad_document' : 'pdf_engine_failed';
+}
+
 /**
  * The text layer of a PDF. A scan has none, which is `no_text`. A parse failure or timeout is
- * `unreadable`, never `no_text`: a file must not escape the check by breaking the parser.
+ * `unreadable`, never `no_text`: a file must not escape the check by breaking the parser. Logs one
+ * fixed code, never the error, whose text can quote the document.
  */
-export async function readPdfSource(bytes: Uint8Array, signal: AbortSignal): Promise<DocumentSource> {
-  const timeout = AbortSignal.timeout(PDF_READ_TIMEOUT_MS);
+export async function readPdfSource(
+  bytes: Uint8Array,
+  signal: AbortSignal,
+  options: PdfReadOptions = {}
+): Promise<DocumentSource> {
+  const { loadEngine = () => import('pdfjs-dist/legacy/build/pdf.mjs'), timeoutMs = PDF_READ_TIMEOUT_MS } = options;
+  const timeout = AbortSignal.timeout(timeoutMs);
   const stop = AbortSignal.any([signal, timeout]);
   let onStop = () => {};
   const stopped = new Promise<never>((_, reject) => {
@@ -441,12 +487,14 @@ export async function readPdfSource(bytes: Uint8Array, signal: AbortSignal): Pro
     stop.addEventListener('abort', onStop, { once: true });
   });
   try {
-    const lines = await Promise.race([readPdfLines(bytes, stop), stopped]);
+    const lines = await Promise.race([readPdfLines(bytes, stop, loadEngine), stopped]);
     const characters = lines.join('').replace(/\s/g, '').length;
     return characters < MIN_PDF_TEXT_CHARS ? { kind: 'no_text' } : { kind: 'pdf', lines };
-  } catch {
+  } catch (error) {
     if (signal.aborted) throw new DOMException('Extraction was aborted.', 'AbortError');
-    return { kind: 'unreadable' };
+    const reason = readFailure(error, timeout.aborted);
+    console.warn(`[document-ai] ${reason}`);
+    return { kind: 'unreadable', reason };
   } finally {
     stop.removeEventListener('abort', onStop);
   }

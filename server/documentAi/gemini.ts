@@ -7,8 +7,9 @@ import type { ExtractionErrorCode } from '../../src/types/documentAi.ts';
 
 const DEFAULT_MODEL = 'gemini-3.8-flash';
 /**
- * Contract section 2. Backoff runs 1-2 s, 2-4 s, 4-8 s. Three hung attempts plus backoff take at
- * most 284 s, which is why section 13 asks jobs.ts for 300 s per file.
+ * Contract section 2. Backoff runs 1-2 s, 2-4 s, 4-8 s. Four hung attempts plus backoff take up to
+ * 374 s, past the 300 s jobs.ts allows a file (section 7.6): the file then ends in llm_timeout,
+ * which is retryable.
  */
 const MAX_ATTEMPTS = 4;
 const ATTEMPT_TIMEOUT_MS = 90_000;

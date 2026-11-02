@@ -19,6 +19,8 @@ import {
   findEnumEvidence,
   hasForeignUnit,
   hasLossWording,
+  hasNegativeFigure,
+  positiveValueDoubted,
   hasPartYearWording,
   normalizeFinancialYear,
   normalizePeriod,
@@ -456,6 +458,30 @@ describe('unit evidence (contract 6.3)', () => {
     assert.equal(agrees('1,23,456.00 Cr', 'Closing balance 1,23,456.00 Cr', null, true), true);
   });
 
+  it("fails a header the value was not scaled by, at any size", () => {
+    assert.equal(agrees('12,50,000', "(Rs. in '000) Revenue 12,50,000"), false);
+    assert.equal(agrees('12,50,000', "(Rs. ’000) Revenue 12,50,000"), false);
+    assert.equal(agrees('12,50,000', 'Figures in lakhs: Revenue 12,50,000'), false);
+    assert.equal(agrees('12,50,000', "(Rs. in '000) Revenue 12,50,000", 'thousand'), true);
+    assert.equal(agrees('1.25 Cr', 'Rs. in lakhs: Turnover 1.25 Cr'), false);
+    assert.equal(agrees('12.50', 'Rs. in crores: Revenue 12.50', 'lakh'), false);
+  });
+
+  it('reads the row text and the unit text as well as the snippet', () => {
+    const base = { rawValue: '12,50,000', inlineUnit: null, statedUnit: null, snippet: 'Revenue 12,50,000', creditMarker: false };
+    assert.equal(unitAgreesWithSnippet(base), true);
+    assert.equal(unitAgreesWithSnippet({ ...base, rowText: 'Revenue (Rs. in lakhs)' }), false);
+    assert.equal(unitAgreesWithSnippet({ ...base, unitText: "Rs. '000" }), false);
+    assert.equal(unitAgreesWithSnippet({ ...base, rowText: null, unitText: null }), true);
+  });
+
+  it('does not take a unit that belongs to one figure for a header', () => {
+    assert.equal(agrees('12,50,000', 'Rs. 12,50,000 (Rupees Twelve Lakh Fifty Thousand only)'), true);
+    assert.equal(agrees('12,50,000', 'Rs. 12,50,000 against a limit of 50 lakh'), true);
+    assert.equal(agrees('1,23,456.00 Cr', 'Dr/Cr Closing balance 1,23,456.00 Cr', null, true), true);
+    assert.equal(agrees('1,23,456', 'Revenue 1,23,456, FY 2024-25'), true);
+  });
+
   it('requires unit text that says the same as the stated unit', () => {
     assert.equal(unitTextSupports('lakh', '(Rs. in lakhs)'), true);
     assert.equal(unitTextSupports('lakh', 'Rs. in Lacs'), true);
@@ -492,6 +518,28 @@ describe('loss wording (contract 4.2)', () => {
     }
     assert.equal(hasLossWording('Profit / (Loss) after tax'), false);
     assert.equal(hasLossWording('(Loss)/Profit before tax'), false);
+  });
+
+  it('finds a figure printed bracketed or minus-signed, and nothing else', () => {
+    for (const text of ['(12.50)', '( 12,50,000 )', '(Rs. 12.50)', '(12.50 Cr)', '-1250000', '- 12.50', '12.50-', '₹ -5', '8.40 (.50)', 'Rs.-12']) {
+      assert.equal(hasNegativeFigure(text), true, text);
+    }
+    for (const text of ['(Loss)', 'Profit / (Loss) 12.50', '12,500/-', 'FY 2024-25', '2024 - 25', '31-03-2025', 'A-12', "(Rs. in '000)", 'Nil -']) {
+      assert.equal(hasNegativeFigure(text), false, text);
+    }
+  });
+
+  it('exempts the neutral label only while no figure beside it is negative', () => {
+    assert.equal(positiveValueDoubted('Profit / (Loss) after tax 8.40', null), false);
+    assert.equal(positiveValueDoubted('Profit / (Loss) after tax (12.50) 8.40', null), true);
+    assert.equal(positiveValueDoubted('Profit / (Loss) after tax 8.40', 'negative_in_row'), true);
+    assert.equal(positiveValueDoubted('Net profit 8.40', 'negative_in_row'), false);
+    assert.equal(positiveValueDoubted('Net profit 8.40', 'negative_figure'), true);
+    assert.equal(positiveValueDoubted('Net profit (12) 8.40', null), false);
+    assert.equal(positiveValueDoubted('Loss for the year 8.40', null), true);
+    // The pattern is global: a second call on the same text must see it too.
+    assert.equal(positiveValueDoubted('Profit / (Loss) (1.00)', null), true);
+    assert.equal(positiveValueDoubted('Profit / (Loss) (1.00)', null), true);
   });
 
   it('ignores the name of the statement, and plain profit rows', () => {
@@ -600,6 +648,19 @@ describe('source verifier (contract 4.2, 12)', () => {
       assert.match(finding.rowLabel ?? '', /Loss for the year/);
     });
 
+    it('reads the sign of the cell holding the value, and of the rest of its row', () => {
+      const signed = createSourceVerifier({
+        kind: 'cells',
+        rows: [{ sheetName: 'P&L', cells: [{ ref: 'A5', text: 'Profit / (Loss)' }, { ref: 'B5', text: '-1250000' }, { ref: 'C5', text: '840000' }] }],
+      });
+      const atValue = signed(query({ rawValue: '12,50,000', wantRowLabel: true }));
+      assert.equal(atValue.sourceSign, 'negative_figure');
+      assert.match(atValue.rowLabel ?? '', /-1250000/);
+      const besideValue = signed(query({ rawValue: '8,40,000', snippet: '8,40,000', wantRowLabel: true }));
+      assert.equal(besideValue.sourceSign, 'negative_in_row');
+      assert.equal(verify(query({ wantRowLabel: true })).sourceSign, null);
+    });
+
     it('checks unit text against the cells', () => {
       assert.equal(verify(query({ unitText: 'Rs. in lakhs' })).check, 'verified');
       assert.equal(verify(query({ unitText: 'Rs. in crores' })).check, 'failed');
@@ -651,6 +712,22 @@ describe('source verifier (contract 4.2, 12)', () => {
     it('fails a unit that differs from the one printed beside the figure', () => {
       assert.equal(verify(query({ rawValue: '2.5 Cr', snippet: '2.5 Cr', inlineUnit: 'crore' })).check, 'failed');
       assert.equal(verify(query({ rawValue: '2.5 Lakh', snippet: '2.5 Lakh', inlineUnit: 'lakh' })).check, 'verified');
+    });
+
+    it('reports a negative figure on the printed line', () => {
+      const signed = createSourceVerifier({ kind: 'pdf', lines: ['Profit / (Loss) after tax (12.50) 8.40', 'Revenue 90.25'] });
+      const finding = signed(query({ rawValue: '8.40', snippet: '8.40', wantRowLabel: true }));
+      assert.equal(finding.sourceSign, 'negative_in_row');
+      assert.equal(signed(query({ rawValue: '90.25', snippet: '90.25', wantRowLabel: true })).sourceSign, null);
+    });
+
+    it('checks a large document without rescanning it per candidate', () => {
+      const lines = Array.from({ length: 20_000 }, (_, n) => `Row ${n} amount ${n + 100000}`);
+      const large = createSourceVerifier({ kind: 'pdf', lines });
+      for (let n = 0; n < 20_000; n += 1) {
+        const rawValue = String(n + 100000);
+        assert.equal(large(query({ rawValue, snippet: rawValue })).check, 'verified');
+      }
     });
 
     it('returns the printed line as the row label', () => {

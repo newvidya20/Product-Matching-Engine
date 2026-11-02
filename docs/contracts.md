@@ -27,7 +27,8 @@ parser is private and drops sheet names and cell references.
 **Merge order:** storage-engineer, extraction-engineer, ui-builder, test-writer. Until storage merges, ui-builder
 may see tsc errors only for `editingAssessmentId` and `openAssessmentForEdit`, both defined in section 8.
 
-Engineers must not add runtime dependencies.
+Engineers must not add runtime dependencies. The runtime is Node 22: `engines.node` in `package.json` is `22.x`, and
+`pdfjs-dist` itself needs 22.13 or later.
 
 ## 2. Pipeline and routes seam
 
@@ -40,7 +41,9 @@ export function readSpreadsheetPreview(bytes: Uint8Array, kind: 'xlsx' | 'csv'):
 ```
 
 - `extractDocument` handles one file. Document failures return `{ ok: false, errorCode }`. It rejects only if
-  `signal` aborts, and `jobs.ts` records that as `llm_timeout`. It does no storage or logging of content.
+  `signal` aborts, and `jobs.ts` records that as `llm_timeout`. It does no storage or logging of content. Outside it,
+  `readPdfSource` logs one fixed code when a PDF cannot be read: `pdf_read_timeout`, `pdf_engine_failed` (pdf.js would not
+  load, a server fault) or `pdf_bad_document`. The error's own text is never logged, as it can quote the document.
 - `mergeSessionResults` is pure: no I/O, no clock, no env. Call it after every job, delete, type override and
   `PUT .../edits`, and after a threshold change. Pass successful results of all documents whose result still exists,
   oldest upload first: array order is what "latest upload" means in section 4.4.
@@ -49,12 +52,14 @@ export function readSpreadsheetPreview(bytes: Uint8Array, kind: 'xlsx' | 'csv'):
   `ambiguous_unit`, which is preserved because it depends on the stated unit. `value: null` on input means the value
   failed to parse, and stays rejected. `buildCandidates` normalises values and may set provisional statuses.
 - Merge is pure and never holds document text, so the check against source text runs once, in `buildCandidates`, while
-  the file is in memory. Its outcome is stored as `sourceCheck` (and `rowLabel`), and merge caps on them.
+  the file is in memory. Its outcome is stored as `sourceCheck` (with `rowLabel` and `sourceSign`), and merge caps on them.
 - `jobs.ts` owns queueing, concurrency, the per-file timeout and persistence. `gemini.ts` owns retries, and the timeout of
   each attempt. Up to 4 attempts per call, 90 seconds each, on 429, 503, 408, 504 and an attempt that times out. Backoff is
   capped exponential with equal jitter: 1-2 s, 2-4 s, 4-8 s. The SDK is set to no retries (`retryOptions: { attempts: 1 }`),
   so there is one retry loop, and the job's signal stops it at once. Exhausted retries give `llm_rate_limited` or
-  `llm_timeout`, and the client offers Retry for both.
+  `llm_timeout`, and the client offers Retry for both. **The retry budget can exceed the file budget:** one call can reach
+  374 seconds (4 × 90 s, plus up to 14 s of backoff), and a file makes up to two calls, while `jobs.ts` allows a file 300
+  seconds. A file can therefore end in `llm_timeout` at 300 seconds, before its retries run out. That code is retryable.
 - Validators live in `server/documentAi/validators.ts` with the signatures in section 6.
 
 ## 3. Extracted field JSON
@@ -99,7 +104,11 @@ Candidate (`ExtractedField`):
 - `statedUnit`, `unitText`: the model's reading of the table or page header, and that header quoted verbatim.
 - `sourceCheck`: `verified`, `failed` or `no_text`, set by the server against text it read itself (section 4.2). Absent
   reads as `no_text`.
-- `rowLabel`: for `signed` fields, the text the server read in the value's row or printed line, at most 300 characters.
+- `rowLabel`: for `signed` and currency fields, the text the server read in the value's row or printed line, at most 300
+  characters. For a spreadsheet, the row's label cells and any negative figures.
+- `sourceSign`: a negative the server read at the value, kept apart from `rowLabel` so that the 300 character cut cannot
+  lose it. `negative_figure`: the spreadsheet cell holding the value is negative. `negative_in_row`: another figure in its
+  row or printed line is. Absent when it read none.
 
 Field result (`FieldResult`) adds `candidates`, `suggestedCandidateId`, `mirrorOf` and `overriddenByUser`.
 
@@ -141,8 +150,13 @@ Evaluate top to bottom; the first match wins. `reasons` collects every condition
      evidence keywords the field map defines for that option (`enum_no_evidence`). An option with no keywords cannot
      auto-apply. `entityType` from a registration document is the expected auto-apply case.
    - A `signed` field with a positive value whose snippet or `rowLabel` says loss, deficit, negative, shortfall or similar
-     (`loss_wording`). The name of a statement ("Statement of Profit and Loss") does not count. A row label does, including
-     the neutral `Profit / (Loss)`.
+     (`loss_wording`). The name of a statement ("Statement of Profit and Loss") does not count. A row label does, with one
+     exemption: the neutral `Profit / (Loss)` or `(Loss) / Profit` label, only when neither the snippet nor the row text the
+     server read holds a bracketed or minus-signed figure, in any column. Otherwise the row takes `loss_wording`, so on
+     `Profit / (Loss) after tax (12.50) 8.40` both a positive 12.50 and the positive 8.40 are capped, and `(12.50)` read as
+     negative is not. In a spreadsheet the sign is also compared with the parsed cell: a positive value from a cell holding
+     `-1250000` or `(12.50)` takes `loss_wording`, whatever the row is called. An unbracketed loss on a neutral row is an
+     accepted residual, section 13.
    - A unit that does not agree (`unit_mismatch`) or is not INR (`non_inr_unit`), section 6.3.
    - An `annualFlow` field with a part-year period or wording (`part_year_period`), section 4.3.
    - The document type is not in `sourceDocumentTypes`, including `other` (`unexpected_source_type`).
@@ -161,11 +175,13 @@ own snippet:
 |---|---|---|
 | `xlsx`, `csv` | Parsed visible cells. Hidden sheets, rows (including zero height) and columns are excluded, and do not reach the model | `rawValue` is in no visible cell, preferring the cited cell. For an enum, its evidence keyword is in no cell |
 | Digital `pdf` | The text layer, via `pdfjs-dist`. Digital means at least 50 non-space characters | Any digits of `snippet` or `rawValue` are absent. A string's `rawValue`, or an enum's evidence keyword, is absent. An inline unit differs from the unit printed beside that figure |
-| A PDF that will not parse, or takes over 20 seconds | Nothing | Always. A file must not escape the check by breaking the parser |
+| A PDF that will not parse, or takes over 20 seconds | Nothing | Always. A file must not escape the check by breaking the parser. The pdf.js task is destroyed on timeout |
 | Scanned `pdf`, images | Nothing | Never: `no_text`. See section 12 |
 
 `unitText` must also be in the source where a source exists. A failure gives `not_in_source` and caps at
-`needs_verification`. A bank month whose figure fails is dropped.
+`needs_verification`. A bank month whose figure fails against text the server read is dropped. On a PDF the server could
+not read there is nothing to fail against, so its months are kept with `sourceCheck: 'failed'`, and an average worked out
+from them carries `not_in_source`, which tells the reviewer why. Fewer than 3 months derive nothing, as on any other file.
 
 **Never guess.** If a document does not state a value, there is no candidate. The prompt says so, and the server
 enforces it by rules 1 and 4. `review_only` values appear in the Review panel only.
@@ -404,7 +420,11 @@ Unit checks, in merge, for currency fields. Any failure caps at `needs_verificat
 
 - `unit_mismatch`: a unit in `rawValue` is not beside that figure in the snippet, nor named in it (`1.25 Cr` against
   `1.25 Lakh`). Or the snippet prints a unit beside the figure that `rawValue` dropped, or that differs from `statedUnit`.
-  Or `statedUnit` is set, and `unitText` is missing or names another unit.
+  Or `statedUnit` is set, and `unitText` is missing or names another unit. Or the snippet, the row text or `unitText` holds
+  unit header text the value was not scaled by, **whatever the magnitude**: `(Rs. in '000) Revenue 12,50,000` with no stated
+  unit is capped, because the value was taken as rupees. A unit that belongs to one figure is not a header: one printed after
+  a figure (`a limit of 50 lakh`), a figure spelled out (`Rupees Twelve Lakh Fifty Thousand only`), or a bank statement's
+  credit marker. A bank month failing this check is dropped.
 - `non_inr_unit`: a non-INR currency in the snippet, `unitText` or `rowLabel`, wherever it appears.
 
 | Input | Context | Result |
@@ -450,7 +470,8 @@ trusted, so document routes get a server-held secret.
 - `DOCUMENT_AI_ACCESS_CODE` gives role `employee`. `DOCUMENT_AI_ADMIN_CODE` gives role `admin`. Compare with
   `crypto.timingSafeEqual` over SHA-256 digests.
 - `POST /auth/session` with `CreateAuthSessionRequest`. On success set cookie `lb_docai_session`:
-  `HttpOnly; SameSite=Strict; Path=/api/document-ai; Max-Age=43200`, plus `Secure` when `NODE_ENV=production`.
+  `HttpOnly; SameSite=Strict; Path=/api; Max-Age=43200`, plus `Secure` when `NODE_ENV=production`. `Path=/api` rather than
+  `/api/document-ai`, because `DELETE /api/assessments/:id` also reads the cookie, to decide whether it may purge a session.
 - Value: `v1.<base64url JSON {sub, email, name, role, exp}>.<base64url HMAC-SHA256>`. The payload also holds `cv`, a keyed
   digest of the role's current code, so changing a code ends that role's sessions. The HMAC key is a dedicated secret,
   never derived from a code: `DOCUMENT_AI_SESSION_SECRET` if set, otherwise a random secret generated once and persisted
@@ -567,7 +588,7 @@ Extraction can take over 30 seconds per file, so `POST .../extract` returns 202 
 - Terminal status: `completed`; `completed_with_errors` if some failed; `failed` if all did.
 - Persist the job after every state change. On boot, any `queued` or `running` job becomes `failed`, and its unfinished
   documents `failed` with `interrupted`. The client offers Retry.
-- Polling: every 2 s for the first 30 s, then every 5 s, until terminal. After 10 minutes, stop and show a Refresh action.
+- Polling: every 2 s for the first 30 s, then every 5 s, until terminal. After 70 minutes, stop and show a Refresh action.
   On terminal, `GET /sessions/:sessionId`, and run `applyFieldResults`. On page load, resume from `state.activeJob`.
 - Results are merged and saved **before** the job is marked terminal.
 
@@ -718,7 +739,9 @@ Retention in `retention.ts` runs at boot and every 6 hours, by `uploadedAt`:
 
 - Files past `retentionDays`: delete bytes and `results/<id>.json`, set `fileDeletedReason: 'retention'`, re-merge. Applies to
   linked and unlinked sessions alike. Assessment values do not change.
-- Sessions with `assessmentId: null` older than 72 hours: delete the whole directory.
+- Sessions with `assessmentId: null` older than 72 hours: delete the whole directory. A session with `detachedAt` set is
+  exempt from this: it lost its assessment to a delete, and waits for normal retention, its directory going once `detachedAt`
+  is past `retentionDays`. Linking the session to an assessment clears `detachedAt`.
 - Reducing `retentionDays` takes effect on the next run. Never touch `activity/`.
 
 ## 11. Activity log
@@ -726,7 +749,7 @@ Retention in `retention.ts` runs at boot and every 6 hours, by `uploadedAt`:
 `ACTIVITY_EVENT_TYPES` in the types file is the closed list. `ActivityEvent` has no free-text field, deliberately.
 `activity.ts`, storage-engineer, exposes `logActivity(event)`, which never throws.
 
-**Log IDs, file names and field IDs. Never values:** no PAN, GSTIN, amount, snippet, `rawValue`, document text, access code,
+**Log IDs, file names, field IDs and fixed codes. Never values:** no PAN, GSTIN, amount, snippet, `rawValue`, document text, access code,
 or provider response. This also applies to `console.*` and error messages. File names can hold identifiers, so
 before logging, mask any substring matching a PAN or GSTIN shape with `[MASKED]`.
 
@@ -801,4 +824,5 @@ copied to Sheets.
 | Password-protected PDFs | Reported as `password_protected`. No password entry in v1 |
 | Scanned PDFs and images have no server-readable text, so nothing verifies their values against the source | Residual risk, section 12. Values passing confidence and validation still auto-apply |
 | Part-year figures labelled as a bare 31 March, with no wording in the snippet | Taken as the full year, because statements head columns that way |
+| An unbracketed loss printed on a `Profit / (Loss)` row, such as `Profit / (Loss) after tax 12.50` where the document means a loss | Accepted residual. The row is exempt from `loss_wording`, as nothing on it says the figure is negative, so it can auto-apply as a profit. Section 4.2 |
 | Unsaved form values are lost on leaving the page | Pre-existing. Documents and auto-applied fields resume; typed values do not |

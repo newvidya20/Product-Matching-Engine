@@ -354,6 +354,20 @@ describe('enum evidence and review (contract 4.2)', () => {
   });
 });
 
+describe('collateral evidence (contract 4.2)', () => {
+  const evidence = getFieldDefinition('collateralAvailable')?.enumEvidence?.yes;
+
+  it('lists the denials of collateral that cancel its keywords', () => {
+    for (const phrase of ['no collateral', 'no security', 'without collateral', 'collateral free', 'unsecured']) {
+      assert.ok(evidence?.none?.includes(phrase), phrase);
+    }
+  });
+
+  it('keeps no denial among the keywords', () => {
+    for (const phrase of evidence?.none ?? []) assert.ok(!evidence?.any.includes(phrase), phrase);
+  });
+});
+
 describe('annual flow fields (contract 4.3)', () => {
   it('marks exactly the fields that cover a whole year', () => {
     const actual = FIELD_DEFINITIONS.filter((d) => d.annualFlow).map(fid).sort();

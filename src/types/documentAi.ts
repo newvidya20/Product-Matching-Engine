@@ -188,6 +188,12 @@ export type AmountUnit = 'rupees' | 'thousand' | 'lakh' | 'crore' | 'million';
  */
 export type SourceCheck = 'verified' | 'failed' | 'no_text';
 
+/**
+ * A negative the server itself read. `negative_figure`: the spreadsheet cell holding the value is
+ * negative. `negative_in_row`: another figure in its row or printed line is.
+ */
+export type SourceSign = 'negative_figure' | 'negative_in_row';
+
 /** One value, from one place in one document. */
 export interface ExtractedField {
   /** Stable within a document result: `${documentId}:${fieldId}:${n}`. */
@@ -210,8 +216,10 @@ export interface ExtractedField {
   /** Verbatim header text behind statedUnit, such as "(Rs. in lakhs)". Untrusted: render as text. */
   unitText?: string | null;
   sourceCheck?: SourceCheck;
-  /** Row text the server read beside the value, for signed fields only. Untrusted: render as text. */
+  /** Row text the server read beside the value, for signed and currency fields. Untrusted: render as text. */
   rowLabel?: string | null;
+  /** A negative the server read at the value, on signed and currency fields. Absent when it read none. */
+  sourceSign?: SourceSign | null;
   /** Present on server-computed values: the rule and the candidates it used. */
   derivation?: { ruleId: DerivationRuleId; fromCandidateIds: string[] };
 }
@@ -250,6 +258,8 @@ export interface BankMonthlyTotal {
   confidence: number;
   subjectRef: string | null;
   source: SourceRef;
+  /** `failed` when the server could not read the file: an average of this row carries not_in_source. */
+  sourceCheck?: SourceCheck;
 }
 
 export interface DocumentExtractionSuccess {

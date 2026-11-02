@@ -24,6 +24,7 @@ import {
   parseSpreadsheet,
   readPdfSource,
   renderSpreadsheetText,
+  type PdfReadOptions,
 } from '../server/documentAi/spreadsheet.ts';
 import type { DocumentSource } from '../server/documentAi/validators.ts';
 import { getFieldDefinition } from '../src/documentAi/fieldMap.ts';
@@ -428,6 +429,13 @@ function rawField(overrides: Partial<RawField>): RawField {
   };
 }
 
+/** A stand-in for pdf.js, whose document task resolves or hangs as a test needs. */
+function engine(promise: Promise<never>, onDestroy: () => void = () => undefined) {
+  promise.catch(() => undefined);
+  const task = { promise, destroy: async () => onDestroy() };
+  return { getDocument: () => task } as unknown as Awaited<ReturnType<NonNullable<PdfReadOptions['loadEngine']>>>;
+}
+
 function context(source: DocumentSource, documentType: DocumentType = 'financial_statement', kind: AcceptedFileKind = 'pdf'): DocumentContext {
   return {
     documentId: DOC_STATEMENT,
@@ -566,6 +574,64 @@ describe('source text check (contract 4.2, 12)', () => {
     await assert.rejects(readPdfSource(fixture('FICTIONAL-gst-return-fy2024-25.pdf'), controller.signal), { name: 'AbortError' });
   });
 
+  it('tells a bad document from an engine that will not load, and logs only a fixed code', async (t) => {
+    const logged: unknown[][] = [];
+    t.mock.method(console, 'warn', (...args: unknown[]) => logged.push(args));
+    const bytes = new TextEncoder().encode('%PDF-1.4 SECRET-PAN not really a pdf');
+
+    const bad = await readPdfSource(bytes, signal);
+    assert.deepEqual(bad, { kind: 'unreadable', reason: 'pdf_bad_document' });
+
+    const noModule = await readPdfSource(bytes, signal, { loadEngine: () => Promise.reject(new Error('Cannot find SECRET-PAN')) });
+    assert.deepEqual(noModule, { kind: 'unreadable', reason: 'pdf_engine_failed' });
+
+    const noWorker = await readPdfSource(bytes, signal, {
+      loadEngine: async () => engine(Promise.reject(new Error('Setting up fake worker failed'))),
+    });
+    assert.deepEqual(noWorker, { kind: 'unreadable', reason: 'pdf_engine_failed' });
+
+    assert.deepEqual(logged, [['[document-ai] pdf_bad_document'], ['[document-ai] pdf_engine_failed'], ['[document-ai] pdf_engine_failed']]);
+  });
+
+  it('destroys the pdf.js task when a read times out, and reports the timeout', async (t) => {
+    t.mock.method(console, 'warn', () => undefined);
+    const destroyed: boolean[] = [];
+    const stuck = engine(new Promise<never>(() => undefined), () => destroyed.push(true));
+    const source = await readPdfSource(new Uint8Array(4), signal, { loadEngine: async () => stuck, timeoutMs: 5 });
+    assert.deepEqual(source, { kind: 'unreadable', reason: 'pdf_read_timeout' });
+    assert.deepEqual(destroyed, [true]);
+  });
+
+  it('keeps bank months from a file it could not read, and shows why on the average', () => {
+    const month = (n: number): RawBankMonth => ({
+      month: `2025-0${n}`,
+      totalCredits: `${n},40,000.00`,
+      closingBalance: null,
+      statedUnit: null,
+      unitText: null,
+      confidence: 0.95,
+      subjectRef: '4321',
+      page: 1,
+      sheetName: null,
+      cellRef: null,
+      snippet: `Total credits: ${n},40,000.00`,
+    });
+    const ctx = context({ kind: 'unreadable', reason: 'pdf_read_timeout' }, 'bank_statement');
+    const totals = buildBankMonthlyTotals([month(3), month(4), month(5)], ctx);
+    assert.equal(totals.length, 3);
+    assert.ok(totals.every((total) => total.sourceCheck === 'failed'));
+
+    const merged = run([{ ...successDocument(DOC_STATEMENT, 'bank_statement', []), bankMonthlyTotals: totals }]);
+    const average = result(merged, 'financialProfile.averageMonthlyBankingCredits');
+    assert.equal(average.status, 'needs_verification');
+    assert.ok(average.reasons.includes('not_in_source'));
+  });
+
+  it('assembles a long line in linear time', () => {
+    const runs = Array.from({ length: 50_000 }, (_, x) => ({ text: 'a', x, y: 700, width: 1, height: 10 }));
+    assert.equal(assemblePdfLines(runs)[0]?.length, 50_000);
+  });
+
   it('keeps a figure whole when pdf.js splits it, and keeps columns apart', () => {
     const run = (text: string, x: number, width: number) => ({ text, x, y: 700, width, height: 10 });
     assert.deepEqual(assemblePdfLines([run('8,40,000', 200, 40), run('Revenue', 50, 40), run('12,5', 110, 20), run('0,000', 130, 25)]), [
@@ -696,6 +762,15 @@ describe('enum auto-apply (contract 4.2)', () => {
     assert.equal(mirror.value, 'yes');
   });
 
+  it('does not take a denial of collateral as evidence of collateral', () => {
+    const collateral = (snippet: string) =>
+      enumResult('collateralAvailable', 'loan_application', 'yes', snippet);
+    const denied = collateral('No collateral security offered');
+    assert.equal(denied.status, 'needs_verification');
+    assert.ok(denied.reasons.includes('enum_no_evidence'));
+    assert.equal(collateral('Collateral security offered: factory land, mortgaged').status, 'auto_applied');
+  });
+
   it('checks enum evidence against the source text too', () => {
     const raw = rawField({ fieldId: 'entityType', rawValue: 'Private Limited', enumValue: 'private_limited', snippet: 'Sample Private Limited', period: null });
     const ctx = (lines: DocumentSource) => context(lines, 'registration_certificate');
@@ -764,6 +839,91 @@ describe('loss wording on signed fields (contract 4.2, 4.5)', () => {
       PAT
     );
     assert.ok(!r.reasons.includes('loss_wording'));
+  });
+
+  describe('a bracketed or minus-signed figure ends the Profit / (Loss) exemption', () => {
+    const line = 'Profit / (Loss) after tax (12.50) 8.40';
+    const inLakh = { fieldId: PAT, statedUnit: 'lakh' as const, unitText: '(Rs. in lakhs)' };
+
+    it('caps a bracketed loss the model returned as a profit', () => {
+      const r = result(extractAndMerge([rawField({ ...inLakh, rawValue: '12.50', snippet: line })], context({ kind: 'no_text' })), PAT);
+      assert.equal(r.status, 'needs_verification');
+      assert.ok(r.reasons.includes('loss_wording'));
+    });
+
+    it('caps the other column, when the row holds a loss', () => {
+      const r = result(extractAndMerge([rawField({ ...inLakh, rawValue: '8.40', snippet: line })], context({ kind: 'no_text' })), PAT);
+      assert.equal(r.status, 'needs_verification');
+      assert.ok(r.reasons.includes('loss_wording'));
+    });
+
+    it('uses the row the server read when the snippet leaves the brackets out', () => {
+      const raw = rawField({ ...inLakh, rawValue: '8.40', snippet: 'Profit / (Loss) after tax 8.40' });
+      const r = result(extractAndMerge([raw], context(pdfSource('(Rs. in lakhs)', line))), PAT);
+      assert.equal(r.status, 'needs_verification');
+      assert.ok(r.reasons.includes('loss_wording'));
+    });
+
+    it('still applies the loss itself, read as a negative', () => {
+      const r = result(extractAndMerge([rawField({ ...inLakh, rawValue: '(12.50)', snippet: line })], context({ kind: 'no_text' })), PAT);
+      assert.equal(r.status, 'auto_applied');
+      assert.equal(r.value, -1250000);
+    });
+
+    it('takes a minus sign, and a trailing one, as it does brackets', () => {
+      for (const snippet of ['Profit / (Loss) -12,50,000', 'Profit / (Loss) 12,50,000-', 'Profit/(Loss) (Rs. 12,50,000)']) {
+        const r = result(extractAndMerge([rawField({ fieldId: PAT, snippet })], context({ kind: 'no_text' })), PAT);
+        assert.ok(r.reasons.includes('loss_wording'), snippet);
+      }
+    });
+
+    it('leaves a clean row exempt: an unbracketed loss here is the accepted residual', () => {
+      for (const snippet of ['Profit / (Loss) after tax 12,50,000', 'Profit / (Loss) FY 2024-25 12,50,000/-', '(Loss) / Profit 12,50,000 as at 31-03-2025']) {
+        const r = result(extractAndMerge([rawField({ fieldId: PAT, snippet })], context({ kind: 'no_text' })), PAT);
+        assert.ok(!r.reasons.includes('loss_wording'), snippet);
+        assert.equal(r.status, 'auto_applied', snippet);
+      }
+    });
+
+    it('compares the sign with the parsed cell, whatever the row is called', () => {
+      for (const text of ['-1250000', '(12,50,000)']) {
+        const rows = [{ sheetName: 'Sheet1', cells: [{ ref: 'A2', text: 'Net profit' }, { ref: 'B2', text }] }];
+        const raw = rawField({ fieldId: PAT, snippet: 'Net profit 12,50,000', sheetName: 'Sheet1', cellRef: 'B2' });
+        const r = result(extractAndMerge([raw], context({ kind: 'cells', rows }, 'financial_statement', 'xlsx')), PAT);
+        assert.equal(r.status, 'needs_verification', text);
+        assert.ok(r.reasons.includes('loss_wording'), text);
+        assert.equal(r.candidates[0]?.sourceSign, 'negative_figure', text);
+      }
+    });
+
+    it('survives a stored round trip, and a row label cut at 300 characters', () => {
+      const rows = [{
+        sheetName: 'Sheet1',
+        cells: [
+          { ref: 'A2', text: `Profit / (Loss) after tax ${'x'.repeat(320)}` },
+          { ref: 'B2', text: '(12,50,000)' },
+          { ref: 'C2', text: '840000' },
+        ],
+      }];
+      const raw = rawField({ fieldId: PAT, rawValue: '8,40,000', snippet: 'Profit / (Loss) after tax 8,40,000', sheetName: 'Sheet1', cellRef: 'C2' });
+      const { fields } = buildCandidates([raw], context({ kind: 'cells', rows }, 'financial_statement', 'xlsx'));
+      assert.equal(fields[0]?.sourceSign, 'negative_in_row');
+      const stored = structuredClone(fields);
+      const r = result(run([successDocument(DOC_STATEMENT, 'financial_statement', stored)]), PAT);
+      assert.ok(r.reasons.includes('loss_wording'));
+    });
+
+    it('blocks profitability, as any loss_wording does', () => {
+      const output = run([successDocument(DOC_STATEMENT, 'financial_statement', [pat(840000, '8.40', line)])]);
+      assert.equal(output.fields.profitabilityStatus, undefined);
+    });
+
+    it('does not cap a Profit / (Loss) row for its positive sign on a clean spreadsheet row', () => {
+      const rows = [{ sheetName: 'Sheet1', cells: [{ ref: 'A2', text: 'Profit / (Loss) after tax' }, { ref: 'B2', text: '1250000' }] }];
+      const raw = rawField({ fieldId: PAT, snippet: 'Profit / (Loss) after tax 12,50,000', sheetName: 'Sheet1', cellRef: 'B2' });
+      const r = result(extractAndMerge([raw], context({ kind: 'cells', rows }, 'financial_statement', 'xlsx')), PAT);
+      assert.equal(r.status, 'auto_applied');
+    });
   });
 
   it('still caps a positive figure on a plain loss row', () => {
@@ -852,6 +1012,52 @@ describe('unit checks (contract 6.3)', () => {
     const r = result(extractAndMerge([rawField({ rawValue: '45,000', snippet: 'Revenue 45,000' })], context({ kind: 'no_text' })), REVENUE);
     assert.equal(r.status, 'needs_verification');
     assert.ok(r.reasons.includes('ambiguous_unit'));
+  });
+
+  describe('a unit header the value was not scaled by', () => {
+    const noUnit = (overrides: Partial<RawField>) =>
+      result(extractAndMerge([rawField(overrides)], context({ kind: 'no_text' })), REVENUE);
+
+    it("caps (Rs. in '000) on a large unitless figure, in the snippet or the unit text", () => {
+      const inSnippet = noUnit({ snippet: "(Rs. in '000) Revenue 12,50,000" });
+      assert.equal(inSnippet.status, 'needs_verification');
+      assert.ok(inSnippet.reasons.includes('unit_mismatch'));
+      const inUnitText = noUnit({ unitText: "(Rs. in '000)" });
+      assert.equal(inUnitText.status, 'needs_verification');
+      assert.ok(inUnitText.reasons.includes('unit_mismatch'));
+    });
+
+    it('caps a header named only in the row the server read', () => {
+      const rows = [{ sheetName: 'Sheet1', cells: [{ ref: 'A2', text: 'Revenue (Rs. in lakhs)' }, { ref: 'B2', text: '1250000' }] }];
+      const raw = rawField({ sheetName: 'Sheet1', cellRef: 'B2' });
+      const r = result(extractAndMerge([raw], context({ kind: 'cells', rows }, 'financial_statement', 'xlsx')), REVENUE);
+      assert.equal(r.status, 'needs_verification');
+      assert.ok(r.reasons.includes('unit_mismatch'));
+    });
+
+    it('caps a header that contradicts the stated or the inline unit', () => {
+      const stated = noUnit({ rawValue: '12.50', snippet: '(Rs. in crores) Revenue 12.50', statedUnit: 'lakh', unitText: '(Rs. in lakhs)' });
+      assert.ok(stated.reasons.includes('unit_mismatch'));
+      const inline = noUnit({ rawValue: '1.25 Cr', snippet: '(Rs. in lakhs) Revenue 1.25 Cr' });
+      assert.ok(inline.reasons.includes('unit_mismatch'));
+    });
+
+    it('auto-applies once the value is scaled by that header', () => {
+      const r = noUnit({ statedUnit: 'thousand', unitText: "(Rs. in '000)", snippet: "(Rs. in '000) Revenue 12,50,000" });
+      assert.equal(r.status, 'auto_applied');
+      assert.equal(r.value, 1250000000);
+    });
+
+    it('drops a bank month under a header it was not scaled by', () => {
+      const row: RawBankMonth = {
+        month: '2025-05', totalCredits: '2,40,000.00', closingBalance: null, statedUnit: null, unitText: null,
+        confidence: 0.95, subjectRef: '4321', page: 1, sheetName: null, cellRef: null,
+        snippet: "(Rs. in '000) Total credits 2,40,000.00",
+      };
+      assert.deepEqual(buildBankMonthlyTotals([row], context({ kind: 'no_text' }, 'bank_statement')), []);
+      const clean = { ...row, snippet: 'Total credits 2,40,000.00' };
+      assert.equal(buildBankMonthlyTotals([clean], context({ kind: 'no_text' }, 'bank_statement')).length, 1);
+    });
   });
 
   it('blocks auto-apply on a non-INR unit in the snippet or the unit text', () => {
