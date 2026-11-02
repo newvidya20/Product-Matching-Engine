@@ -32,6 +32,13 @@ const REASON_COPY: Record<FieldReasonCode, string> = {
   period_unknown: 'The financial year is not stated',
   superseded_period: 'From an older period',
   fallback_source: 'Taken from a secondary source',
+  not_in_source: 'Not found in the text of the file itself',
+  enum_review_required: 'This choice always needs a person to confirm it',
+  enum_no_evidence: 'The quoted text does not clearly support this choice',
+  loss_wording: 'The row mentions a loss, so check the sign',
+  unit_mismatch: 'The unit differs from the document',
+  non_inr_unit: 'The figures may not be in rupees',
+  part_year_period: 'This covers part of a year, not a full year',
 };
 
 const WARNING_COPY: Record<SessionWarning['code'], string> = {

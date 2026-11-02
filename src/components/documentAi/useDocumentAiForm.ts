@@ -43,7 +43,7 @@ import {
 const SESSION_STORAGE_KEY = 'lb.docai.activeSession';
 const ACCEPTED_EXTENSIONS = ['pdf', 'xlsx', 'csv', 'png', 'jpg', 'jpeg', 'webp'];
 const COLLATERAL_DETAIL_IDS = ['collateralType', 'collateralValue', 'collateralDescription'];
-const POLL_GIVE_UP_MS = 10 * 60 * 1000;
+const POLL_GIVE_UP_MS = 70 * 60 * 1000;
 
 export interface UploadItem {
   key: string;

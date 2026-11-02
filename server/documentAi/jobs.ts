@@ -1,6 +1,6 @@
 /**
  * Extraction job queue (docs/contracts.md section 7.6).
- * In-process FIFO, global concurrency 2, 120 s per file. Calls only the exported pipeline signatures.
+ * In-process FIFO, global concurrency 2, 300 s per file. Calls only the exported pipeline signatures.
  */
 import crypto from 'node:crypto';
 import type {
@@ -28,7 +28,7 @@ import {
 } from './store.ts';
 
 const CONCURRENCY = 2;
-const PER_FILE_TIMEOUT_MS = 120_000;
+const PER_FILE_TIMEOUT_MS = 300_000;
 
 interface QueuedTask {
   job: ExtractionJob;

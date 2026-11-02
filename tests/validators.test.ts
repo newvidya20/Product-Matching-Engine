@@ -487,9 +487,11 @@ describe('snippet tokens keep the decimal point (contract 4.2)', () => {
 
 describe('loss wording (contract 4.2)', () => {
   it('finds loss, deficit, negative and similar', () => {
-    for (const text of ['Loss for the year', 'Net losses', 'Deficit', 'negative net worth', 'Profit / (Loss) after tax', 'Shortfall']) {
+    for (const text of ['Loss for the year', 'Net losses', 'Deficit', 'negative net worth', 'Shortfall']) {
       assert.equal(hasLossWording(text), true, text);
     }
+    assert.equal(hasLossWording('Profit / (Loss) after tax'), false);
+    assert.equal(hasLossWording('(Loss)/Profit before tax'), false);
   });
 
   it('ignores the name of the statement, and plain profit rows', () => {

@@ -758,12 +758,21 @@ describe('loss wording on signed fields (contract 4.2, 4.5)', () => {
     assert.equal(result(output, 'profitabilityStatus').value, 'loss_making');
   });
 
-  it('applies the ruling as written to a positive figure on a Profit / (Loss) label', () => {
+  it('does not cap a positive figure on a Profit / (Loss) row', () => {
     const r = result(
       run([successDocument(DOC_STATEMENT, 'financial_statement', [pat(840000, '8,40,000', 'Profit / (Loss) after tax 8,40,000')])]),
       PAT
     );
+    assert.ok(!r.reasons.includes('loss_wording'));
+  });
+
+  it('still caps a positive figure on a plain loss row', () => {
+    const r = result(
+      run([successDocument(DOC_STATEMENT, 'financial_statement', [pat(1250000, '12,50,000', 'Loss for the year 12,50,000')])]),
+      PAT
+    );
     assert.ok(r.reasons.includes('loss_wording'));
+    assert.equal(r.status, 'needs_verification');
   });
 
   it('does not cap a profit row in a statement named Profit and Loss', () => {

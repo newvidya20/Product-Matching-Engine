@@ -308,6 +308,7 @@ export async function unlinkSessionForAssessment(assessmentId: string): Promise<
         ...cur,
         assessmentId: null,
         linkedAt: null,
+        detachedAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       });
       if (assessmentIndex.get(assessmentId) === rec.sessionId) assessmentIndex.delete(assessmentId);

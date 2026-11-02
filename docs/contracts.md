@@ -562,7 +562,7 @@ offered only on the New Assessment page, and History offers `file_only`. Edited 
 
 Extraction can take over 30 seconds per file, so `POST .../extract` returns 202 immediately.
 
-- Queue: in-process, global concurrency 2, FIFO, 120 seconds per file via `AbortController`. Files sequentially
+- Queue: in-process, global concurrency 2, FIFO, 300 seconds per file via `AbortController`. Files sequentially
   go to `extractDocument`. One failing document does not stop the rest.
 - Terminal status: `completed`; `completed_with_errors` if some failed; `failed` if all did.
 - Persist the job after every state change. On boot, any `queued` or `running` job becomes `failed`, and its unfinished
@@ -800,6 +800,5 @@ copied to Sheets.
 | The `DSCR` input appears editable, but `buildFinancialProfile` overwrites `ratios` on save | Pre-existing. Unchanged |
 | Password-protected PDFs | Reported as `password_protected`. No password entry in v1 |
 | Scanned PDFs and images have no server-readable text, so nothing verifies their values against the source | Residual risk, section 12. Values passing confidence and validation still auto-apply |
-| `gemini.ts` can use up to 284 seconds of hung attempts and backoff, but `jobs.ts` allows 120 seconds per file | `PER_FILE_TIMEOUT_MS` should be 300 seconds, with section 7.6. Until then, a spike ends in `llm_timeout` after one hung attempt and part of a second |
 | Part-year figures labelled as a bare 31 March, with no wording in the snippet | Taken as the full year, because statements head columns that way |
 | Unsaved form values are lost on leaving the page | Pre-existing. Documents and auto-applied fields resume; typed values do not |

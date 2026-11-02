@@ -381,6 +381,8 @@ export interface DocumentSessionRecord {
   createdAt: string;
   updatedAt: string;
   linkedAt: string | null;
+  /** Set when the assessment was deleted without a document session. Files then wait for normal retention. */
+  detachedAt?: string | null;
   createdBy: string;
 }
 

@@ -15,7 +15,7 @@
     "index:study-material": "tsx scripts/buildStudyMaterialReference.ts"
   },
   "engines": {
-    "node": "20.x"
+    "node": "22.x"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

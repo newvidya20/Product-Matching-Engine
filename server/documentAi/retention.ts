@@ -28,7 +28,10 @@ export async function runRetention(now: Date = new Date()): Promise<{ files: num
       try {
         const session = await getSession(sessionId);
         if (!session) continue;
-        if (!session.assessmentId && new Date(session.createdAt).getTime() < sessionCutoff) {
+        const purgeable = session.detachedAt
+          ? new Date(session.detachedAt).getTime() < fileCutoff
+          : !session.assessmentId && new Date(session.createdAt).getTime() < sessionCutoff;
+        if (purgeable) {
           await deleteSessionDir(sessionId);
           sessions += 1;
           void logActivity({ type: 'unlinked_session_purged', actor: 'system', sessionId });
