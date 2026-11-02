@@ -497,7 +497,7 @@ const STATEMENT_TITLE = /statement\s+of\s+profit\s*(?:and|&)\s*loss|profit\s*(?:
 const LOSS_WORDING = /\b(?:loss(?:es)?|deficit|deficiency|negative|shortfall|erosion|eroded|debit\s+balance)\b/i;
 
 /** Schedule III rows such as "Profit / (Loss) after tax": the brackets mark the convention, not a loss. */
-const PROFIT_OR_LOSS_ROW = /profits*/?s*(s*losss*)|(s*losss*)s*/?s*profit/gi;
+const PROFIT_OR_LOSS_ROW = /\bprofit\s*\/?\s*\(\s*loss\s*\)|\(\s*loss\s*\)\s*\/?\s*profit\b/gi;
 
 export function hasLossWording(text: string): boolean {
   return LOSS_WORDING.test(cleanText(text).replace(STATEMENT_TITLE, ' ').replace(PROFIT_OR_LOSS_ROW, ' '));
