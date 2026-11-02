@@ -488,7 +488,11 @@ function evaluateFinancialSignals(assessment: BorrowerAssessment): {
 
   if (typeof ratios.debtEquity === 'number') {
     reasons.push(`Debt/Equity is ${ratios.debtEquity}.`);
-    if (ratios.debtEquity > policy.debtEquityMax) {
+    if (ratios.debtEquity < 0) {
+      failed.push(
+        `Debt/Equity ${ratios.debtEquity} is negative, which indicates negative net worth, so the ${purposeLabel} policy limit of ${policy.debtEquityMax} is not met.`
+      );
+    } else if (ratios.debtEquity > policy.debtEquityMax) {
       failed.push(
         `Debt/Equity ${ratios.debtEquity} exceeds the ${purposeLabel} policy limit of ${policy.debtEquityMax}.`
       );

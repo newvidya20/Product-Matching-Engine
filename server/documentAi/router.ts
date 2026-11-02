@@ -2,6 +2,7 @@
  * Document AI routes (docs/contracts.md section 7). Mounted at /api/document-ai by server.ts.
  * Error bodies never contain document content, values or provider error text.
  */
+import { isLlmConfigured } from './gemini.ts';
 import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
 import { getFieldDefinition } from '../../src/documentAi/fieldMap.ts';
@@ -105,7 +106,7 @@ export function createDocumentAiRouter(options: DocumentAiRouterOptions): expres
     return {
       settings: await getSettings(),
       disabledByEnv: isDisabledByEnv(),
-      llmConfigured: Boolean((process.env.GEMINI_API_KEY || '').trim()),
+      llmConfigured: isLlmConfigured(),
     };
   }
 
