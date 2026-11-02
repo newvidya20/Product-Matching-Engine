@@ -167,7 +167,7 @@ function AssessmentForm({
 
   const handleLoadFictionalSample = () => {
     setValidationError(null);
-    const detach = detachFromSaved();
+    detachFromSaved();
     const blank = createBlankForm(defaultCurrency, officerDefault);
     ai.loadDemo(
       {
@@ -200,7 +200,8 @@ function AssessmentForm({
       advisorNotes: 'Populate the borrower profile to test product fit analysis against the approved catalogue.',
       isFictionalDemo: true,
       },
-      { detach }
+      // Always a fresh session, so one that was just linked by an in-flight save is not reused.
+      { detach: true }
     );
   };
 
@@ -256,6 +257,8 @@ function AssessmentForm({
     const startedGen = detachGenRef.current;
     // Never blocks the save: a Document AI failure only produces a notice.
     const { warning, ...link } = await ai.prepareForSave();
+    // Reset or Populate Demo ran during the flush: this form is no longer the one being saved.
+    if (detachGenRef.current !== startedGen) return;
     if (warning) notify('error', warning);
     // Built after the flush, from the ref, so edits made while it ran are saved.
     const payload: Partial<BorrowerAssessment> = {

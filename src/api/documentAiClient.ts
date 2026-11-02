@@ -112,8 +112,9 @@ async function send(path: string, init: RequestInit = {}, retried = false): Prom
   throw error;
 }
 
-async function json<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await send(path, init);
+/** `noUnlock` fails on 401 instead of opening the access-code prompt. */
+async function json<T>(path: string, init?: RequestInit, noUnlock = false): Promise<T> {
+  const response = await send(path, init, noUnlock);
   return (await response.json()) as T;
 }
 
@@ -183,8 +184,16 @@ export const documentAiClient = {
   getJob: (sessionId: string, jobId: string) =>
     json<JobStatusResponse>(`/sessions/${enc(sessionId)}/jobs/${enc(jobId)}`),
 
-  putEdits: (sessionId: string, request: UpdateEditsRequest) =>
-    json<SessionEdits>(`/sessions/${enc(sessionId)}/edits`, { method: 'PUT', body: body(request) }),
+  putEdits: (
+    sessionId: string,
+    request: UpdateEditsRequest,
+    options: { signal?: AbortSignal; noUnlock?: boolean } = {}
+  ) =>
+    json<SessionEdits>(
+      `/sessions/${enc(sessionId)}/edits`,
+      { method: 'PUT', body: body(request), ...(options.signal ? { signal: options.signal } : {}) },
+      options.noUnlock ?? false
+    ),
 };
 
 export type { DocumentSessionRecord };
