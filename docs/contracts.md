@@ -27,8 +27,8 @@ parser is private and drops sheet names and cell references.
 **Merge order:** storage-engineer, extraction-engineer, ui-builder, test-writer. Until storage merges, ui-builder
 may see tsc errors only for `editingAssessmentId` and `openAssessmentForEdit`, both defined in section 8.
 
-Engineers must not add runtime dependencies. The runtime is Node 22: `engines.node` in `package.json` is `22.x`, and
-`pdfjs-dist` itself needs 22.13 or later.
+Engineers must not add runtime dependencies. The runtime is Node 22: `engines.node` in `package.json` is `>=22.13 <23`,
+because `pdfjs-dist` needs 22.13 or later.
 
 ## 2. Pipeline and routes seam
 
@@ -52,7 +52,8 @@ export function readSpreadsheetPreview(bytes: Uint8Array, kind: 'xlsx' | 'csv'):
   `ambiguous_unit`, which is preserved because it depends on the stated unit. `value: null` on input means the value
   failed to parse, and stays rejected. `buildCandidates` normalises values and may set provisional statuses.
 - Merge is pure and never holds document text, so the check against source text runs once, in `buildCandidates`, while
-  the file is in memory. Its outcome is stored as `sourceCheck` (with `rowLabel` and `sourceSign`), and merge caps on them.
+  the file is in memory. Its outcome is stored as `sourceCheck` (with `rowLabel`, `sourceSign` and
+  `scaleHeaders`), and merge caps on them.
 - `jobs.ts` owns queueing, concurrency, the per-file timeout and persistence. `gemini.ts` owns retries, and the timeout of
   each attempt. Up to 4 attempts per call, 90 seconds each, on 429, 503, 408, 504 and an attempt that times out. Backoff is
   capped exponential with equal jitter: 1-2 s, 2-4 s, 4-8 s. The SDK is set to no retries (`retryOptions: { attempts: 1 }`),
@@ -109,6 +110,8 @@ Candidate (`ExtractedField`):
 - `sourceSign`: a negative the server read at the value, kept apart from `rowLabel` so that the 300 character cut cannot
   lose it. `negative_figure`: the spreadsheet cell holding the value is negative. `negative_in_row`: another figure in its
   row or printed line is. Absent when it read none.
+- `scaleHeaders`: for currency fields, the scale headers the server read on the cited page or sheet, as `AmountUnit` values
+  (section 6.3). Absent when it read none.
 
 Field result (`FieldResult`) adds `candidates`, `suggestedCandidateId`, `mirrorOf` and `overriddenByUser`.
 
@@ -174,7 +177,7 @@ own snippet:
 | File | What the server reads | A candidate fails when |
 |---|---|---|
 | `xlsx`, `csv` | Parsed visible cells. Hidden sheets, rows (including zero height) and columns are excluded, and do not reach the model | `rawValue` is in no visible cell, preferring the cited cell. For an enum, its evidence keyword is in no cell |
-| Digital `pdf` | The text layer, via `pdfjs-dist`. Digital means at least 50 non-space characters | Any digits of `snippet` or `rawValue` are absent. A string's `rawValue`, or an enum's evidence keyword, is absent. An inline unit differs from the unit printed beside that figure |
+| Digital `pdf` | The text layer, via `pdfjs-dist`, by page. Digital means at least 50 non-space characters | Any digits of `snippet` or `rawValue` are absent. A string's `rawValue`, or an enum's evidence keyword, is absent. An inline unit differs from the unit printed beside that figure |
 | A PDF that will not parse, or takes over 20 seconds | Nothing | Always. A file must not escape the check by breaking the parser. The pdf.js task is destroyed on timeout |
 | Scanned `pdf`, images | Nothing | Never: `no_text`. See section 12 |
 
@@ -353,7 +356,10 @@ Details:
   for the old purpose's dynamic fields, then re-run apply.
 - Any auto-applied `collateralType`, `collateralValue` or `collateralDescription` also sets `collateralAvailable` to `yes`,
   unless that is in `editedFields`. In that case hold them unwritten, since those inputs are disabled.
-- **Reset** starts a new session ID and empties both maps. The old session stays until the unlinked TTL.
+- **Reset** starts a new session ID and empties both maps. It always repoints the stored session
+  (`lb.docai.activeSession`) at the new ID. The old session stays until the unlinked TTL.
+- On a new form, a stored session already linked to an assessment is discarded and a fresh ID is used, so a new
+  assessment never inherits another's documents.
 - Removing an edit happens only through **Use document value**, which is itself recorded as `accepted_document_value`.
 - Treat a value equal to `defaultValue` as not provided only for autofill. Never infer "edited" from a value differing.
 
@@ -424,7 +430,18 @@ Unit checks, in merge, for currency fields. Any failure caps at `needs_verificat
   unit header text the value was not scaled by, **whatever the magnitude**: `(Rs. in '000) Revenue 12,50,000` with no stated
   unit is capped, because the value was taken as rupees. A unit that belongs to one figure is not a header: one printed after
   a figure (`a limit of 50 lakh`), a figure spelled out (`Rupees Twelve Lakh Fifty Thousand only`), or a bank statement's
-  credit marker. A bank month failing this check is dropped.
+  credit marker. A unit after a date or a year is not after a figure either: in `Year ended 31.03.2025 Lakhs Revenue 12,50,000`
+  the `Lakhs` is a header. A bank month failing this check is dropped.
+- **Scale headers in the file.** A header can sit outside the snippet and the row, so `buildCandidates` also reads the
+  file itself: on a digital PDF the cited page, in `xlsx` or `csv` the cited sheet, or all of the file if none is cited. If the
+  cited page or sheet does not hold the value, the citation is wrong, and all of the file is read. The headers found are stored as
+  `scaleHeaders`. If none equals the scale applied (the inline unit, else `statedUnit`, else rupees), the candidate takes
+  `unit_mismatch`, so `(Rs. in '000)` at the top of the page caps `Revenue 12,50,000` taken as rupees. If one equals it and another
+  differs, it takes `ambiguous_unit`. A bank month in either case is dropped. Only header forms count: `Rs. in lakhs`, `Rs. Mn`,
+  `INR '000`, `₹ Crore`, `Figures in lakhs`, `(in crores)`, `(Lakhs)`, `in thousands` at the end of a line, a line or cell holding
+  only the word, and a unit after a date such as `31.03.2025 Lakhs`. Prose does not:
+  `over a thousand customers`, `thousands of customers`, `Rs. 5 lakh`. On a bank statement a bare `Cr` is the credit marker here too. Scanned documents have no text to
+  read, section 13.
 - `non_inr_unit`: a non-INR currency in the snippet, `unitText` or `rowLabel`, wherever it appears.
 
 | Input | Context | Result |
@@ -742,6 +759,8 @@ Retention in `retention.ts` runs at boot and every 6 hours, by `uploadedAt`:
 - Sessions with `assessmentId: null` older than 72 hours: delete the whole directory. A session with `detachedAt` set is
   exempt from this: it lost its assessment to a delete, and waits for normal retention, its directory going once `detachedAt`
   is past `retentionDays`. Linking the session to an assessment clears `detachedAt`.
+- A directory is an orphan, and is removed, only when `session.json` is genuinely absent. A `session.json` that exists but
+  cannot be read or parsed is left alone, because a passing read error must not cost a session its documents.
 - Reducing `retentionDays` takes effect on the next run. Never touch `activity/`.
 
 ## 11. Activity log
@@ -756,7 +775,7 @@ before logging, mask any substring matching a PAN or GSTIN shape with `[MASKED]`
 | Event | Fields of note |
 |---|---|
 | `auth_session_created`, `auth_session_failed`, `auth_logout` | `actor`; `code` is the role, or `via` |
-| `session_created`, `session_linked`, `unlinked_session_purged` | `sessionId`, `assessmentId` |
+| `session_created`, `session_linked`, `session_detached`, `unlinked_session_purged` | `sessionId`, `assessmentId` |
 | `file_uploaded`, `file_rejected` | `fileName`; `code` is the kind or rejection code; `counts.bytes` |
 | `file_previewed`, `file_downloaded` | `documentId` |
 | `file_deleted`, `fields_cleared` | `documentId`; `code` is the mode; `fieldIds` |
@@ -823,6 +842,8 @@ copied to Sheets.
 | The `DSCR` input appears editable, but `buildFinancialProfile` overwrites `ratios` on save | Pre-existing. Unchanged |
 | Password-protected PDFs | Reported as `password_protected`. No password entry in v1 |
 | Scanned PDFs and images have no server-readable text, so nothing verifies their values against the source | Residual risk, section 12. Values passing confidence and validation still auto-apply |
+| Scale headers on scanned PDFs and images | The server has no text to read, so a header outside the snippet is seen only if the model reports it. Section 6.3 |
+| A scale header printed only on an earlier page of a table that runs on | The cited page is what is read, so it is not seen unless that page repeats it. Section 6.3 |
 | Part-year figures labelled as a bare 31 March, with no wording in the snippet | Taken as the full year, because statements head columns that way |
 | An unbracketed loss printed on a `Profit / (Loss)` row, such as `Profit / (Loss) after tax 12.50` where the document means a loss | Accepted residual. The row is exempt from `loss_wording`, as nothing on it says the figure is negative, so it can auto-apply as a profit. Section 4.2 |
 | Unsaved form values are lost on leaving the page | Pre-existing. Documents and auto-applied fields resume; typed values do not |

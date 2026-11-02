@@ -158,6 +158,13 @@ const CREDIT_REPORT_EVIDENCE: Readonly<Record<string, EnumEvidence>> = {
   available: { any: ['commercial credit report', 'company credit report', 'cmr', 'ccr', 'commercial bureau'] },
 };
 
+/** `Collateral offered: No`. Punctuation goes before phrases are compared. */
+const COLLATERAL_STATED_ABSENT = ['collateral', 'security'].flatMap((subject) =>
+  ['offered', 'provided', 'available'].flatMap((verb) =>
+    ['no', 'nil', 'none', 'not'].map((answer) => `${subject} ${verb} ${answer}`)
+  )
+);
+
 const COLLATERAL_EVIDENCE: Readonly<Record<string, EnumEvidence>> = {
   yes: {
     any: ['collateral', 'security', 'mortgage', 'mortgaged', 'hypothecation', 'hypothecated', 'pledge', 'pledged', 'valuation'],
@@ -182,6 +189,7 @@ const COLLATERAL_EVIDENCE: Readonly<Record<string, EnumEvidence>> = {
       'not pledged',
       'not hypothecated',
       'unsecured',
+      ...COLLATERAL_STATED_ABSENT,
     ],
   },
 };
