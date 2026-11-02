@@ -30,7 +30,7 @@ import {
   type FieldDefinition,
 } from '../../documentAi/fieldMap';
 import { applyFieldResults, dynamicFieldIdsForPurpose } from './applyFieldResults';
-import { dropSeededMarksForApplied, nextStoredSession } from './seedMarks';
+import { dropSeededMarksForApplied, type AppliedComparison } from './seedMarks';
 import type { DocAiFieldContextValue } from './FieldShell';
 import {
   assessmentToForm,
@@ -158,11 +158,14 @@ export function useDocumentAiForm({
   // Fields this page applied itself: the only ones apply logic may later revert.
   const localAppliedRef = useRef<Set<string>>(new Set());
   const seededRef = useRef(false);
+  // The draft as saved, kept to compare its values with what a document applied.
+  const savedFormRef = useRef<FormState | null>(null);
   const pendingRef = useRef<PendingEdits>(emptyPending());
   // Reopened draft: protect saved values straight from the assessment, before any network call.
   if (!seededRef.current) {
     seededRef.current = true;
     if (editingAssessment) {
+      savedFormRef.current = formRef.current;
       for (const entry of preexistingEntries(formRef.current)) {
         editedRef.current[entry.fieldId] = entry;
         pendingRef.current.setEdited[entry.fieldId] = entry;
@@ -172,6 +175,8 @@ export function useDocumentAiForm({
   const flushTimer = useRef<number | null>(null);
   const flushChain = useRef<Promise<void>>(Promise.resolve());
   const flushAttempts = useRef(0);
+  // Set only while a save waits on the flush: bounded by a signal and never opens the access-code prompt.
+  const flushOptionsRef = useRef<{ signal?: AbortSignal; noUnlock?: boolean }>({});
   const pollRef = useRef<{ jobId: string; startedAt: number; timer: number | null; failures: number } | null>(null);
   const extractAgainRef = useRef(false);
   const mountedRef = useRef(true);
@@ -216,7 +221,7 @@ export function useDocumentAiForm({
       pendingRef.current = emptyPending();
       const sid = sessionIdRef.current;
       try {
-        await documentAiClient.putEdits(sid, request);
+        await documentAiClient.putEdits(sid, request, flushOptionsRef.current);
         flushAttempts.current = 0;
       } catch (error) {
         if (sid !== sessionIdRef.current) return; // the session was swapped; these edits are moot
@@ -355,7 +360,23 @@ export function useDocumentAiForm({
       }
       for (const id of pending.clearEdited) delete edited[id];
       // Reopen-time guesses are void for fields a document applied: only explicit delete-and-clear may clear them.
-      const droppedSeeds = dropSeededMarksForApplied(edited, pending.setEdited, Object.keys(state.edits.appliedFields));
+      const comparisons: Record<string, AppliedComparison> = {};
+      const savedForm = savedFormRef.current;
+      for (const [id, entry] of Object.entries(state.edits.appliedFields)) {
+        const definition = getFieldDefinition(id);
+        if (!savedForm || !definition || !isFormBacked(definition)) continue;
+        const candidate = state.fields[id]?.candidates.find((c) => c.candidateId === entry.candidateId);
+        comparisons[id] = {
+          applied: candidate?.value ?? null,
+          saved: readField(savedForm, definition),
+        };
+      }
+      const droppedSeeds = dropSeededMarksForApplied(
+        edited,
+        pending.setEdited,
+        comparisons,
+        new Set(Object.keys(state.edits.editedFields))
+      );
       for (const id of droppedSeeds) {
         if (id in state.edits.editedFields) pending.clearEdited.add(id);
       }
@@ -468,6 +489,7 @@ export function useDocumentAiForm({
    * Finds and loads the session. A failed lookup is not "no session": it must not create a second one, so
    * uploads wait until it succeeds, and it is retried here with backoff and again on demand.
    */
+  const discardSessionRef = useRef<() => void>(() => undefined);
   const loadSession = useCallback(async (): Promise<boolean> => {
     const generation = generationRef.current;
     const stale = () => !mountedRef.current || generationRef.current !== generation;
@@ -486,6 +508,11 @@ export function useDocumentAiForm({
       if (stale()) return false;
       loadedRef.current = true;
       loadFailuresRef.current = 0;
+      if (state && !editingRef.current && state.session.assessmentId) {
+        // A new form never resumes a session that already belongs to a saved assessment.
+        discardSessionRef.current();
+        return true;
+      }
       if (state) {
         // Saved values win on reopen: the first hydrate must not apply anything.
         skipApplyRef.current = Boolean(editingRef.current);
@@ -615,7 +642,7 @@ export function useDocumentAiForm({
     if (loadTimer.current !== null) window.clearTimeout(loadTimer.current);
     const next = newSessionId();
     sessionIdRef.current = next;
-    writeStoredSession(nextStoredSession(readStoredSession(), next));
+    writeStoredSession(next);
     editingRef.current = null;
     lookupDoneRef.current = true;
     loadedRef.current = true;
@@ -635,6 +662,8 @@ export function useDocumentAiForm({
     setPollTimedOut(false);
     setLoadingSession(false);
   }, [stopPolling]);
+
+  discardSessionRef.current = resetSession;
 
   /** `detach` leaves the saved record: the form then belongs to a new session and a new assessment. */
   const loadDemo = useCallback(
@@ -671,16 +700,35 @@ export function useDocumentAiForm({
    */
   const prepareForSave = useCallback(async (): Promise<{ documentSessionId?: string; warning?: string }> => {
     let warning: string | undefined;
+    const controller = new AbortController();
+    let timer = 0;
+    let timedOut = false;
+    const timeout = new Promise<void>((resolve) => {
+      timer = window.setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+        resolve();
+      }, 5000);
+    });
+    flushOptionsRef.current = { signal: controller.signal, noUnlock: true };
     try {
-      await flushEdits();
-      await flushEdits();
+      await Promise.race([
+        (async () => {
+          await flushEdits();
+          await flushEdits();
+        })(),
+        timeout,
+      ]);
     } catch {
       /* flushEdits handles its own failures */
+    } finally {
+      window.clearTimeout(timer);
+      flushOptionsRef.current = {};
     }
     const p = pendingRef.current;
     const outstanding =
       Object.keys(p.setEdited).length + Object.keys(p.setApplied).length + p.clearEdited.size + p.clearApplied.size;
-    if (outstanding > 0 && (sessionExistsRef.current || docStateRef.current)) {
+    if ((outstanding > 0 || timedOut) && (sessionExistsRef.current || docStateRef.current)) {
       warning =
         'Your changes to the extracted fields could not be stored with the documents. They stay protected on this page only.';
       if (mountedRef.current) setNotice(warning);

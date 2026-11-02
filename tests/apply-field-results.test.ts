@@ -58,23 +58,50 @@ describe('applyFieldResults review fixes', () => {
   });
 });
 
-import { dropSeededMarksForApplied, nextStoredSession } from '../src/components/documentAi/seedMarks.ts';
+import { dropSeededMarksForApplied, sameFieldValue } from '../src/components/documentAi/seedMarks.ts';
 
-describe('seed marks and stored session', () => {
+describe('seed marks', () => {
   const entry = (fieldId: string, origin: string) => ({ fieldId, origin, at: 't' }) as never;
 
-  it('drops preexisting marks only for server-applied fields', () => {
+  it('drops a preexisting mark only when the saved value equals the applied value', () => {
     const edited = { a: entry('a', 'preexisting_value'), b: entry('b', 'preexisting_value'), c: entry('c', 'typed') };
     const pending = { a: edited.a, b: edited.b, c: edited.c };
-    const dropped = dropSeededMarksForApplied(edited, pending, ['a', 'c']);
+    const dropped = dropSeededMarksForApplied(edited, pending, {
+      a: { applied: 5000000, saved: '5000000' },
+      b: { applied: 'x', saved: 'y' },
+      c: { applied: 1, saved: '1' },
+    });
     assert.deepEqual(dropped, ['a']);
     assert.deepEqual(Object.keys(edited).sort(), ['b', 'c']);
     assert.deepEqual(Object.keys(pending).sort(), ['b', 'c']);
   });
 
-  it('keeps the existing stored session unless it is empty', () => {
-    assert.equal(nextStoredSession('ds_old', 'ds_new'), 'ds_old');
-    assert.equal(nextStoredSession(null, 'ds_new'), 'ds_new');
-    assert.equal(nextStoredSession('', 'ds_new'), 'ds_new');
+  it('keeps a differing mark and queues it so the server learns it', () => {
+    const edited = { a: entry('a', 'preexisting_value') };
+    const pending: Record<string, never> = {};
+    const dropped = dropSeededMarksForApplied(edited, pending, { a: { applied: 100, saved: '90' } });
+    assert.deepEqual(dropped, []);
+    assert.ok(edited.a);
+    assert.ok(pending.a);
+  });
+
+  it('keeps the mark when the applied value is unknown, and skips queueing if the server has it', () => {
+    const edited = { a: entry('a', 'preexisting_value'), b: entry('b', 'preexisting_value') };
+    const pending: Record<string, never> = {};
+    dropSeededMarksForApplied(edited, pending, { a: { applied: null, saved: '1' }, b: { applied: 2, saved: '3' } }, new Set(['b']));
+    assert.ok(edited.a && edited.b);
+    assert.ok(pending.a);
+    assert.equal(pending.b, undefined);
+  });
+
+  it('compares numbers by value and text trimmed', () => {
+    assert.equal(sameFieldValue('5000000', 5000000), true);
+    assert.equal(sameFieldValue('5,000,000', 5000000), true);
+    assert.equal(sameFieldValue('5000000.0', 5000000), true);
+    assert.equal(sameFieldValue('4999999', 5000000), false);
+    assert.equal(sameFieldValue('20%', '20%'), true);
+    assert.equal(sameFieldValue(' Acme ', 'Acme'), true);
+    assert.equal(sameFieldValue('', 0), false);
+    assert.equal(sameFieldValue('a', null), false);
   });
 });
