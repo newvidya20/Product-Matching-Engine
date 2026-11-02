@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { ExternalLink, History, Plus, Search } from 'lucide-react';
 import { useAppState } from '../context/AppStateContext';
 import {
@@ -8,6 +8,13 @@ import {
   SlideOverDrawer,
 } from '../components/ui/Primitives';
 import type { BorrowerAssessment } from '../types/domain';
+import type {
+  DeleteDocumentResponse,
+  FindSessionResponse,
+  ListDocumentsResponse,
+  SpreadsheetPreview,
+  StoredDocument,
+} from '../types/documentAi';
 import {
   formatAssessmentStatus,
   formatDateTime,
@@ -20,11 +27,285 @@ import {
 
 type HistoryFilter = 'all' | 'evaluated' | 'draft';
 
+const DOC_AI_BASE = '/api/document-ai';
+
+class DocApiError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+async function docApi<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${DOC_AI_BASE}${path}`, {
+    credentials: 'same-origin',
+    ...init,
+    headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) },
+  });
+  if (!res.ok) {
+    let message = 'Document request failed.';
+    try {
+      const body = (await res.json()) as { error?: string };
+      if (body.error) message = body.error;
+    } catch {
+      /* keep default */
+    }
+    throw new DocApiError(res.status, message);
+  }
+  return (await res.json()) as T;
+}
+
+function formatBytes(n: number): string {
+  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  if (n >= 1024) return `${Math.round(n / 1024)} KB`;
+  return `${n} B`;
+}
+
+function AttachedDocuments({ assessmentId }: { assessmentId: string }) {
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [documents, setDocuments] = useState<StoredDocument[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [message, setMessage] = useState<string | null>(null);
+  const [needsCode, setNeedsCode] = useState(false);
+  const [accessCode, setAccessCode] = useState('');
+  const [confirmDeleteDocId, setConfirmDeleteDocId] = useState<string | null>(null);
+  const [previewDocId, setPreviewDocId] = useState<string | null>(null);
+  const [preview, setPreview] = useState<SpreadsheetPreview | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setMessage(null);
+    try {
+      const found = await docApi<FindSessionResponse>(
+        `/sessions?assessmentId=${encodeURIComponent(assessmentId)}`
+      );
+      setNeedsCode(false);
+      if (!found.session) {
+        setSessionId(null);
+        setDocuments([]);
+        return;
+      }
+      setSessionId(found.session.sessionId);
+      const list = await docApi<ListDocumentsResponse>(
+        `/sessions/${found.session.sessionId}/documents`
+      );
+      setDocuments(list.documents);
+    } catch (err) {
+      if (err instanceof DocApiError && err.status === 401) {
+        setNeedsCode(true);
+      } else {
+        setMessage(err instanceof Error ? err.message : 'Unable to load documents.');
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [assessmentId]);
+
+  useEffect(() => {
+    setConfirmDeleteDocId(null);
+    setPreviewDocId(null);
+    setPreview(null);
+    void load();
+  }, [load]);
+
+  const unlock = async () => {
+    setMessage(null);
+    try {
+      await docApi('/auth/session', {
+        method: 'POST',
+        body: JSON.stringify({ accessCode }),
+      });
+      setAccessCode('');
+      await load();
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : 'Could not unlock documents.');
+    }
+  };
+
+  const base = sessionId ? `${DOC_AI_BASE}/sessions/${sessionId}/documents` : '';
+
+  const togglePreview = async (doc: StoredDocument) => {
+    if (previewDocId === doc.documentId) {
+      setPreviewDocId(null);
+      setPreview(null);
+      return;
+    }
+    setPreviewDocId(doc.documentId);
+    setPreview(null);
+    try {
+      setPreview(
+        await docApi<SpreadsheetPreview>(
+          `/sessions/${sessionId}/documents/${doc.documentId}/preview`
+        )
+      );
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : 'Preview unavailable.');
+    }
+  };
+
+  const deleteFile = async (doc: StoredDocument) => {
+    setConfirmDeleteDocId(null);
+    try {
+      const out = await docApi<DeleteDocumentResponse>(
+        `/sessions/${sessionId}/documents/${doc.documentId}?mode=file_only`,
+        { method: 'DELETE' }
+      );
+      setDocuments(out.state.documents);
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : 'Could not delete the file.');
+    }
+  };
+
+  const linkClass =
+    'px-2 py-1 text-[11px] font-medium text-stone-700 hover:bg-stone-100 rounded-md transition-colors cursor-pointer';
+
+  return (
+    <div className="pt-4 border-t border-stone-200 space-y-2">
+      <div className="font-semibold text-stone-900">Attached Documents</div>
+      {needsCode && (
+        <div className="space-y-2">
+          <p className="text-stone-500">
+            Enter the Document AI access code to view attached documents.
+          </p>
+          <div className="flex gap-2">
+            <input
+              type="password"
+              value={accessCode}
+              onChange={(e) => setAccessCode(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void unlock();
+              }}
+              autoComplete="off"
+              className="flex-1 px-3 py-1.5 text-xs bg-white border border-stone-200 rounded-lg focus:outline-none focus:border-orange-600"
+            />
+            <button
+              type="button"
+              onClick={() => void unlock()}
+              className="px-3 py-1.5 text-xs font-semibold text-white bg-orange-600 hover:bg-orange-700 rounded-lg cursor-pointer"
+            >
+              Unlock
+            </button>
+          </div>
+        </div>
+      )}
+      {message && <p className="text-red-600">{message}</p>}
+      {!needsCode && loading && <p className="text-stone-500">Loading documents...</p>}
+      {!needsCode && !loading && documents.length === 0 && !message && (
+        <p className="text-stone-500">No documents are attached to this assessment.</p>
+      )}
+      {documents.length > 0 && (
+        <div className="divide-y divide-stone-200 border-t border-b border-stone-200">
+          {documents.map((doc) => {
+            const gone = Boolean(doc.fileDeletedAt);
+            const isSheet = doc.kind === 'xlsx' || doc.kind === 'csv';
+            return (
+              <div key={doc.documentId} className="py-2.5 space-y-1.5">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="font-medium text-stone-900 truncate">
+                      {doc.originalName}
+                    </div>
+                    <div className="text-[11px] text-stone-500">
+                      {(doc.documentType || 'unclassified').replace(/_/g, ' ')} ·{' '}
+                      {formatBytes(doc.sizeBytes)} · {formatDateTime(doc.uploadedAt)}
+                      {gone ? ' · file removed' : ''}
+                    </div>
+                  </div>
+                  {!gone && (
+                    <div className="inline-flex items-center gap-1 shrink-0">
+                      {isSheet ? (
+                        <button
+                          type="button"
+                          onClick={() => void togglePreview(doc)}
+                          className={linkClass}
+                        >
+                          {previewDocId === doc.documentId ? 'Hide' : 'Preview'}
+                        </button>
+                      ) : (
+                        <a
+                          href={`${base}/${doc.documentId}/file?disposition=inline`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className={linkClass}
+                        >
+                          Preview
+                        </a>
+                      )}
+                      <a
+                        href={`${base}/${doc.documentId}/file?disposition=attachment`}
+                        className={linkClass}
+                      >
+                        Download
+                      </a>
+                      {confirmDeleteDocId === doc.documentId ? (
+                        <button
+                          type="button"
+                          onClick={() => void deleteFile(doc)}
+                          onBlur={() => setConfirmDeleteDocId(null)}
+                          className="px-2 py-1 text-[11px] font-semibold text-white bg-red-600 hover:bg-red-700 rounded-md cursor-pointer"
+                        >
+                          Confirm Delete File
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteDocId(doc.documentId)}
+                          className="px-2 py-1 text-[11px] text-stone-400 hover:text-red-600 rounded-md cursor-pointer"
+                        >
+                          Delete File
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+                {previewDocId === doc.documentId && (
+                  <div className="overflow-x-auto max-h-64 border border-stone-200 rounded-md">
+                    {!preview ? (
+                      <p className="p-2 text-stone-500">Loading preview...</p>
+                    ) : (
+                      preview.sheets.map((sheet) => (
+                        <div key={sheet.name}>
+                          <div className="px-2 py-1 bg-stone-50 text-[11px] font-medium text-stone-600">
+                            {sheet.name}
+                            {sheet.truncated ? ' (truncated)' : ''}
+                          </div>
+                          <table className="text-[11px] font-mono">
+                            <tbody>
+                              {sheet.rows.map((row, r) => (
+                                <tr key={r}>
+                                  {row.map((cell, c) => (
+                                    <td
+                                      key={c}
+                                      className="px-2 py-0.5 border-t border-stone-100 whitespace-nowrap"
+                                    >
+                                      {cell}
+                                    </td>
+                                  ))}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function AssessmentHistoryModule() {
   const {
     state,
     navigateTo,
     openAssessmentInEngine,
+    openAssessmentForEdit,
     deleteAssessment,
   } = useAppState();
 
@@ -241,6 +522,15 @@ export function AssessmentHistoryModule() {
                           >
                             Details
                           </button>
+                          {item.status === 'draft' && (
+                            <button
+                              type="button"
+                              onClick={() => openAssessmentForEdit(item.id)}
+                              className="px-2.5 py-1 text-xs font-medium text-stone-700 hover:bg-stone-100 rounded-md transition-colors cursor-pointer"
+                            >
+                              Edit Draft
+                            </button>
+                          )}
                           <button
                             type="button"
                             onClick={() => openAssessmentInEngine(item.id)}
@@ -303,6 +593,19 @@ export function AssessmentHistoryModule() {
               >
                 Close
               </button>
+              {inspectedRecord.status === 'draft' && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const id = inspectedRecord.id;
+                    setInspectedRecord(null);
+                    openAssessmentForEdit(id);
+                  }}
+                  className="px-4 py-2 text-xs font-medium text-stone-700 bg-white border border-stone-300 hover:bg-stone-50 rounded-lg cursor-pointer"
+                >
+                  Edit Draft
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => {
@@ -460,6 +763,8 @@ export function AssessmentHistoryModule() {
                 </div>
               </div>
             )}
+
+            <AttachedDocuments assessmentId={inspectedRecord.id} />
 
             <div className="pt-4 border-t border-stone-200 space-y-3">
               <div className="font-semibold text-stone-900">

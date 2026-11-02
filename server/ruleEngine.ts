@@ -475,7 +475,11 @@ function evaluateFinancialSignals(assessment: BorrowerAssessment): {
 
   if (typeof ratios.tolTnw === 'number') {
     reasons.push(`TOL/TNW is ${ratios.tolTnw}.`);
-    if (ratios.tolTnw > policy.tolTnwMax) {
+    if (ratios.tolTnw < 0) {
+      failed.push(
+        `TOL/TNW ${ratios.tolTnw} is negative, which indicates negative tangible net worth, so the ${purposeLabel} policy limit of ${policy.tolTnwMax} is not met.`
+      );
+    } else if (ratios.tolTnw > policy.tolTnwMax) {
       failed.push(
         `TOL/TNW ${ratios.tolTnw} exceeds the ${purposeLabel} policy limit of ${policy.tolTnwMax}.`
       );

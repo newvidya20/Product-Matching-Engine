@@ -134,6 +134,7 @@ export const SHEET_HEADERS: Record<RequiredSheetTabName, string[]> = {
     'is_fictional_demo',
     'created_at',
     'updated_at',
+    'financial_profile_json',
   ],
   Matching_Results: [
     'evaluation_id',
@@ -492,6 +493,7 @@ export function serializeAssessmentRow(a: BorrowerAssessment): string[] {
     String(Boolean(a.isFictionalDemo)),
     a.createdAt,
     a.updatedAt,
+    a.financialProfile ? JSON.stringify(a.financialProfile) : '',
   ];
 }
 
@@ -1221,6 +1223,9 @@ export class GoogleSheetsApiClient {
             readAsmtCell(r, 'is_fictional_demo').toLowerCase() === 'true',
           createdAt: readAsmtCell(r, 'created_at') || new Date().toISOString(),
           updatedAt: readAsmtCell(r, 'updated_at') || new Date().toISOString(),
+          financialProfile: safeJsonParse<
+            BorrowerAssessment['financialProfile'] | undefined
+          >(readAsmtCell(r, 'financial_profile_json'), undefined),
           latestEvaluation: latestEvalByAssessment.get(id) || null,
         };
       });

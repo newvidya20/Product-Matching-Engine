@@ -42,6 +42,8 @@ interface AppState {
   workspaceConfig: WorkspaceConnectionConfig;
   activeModule: AppModuleId;
   selectedAssessmentId: string | null;
+  /** Set only by OPEN_ASSESSMENT_FOR_EDIT; cleared by SET_MODULE. */
+  editingAssessmentId: string | null;
   selectedAdminCategoryId: string | null;
   selectedAdminTab: 'master' | 'pdfs' | 'verification' | 'logs';
   catalogViewMode: 'official_catalog' | 'fictional_demo_sandbox';
@@ -165,6 +167,7 @@ const initialState: AppState = {
   workspaceConfig: initialWorkspaceConfig,
   activeModule: 'dashboard',
   selectedAssessmentId: null,
+  editingAssessmentId: null,
   selectedAdminCategoryId: 'cat-01',
   selectedAdminTab: 'master',
   catalogViewMode: 'official_catalog',
@@ -197,6 +200,7 @@ type Action =
   | { type: 'SET_SIGNING_IN'; flag: boolean }
   | { type: 'SET_WORKSPACE_CONFIG'; workspaceConfig: WorkspaceConnectionConfig }
   | { type: 'SET_MODULE'; moduleId: AppModuleId }
+  | { type: 'OPEN_ASSESSMENT_FOR_EDIT'; assessmentId: string }
   | { type: 'SET_SELECTED_ASSESSMENT'; assessmentId: string | null }
   | { type: 'SET_ADMIN_CATEGORY'; categoryId: string }
   | { type: 'SET_ADMIN_TAB'; tab: 'master' | 'pdfs' | 'verification' | 'logs' }
@@ -261,7 +265,14 @@ function reducer(state: AppState, action: Action): AppState {
     case 'SET_WORKSPACE_CONFIG':
       return { ...state, workspaceConfig: action.workspaceConfig };
     case 'SET_MODULE':
-      return { ...state, activeModule: action.moduleId };
+      return { ...state, activeModule: action.moduleId, editingAssessmentId: null };
+    case 'OPEN_ASSESSMENT_FOR_EDIT':
+      return {
+        ...state,
+        editingAssessmentId: action.assessmentId,
+        selectedAssessmentId: action.assessmentId,
+        activeModule: 'new-assessment',
+      };
     case 'SET_SELECTED_ASSESSMENT':
       return { ...state, selectedAssessmentId: action.assessmentId };
     case 'SET_ADMIN_CATEGORY':
@@ -393,6 +404,7 @@ interface AppContextValue {
   navigateTo: (moduleId: AppModuleId) => void;
   openAdminTab: (tab: 'master' | 'pdfs' | 'verification' | 'logs') => void;
   openAssessmentInEngine: (assessmentId: string) => void;
+  openAssessmentForEdit: (assessmentId: string) => void;
   openCategoryInAdmin: (categoryId: string) => void;
   setCatalogViewMode: (mode: 'official_catalog' | 'fictional_demo_sandbox') => void;
   setSelectedAssessmentId: (id: string | null) => void;
@@ -626,6 +638,11 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   );
 
   const signOut = useCallback(() => {
+    // Also end the Document AI cookie session so the next person on a shared browser is locked out.
+    void fetch('/api/document-ai/auth/logout', {
+      method: 'POST',
+      credentials: 'same-origin',
+    }).catch(() => undefined);
     writeStoredSessionUser(null);
     dispatch({ type: 'SET_AUTH_STATE', user: null, needsAuth: false });
     notify('info', 'You have been signed out.');
@@ -1127,6 +1144,10 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     dispatch({ type: 'SET_MODULE', moduleId: 'matching-engine' });
   }, []);
 
+  const openAssessmentForEdit = useCallback((assessmentId: string) => {
+    dispatch({ type: 'OPEN_ASSESSMENT_FOR_EDIT', assessmentId });
+  }, []);
+
   const openCategoryInAdmin = useCallback((categoryId: string) => {
     dispatch({ type: 'SET_ADMIN_CATEGORY', categoryId });
     dispatch({ type: 'SET_ADMIN_TAB', tab: 'master' });
@@ -1615,6 +1636,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
         navigateTo,
         openAdminTab,
         openAssessmentInEngine,
+        openAssessmentForEdit,
         openCategoryInAdmin,
         setCatalogViewMode,
         setSelectedAssessmentId,

@@ -18,3 +18,13 @@ services:
         sync: false
       - key: GOOGLE_SHEETS_SPREADSHEET_ID
         sync: false
+      - key: DOCUMENT_AI_ACCESS_CODE
+        sync: false
+      - key: DOCUMENT_AI_ADMIN_CODE
+        sync: false
+      - key: DOCUMENT_AI_DATA_DIR
+        sync: false
+      - key: DOCUMENT_AI_ENABLED
+        sync: false
+      - key: DOCUMENT_AI_GEMINI_MODEL
+        sync: false

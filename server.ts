@@ -31,6 +31,16 @@ import {
   verifyGoogleAccessToken,
 } from './server/googleWorkspaceService.ts';
 import { extractPolicyDraftFromPdfBase64 } from './server/pdfExtractionService.ts';
+import { createDocumentAiRouter } from './server/documentAi/router.ts';
+import { logActivity } from './server/documentAi/activity.ts';
+import { recoverInterruptedJobs } from './server/documentAi/jobs.ts';
+import { startRetention } from './server/documentAi/retention.ts';
+import {
+  initStore as initDocumentAiStore,
+  linkSessionToAssessment,
+  purgeSessionForAssessment,
+} from './server/documentAi/store.ts';
+import { DOCUMENT_SESSION_ID_PATTERN } from './src/types/documentAi.ts';
 import type {
   AuthenticatedGoogleUser,
   BorrowerAssessment,
@@ -208,6 +218,21 @@ async function startServer() {
     }
   }
 
+  // Sheets sheets created before financial_profile_json existed have no such column,
+  // so keep the locally stored financialProfile when the sheet cell is empty.
+  function mergeLocalFinancialProfiles(
+    live: BorrowerAssessment[]
+  ): BorrowerAssessment[] {
+    const local = new Map(db.assessments.map((a) => [a.id, a]));
+    return live.map((a) =>
+      a.financialProfile !== undefined
+        ? a
+        : local.get(a.id)?.financialProfile !== undefined
+          ? { ...a, financialProfile: local.get(a.id)!.financialProfile }
+          : a
+    );
+  }
+
   // --- Bootstrap Endpoint (Syncs live from Google Sheets via OAuth or Service Account) ---
   app.get('/api/bootstrap', async (req: Request, res: Response) => {
     try {
@@ -236,7 +261,7 @@ async function startServer() {
             liveSheets.assessments.length > 0 ||
             !db.settings.showFictionalRecordsInTables
           ) {
-            db.assessments = liveSheets.assessments;
+            db.assessments = mergeLocalFinancialProfiles(liveSheets.assessments);
           }
           db.documents = liveSheets.documents;
           db.policyLogs = liveSheets.policyLogs;
@@ -635,7 +660,7 @@ async function startServer() {
 
       db.categories = liveData.categories;
       if (liveData.assessments.length > 0) {
-        db.assessments = liveData.assessments;
+        db.assessments = mergeLocalFinancialProfiles(liveData.assessments);
       }
       db.documents = liveData.documents;
       db.policyLogs = liveData.policyLogs;
@@ -696,7 +721,7 @@ async function startServer() {
         db.workspaceConfig.spreadsheetId
       );
       db.categories = liveData.categories;
-      db.assessments = liveData.assessments;
+      db.assessments = mergeLocalFinancialProfiles(liveData.assessments);
       db.documents = liveData.documents;
       db.policyLogs = liveData.policyLogs;
       db.workspaceConfig.lastSyncedAt = new Date().toISOString();
@@ -2378,6 +2403,25 @@ async function startServer() {
     }
   });
 
+  function isDocumentSessionId(v: unknown): v is string {
+    return typeof v === 'string' && DOCUMENT_SESSION_ID_PATTERN.test(v);
+  }
+
+  // A failed link is logged and never fails the save (docs/contracts.md section 8).
+  async function linkDocumentSession(sessionId: unknown, assessmentId: string) {
+    if (!isDocumentSessionId(sessionId)) return;
+    try {
+      const result = await linkSessionToAssessment(sessionId, assessmentId);
+      if (result.ok && result.changed) {
+        void logActivity({ type: 'session_linked', actor: 'system', sessionId, assessmentId });
+      } else if (!result.ok) {
+        console.warn(`Document AI session link skipped: ${result.reason}`);
+      }
+    } catch {
+      console.warn('Document AI session link failed.');
+    }
+  }
+
   // --- Borrower Assessments CRUD (Row-level Google Sheets Upsert/Delete) ---
   app.get('/api/assessments', (_req: Request, res: Response) => {
     res.json({ assessments: db.assessments });
@@ -2465,6 +2509,13 @@ async function startServer() {
         createdAt: now,
         updatedAt: now,
         latestEvaluation: null,
+        financialProfile:
+          req.body.financialProfile && typeof req.body.financialProfile === 'object'
+            ? req.body.financialProfile
+            : undefined,
+        documentSessionId: isDocumentSessionId(req.body.documentSessionId)
+          ? req.body.documentSessionId
+          : undefined,
       };
 
       db.assessments.unshift(newAssessment);
@@ -2475,6 +2526,7 @@ async function startServer() {
         );
       }
       saveDatabase(db);
+      await linkDocumentSession(newAssessment.documentSessionId, newAssessment.id);
       res.status(201).json({ assessment: newAssessment });
     } catch (err) {
       res.status(500).json({
@@ -2497,11 +2549,22 @@ async function startServer() {
       }
 
       const existing = db.assessments[idx];
+      const {
+        id: _ignoredId,
+        referenceCode: _ignoredReference,
+        createdAt: _ignoredCreatedAt,
+        latestEvaluation: _ignoredEvaluation,
+        documentSessionId: requestedSessionId,
+        ...editableFields
+      } = (req.body || {}) as Partial<BorrowerAssessment>;
       const updated: BorrowerAssessment = {
         ...existing,
-        ...req.body,
+        ...editableFields,
         id: existing.id,
         referenceCode: existing.referenceCode,
+        createdAt: existing.createdAt,
+        latestEvaluation: existing.latestEvaluation,
+        documentSessionId: existing.documentSessionId,
         updatedAt: new Date().toISOString(),
       };
 
@@ -2513,6 +2576,7 @@ async function startServer() {
         );
       }
       saveDatabase(db);
+      await linkDocumentSession(requestedSessionId, updated.id);
       res.json({ assessment: updated });
     } catch (err) {
       res.status(500).json({
@@ -2538,6 +2602,16 @@ async function startServer() {
           );
         }
         saveDatabase(db);
+        const purgedSessionId = await purgeSessionForAssessment(assessmentId);
+        if (purgedSessionId) {
+          void logActivity({
+            type: 'unlinked_session_purged',
+            actor: authCtx.user?.email || 'system',
+            sessionId: purgedSessionId,
+            assessmentId,
+            code: 'assessment_deleted',
+          });
+        }
         res.json({ success: true });
       } catch (err) {
         res.status(500).json({
@@ -2696,6 +2770,16 @@ async function startServer() {
       });
     }
   });
+
+  await initDocumentAiStore().catch(() => undefined);
+  await recoverInterruptedJobs().catch(() => undefined);
+  startRetention();
+  app.use(
+    '/api/document-ai',
+    createDocumentAiRouter({
+      assessmentExists: (id) => db.assessments.some((a) => a.id === id),
+    })
+  );
 
   // --- Frontend Mounting ---
   const isProd = process.env.NODE_ENV === 'production';
