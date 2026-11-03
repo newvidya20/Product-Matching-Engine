@@ -489,7 +489,7 @@ export function useDocumentAiForm({
    * Finds and loads the session. A failed lookup is not "no session": it must not create a second one, so
    * uploads wait until it succeeds, and it is retried here with backoff and again on demand.
    */
-  const discardSessionRef = useRef<() => void>(() => undefined);
+  const discardSessionRef = useRef<(options?: { keepEdits?: boolean }) => void>(() => undefined);
   const loadSession = useCallback(async (): Promise<boolean> => {
     const generation = generationRef.current;
     const stale = () => !mountedRef.current || generationRef.current !== generation;
@@ -510,7 +510,8 @@ export function useDocumentAiForm({
       loadFailuresRef.current = 0;
       if (state && !editingRef.current && state.session.assessmentId) {
         // A new form never resumes a session that already belongs to a saved assessment.
-        discardSessionRef.current();
+        // Keep marks on values typed while the lookup ran: they belong to this form, not the old session.
+        discardSessionRef.current({ keepEdits: true });
         return true;
       }
       if (state) {
@@ -635,7 +636,7 @@ export function useDocumentAiForm({
   // ------------------------------------------------------- Demo, reset, save
 
   /** Swaps in a fresh, unlinked session and drops everything tied to the old one. Form untouched. */
-  const resetSession = useCallback(() => {
+  const resetSession = useCallback((options: { keepEdits?: boolean } = {}) => {
     generationRef.current += 1;
     stopPolling();
     if (flushTimer.current !== null) window.clearTimeout(flushTimer.current);
@@ -647,8 +648,9 @@ export function useDocumentAiForm({
     lookupDoneRef.current = true;
     loadedRef.current = true;
     sessionExistsRef.current = false;
-    pendingRef.current = emptyPending();
-    editedRef.current = {};
+    const keptEdits = options.keepEdits ? pendingRef.current.setEdited : {};
+    pendingRef.current = { ...emptyPending(), setEdited: keptEdits };
+    if (!options.keepEdits) editedRef.current = {};
     appliedRef.current = {};
     localAppliedRef.current = new Set();
     docStateRef.current = null;
