@@ -141,6 +141,7 @@ export type ExtractionErrorCode =
   | 'unreadable_document'
   | 'llm_not_configured'
   | 'llm_rate_limited'
+  | 'llm_quota_exhausted'
   | 'llm_timeout'
   | 'llm_invalid_response'
   | 'llm_failed'

@@ -31,6 +31,8 @@ const ERROR_COPY: Record<ExtractionErrorCode, string> = {
   unreadable_document: 'The document could not be read. Try a clearer copy.',
   llm_not_configured: 'Document reading is not set up on the server yet.',
   llm_rate_limited: 'The AI service is busy. Retry in a minute.',
+  llm_quota_exhausted:
+    "The AI service's daily free limit is used up. Click Retry tomorrow, or use a paid OpenRouter key or Gemini.",
   llm_timeout: 'Reading took too long. Retry, or split the file.',
   llm_invalid_response: 'The AI returned something unusable. Retry.',
   llm_failed: 'The AI service failed. Retry.',

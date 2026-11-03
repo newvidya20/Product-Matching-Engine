@@ -167,3 +167,11 @@ describe('stripCodeFence', () => {
     assert.equal(stripCodeFence(' {"a":1} '), '{"a":1}');
   });
 });
+
+describe('daily quota', () => {
+  it('maps a per-day limit to llm_quota_exhausted instead of a retryable busy error', () => {
+    const daily = new OpenRouterHttpError(429, 'Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 free model requests per day');
+    assert.equal(classifyProviderError(daily), 'llm_quota_exhausted');
+    assert.equal(classifyProviderError(new OpenRouterHttpError(429, 'Rate limit exceeded, retry shortly')), 'llm_rate_limited');
+  });
+});

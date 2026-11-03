@@ -114,6 +114,10 @@ function pump(): void {
   }
 }
 
+/** Set when the provider reports its daily allowance is used up; later files fail at once until then. */
+let quotaExhaustedUntil = 0;
+const QUOTA_PAUSE_MS = 15 * 60 * 1000;
+
 async function processDocument(job: ExtractionJob, documentId: string, actorEmail: string): Promise<void> {
   const { sessionId } = job;
   const doc = await getDocument(sessionId, documentId);
@@ -159,6 +163,10 @@ async function processDocument(job: ExtractionJob, documentId: string, actorEmai
     await fail('file_missing');
     return;
   }
+  if (Date.now() < quotaExhaustedUntil) {
+    await fail('llm_quota_exhausted');
+    return;
+  }
   await updateDocument(sessionId, documentId, (d) => {
     d.status = 'extracting';
   });
@@ -178,6 +186,7 @@ async function processDocument(job: ExtractionJob, documentId: string, actorEmai
       signal: controller.signal,
     });
     if (!result.ok) {
+      if (result.errorCode === 'llm_quota_exhausted') quotaExhaustedUntil = Date.now() + QUOTA_PAUSE_MS;
       await fail(result.errorCode);
       return;
     }
@@ -228,15 +237,20 @@ async function runJob(task: QueuedTask): Promise<void> {
   await saveJob(job);
   void logActivity({ type: 'extraction_started', actor: actorEmail, sessionId: job.sessionId, jobId: job.jobId });
 
-  for (const documentId of job.documentIds) {
-    try {
-      await processDocument(job, documentId, actorEmail);
-    } catch {
-      job.errors.push({ documentId, code: 'llm_failed' });
+  // Several documents of one job at a time; progress is saved as each one finishes.
+  const pending = [...job.documentIds];
+  const worker = async () => {
+    for (let documentId = pending.shift(); documentId !== undefined; documentId = pending.shift()) {
+      try {
+        await processDocument(job, documentId, actorEmail);
+      } catch {
+        job.errors.push({ documentId, code: 'llm_failed' });
+      }
+      job.processed += 1;
+      await saveJob(job);
     }
-    job.processed += 1;
-    await saveJob(job);
-  }
+  };
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, pending.length) }, worker));
 
   // Results are already merged and saved per document; merge once more before the terminal state.
   await remergeSession(job.sessionId).catch(() => undefined);

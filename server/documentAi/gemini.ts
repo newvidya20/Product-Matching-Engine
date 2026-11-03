@@ -25,6 +25,7 @@ const ERROR_MESSAGES: Record<ExtractionErrorCode, string> = {
   unreadable_document: 'The document could not be read.',
   llm_not_configured: 'The extraction model is not configured on the server.',
   llm_rate_limited: 'The extraction model is busy or rate limited.',
+  llm_quota_exhausted: 'The extraction model daily limit is used up.',
   llm_timeout: 'The extraction model timed out.',
   llm_invalid_response: 'The extraction model returned an unusable response.',
   llm_failed: 'The extraction model request failed.',
@@ -108,10 +109,16 @@ function isProviderTimeout(error: unknown): boolean {
   return status === 408 || status === 504 || /DEADLINE_EXCEEDED/.test(providerMessage(error));
 }
 
+/** A daily allowance (free OpenRouter models, Gemini free tier) that retrying cannot fix today. */
+export function isDailyQuotaError(error: unknown): boolean {
+  return /per[- ]?day|daily|free-models-per-day|requests per day/i.test(providerMessage(error));
+}
+
 /** Exported so the mapping can be unit tested. Returns a code, never the provider's text. */
 export function classifyProviderError(error: unknown): ExtractionErrorCode {
   const status = providerStatus(error);
   const message = providerMessage(error);
+  if ((status === 429 || status === null) && isDailyQuotaError(error)) return 'llm_quota_exhausted';
   if (isRateLimited(error)) return 'llm_rate_limited';
   if (isProviderTimeout(error)) return 'llm_timeout';
   // A rejected key is an operator problem, the same one as a missing key.
@@ -194,7 +201,7 @@ export async function callWithRetry<T>(
       if (signal.aborted) throw abortError();
       if (error instanceof ExtractionError) throw error;
       const timedOut = timeout.signal.aborted;
-      const retryable = timedOut || isRateLimited(error) || isProviderTimeout(error);
+      const retryable = !isDailyQuotaError(error) && (timedOut || isRateLimited(error) || isProviderTimeout(error));
       if (attempt >= maxAttempts || !retryable) {
         throw new ExtractionError(timedOut ? 'llm_timeout' : classifyProviderError(error));
       }
