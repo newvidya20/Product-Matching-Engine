@@ -170,7 +170,7 @@ function verifyCookie(value: string | null): CookiePayload | null {
   }
 }
 
-type Mode = 'code' | 'local_dev' | 'closed';
+type Mode = 'code' | 'local_dev' | 'open' | 'closed';
 
 function isLoopback(req: Request): boolean {
   const addr = req.socket?.remoteAddress || '';
@@ -180,11 +180,25 @@ function isLoopback(req: Request): boolean {
   );
 }
 
+/**
+ * With an access code set, staff sign in with it. With none set, Document AI is open to anyone who can
+ * reach the app: the owner chose this (2026-11-03) so uploads need no extra step, accepting that uploaded
+ * documents are then reachable without a code. DOCUMENT_AI_REQUIRE_ACCESS_CODE=true restores the lock.
+ */
 function currentMode(req: Request): Mode {
   if (accessCode() || adminCode()) return 'code';
   if (!isProduction() && isLoopback(req)) return 'local_dev';
-  return 'closed';
+  if (process.env.DOCUMENT_AI_REQUIRE_ACCESS_CODE?.trim().toLowerCase() === 'true') return 'closed';
+  return 'open';
 }
+
+const OPEN_ACTOR: DocumentActor = {
+  id: 'open_access',
+  email: 'staff@document-ai',
+  displayName: 'Staff',
+  role: 'admin',
+  via: 'local_dev',
+};
 
 const LOCAL_ACTOR: DocumentActor = {
   id: 'local_dev',
@@ -201,6 +215,7 @@ function actorFromCookie(p: CookiePayload): DocumentActor {
 function resolveActor(req: Request): { mode: Mode; actor: DocumentActor | null } {
   const mode = currentMode(req);
   if (mode === 'local_dev') return { mode, actor: LOCAL_ACTOR };
+  if (mode === 'open') return { mode, actor: OPEN_ACTOR };
   if (mode === 'closed') return { mode, actor: null };
   const p = verifyCookie(readCookieValue(req));
   return { mode, actor: p ? actorFromCookie(p) : null };

@@ -736,6 +736,7 @@ Env vars, added to `.env.example` and `render.yaml` (`sync: false`) by storage-e
 | `DOCUMENT_AI_ENABLED` | unset | `false` forces off, overriding settings. Needed on an ephemeral disk, where a stored "off" is lost |
 | `DOCUMENT_AI_GEMINI_MODEL` | `gemini-3.8-flash` | Same model as `server/` today |
 | `GEMINI_API_KEY` | existing | Server only |
+| `DOCUMENT_AI_REQUIRE_ACCESS_CODE` | `true` locks Document AI until an access code is set. Default: open when no code is set (owner decision, 2026-11-03) | Server only |
 | `LLM_PROVIDER` | `openrouter` or `gemini`; unset picks OpenRouter when its key is set | Server only |
 | `OPENROUTER_API_KEY` | new; read only in `server/llm/openrouter.ts` | Server only |
 | `OPENROUTER_MODEL`, `OPENROUTER_FALLBACK_MODELS` | default `anthropic/claude-haiku-5.5`, then `openai/gpt-6-luna`, `google/gemini-3.8-flash` | Server only |
