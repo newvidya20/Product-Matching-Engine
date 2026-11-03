@@ -851,6 +851,12 @@ export function runTwoStageProductMatching(
           webViewLink: d.webViewLink,
         }));
 
+      // One line per distinct reason, in first-seen order.
+      const dedupe = (items: string[]) => Array.from(new Set(items));
+      reasons.splice(0, reasons.length, ...dedupe(reasons));
+      failed.splice(0, failed.length, ...dedupe(failed));
+      missing.splice(0, missing.length, ...dedupe(missing));
+
       allRankedCandidates.push({
         subProductId: sp.id,
         subProductCode: sp.code,

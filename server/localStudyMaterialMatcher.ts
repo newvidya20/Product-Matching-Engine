@@ -302,9 +302,9 @@ function makeCatalog(): ProductCategory[] {
     .map(([categoryName, documents], categoryIndex) => {
       const categoryId = `local-${slug(categoryName) || categoryIndex + 1}`;
       const updatedAt = new Date().toISOString();
-      const categoryRules = documents.flatMap((document) =>
-        deriveStructuredRulesFromText(document).baselineRules
-      );
+      // No category-level rules: each product's rules come from its own PDF. Stacking every sibling's
+      // rules on the category made each product fail its siblings' borrower and purpose lists. The
+      // category's purpose and borrower fit is still checked against the union lists below.
       const categoryPurposes = Array.from(
         new Set(documents.flatMap((document) => deriveStructuredRulesFromText(document).fundingPurposes))
       );
@@ -329,7 +329,7 @@ function makeCatalog(): ProductCategory[] {
         restrictionsAndExclusions: categoryRestrictions,
         sourceDocumentIds: documents.map((document) => document.id),
         attributes: [],
-        baselineRules: categoryRules,
+        baselineRules: [],
         subProducts: documents.map((document, documentIndex) => {
           const documentProfile = deriveStructuredRulesFromText(document);
           return {
