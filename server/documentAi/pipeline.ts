@@ -35,6 +35,7 @@ import {
 } from './prompt.ts';
 import { buildSpreadsheetPreview, parseSpreadsheet, readPdfSource, renderSpreadsheetText } from './spreadsheet.ts';
 import { readDocxLines, readPlainTextLines, renderPdfPagesToPng } from './textDocuments.ts';
+import { classifyLocally } from './localClassifier.ts';
 import type { DocumentSource } from './validators.ts';
 
 const asParts = (part: Part | Part[]): Part[] => (Array.isArray(part) ? part : [part]);
@@ -156,9 +157,15 @@ async function runExtraction(input: ExtractDocumentInput): Promise<DocumentExtra
   if (!isLlmConfigured()) return { ok: false, documentId, errorCode: 'llm_not_configured' };
 
   const prepared = await prepareDocument(input);
+  // A clear title in the document's own text (GSTR-3B, bank statement...) saves a model request.
+  const localType = declaredDocumentType
+    ? null
+    : classifyLocally(asParts(prepared.classificationPart).map((part) => part.text ?? '').join('\n'), fileName);
   const classification = declaredDocumentType
     ? { documentType: declaredDocumentType, confidence: 1, suspicious: false }
-    : await classify(prepared, signal);
+    : localType
+      ? { documentType: localType, confidence: 0.9, suspicious: false }
+      : await classify(prepared, signal);
   const { documentType } = classification;
 
   // No field accepts this document type, so there is nothing to ask the model.

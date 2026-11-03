@@ -27,7 +27,8 @@ import {
   updateDocument,
 } from './store.ts';
 
-const CONCURRENCY = 2;
+/** Files read at once. Free OpenRouter allows about 20 requests a minute, so 3 stays well inside it. */
+const CONCURRENCY = Math.max(1, Math.min(8, Number(process.env.DOCUMENT_AI_CONCURRENCY) || 3));
 const PER_FILE_TIMEOUT_MS = 300_000;
 
 interface QueuedTask {

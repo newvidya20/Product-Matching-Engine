@@ -122,6 +122,7 @@ describe('openRouterJson', () => {
     assert.ok(Array.isArray(sent.body.models) && (sent.body.models as string[]).length > 1);
     assert.deepEqual(sent.body.provider, { data_collection: 'deny' });
     assert.equal(sent.body.max_tokens, 12000);
+    assert.deepEqual(sent.body.reasoning, { enabled: false });
     assert.equal((sent.body.response_format as { type: string }).type, 'json_schema');
     assert.equal(sent.body.temperature, 0);
   });

@@ -49,6 +49,18 @@ export function openRouterMaxTokens(): number {
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : 12_000;
 }
 
+/**
+ * Thinking models write long hidden reasoning before answering. Extraction is checked by the server
+ * afterwards, so it is off by default: about 3x faster on the free model with the same fields.
+ * OPENROUTER_REASONING=low or on brings it back.
+ */
+export function openRouterReasoning(): { enabled: false } | { effort: 'low' } | null {
+  const mode = process.env.OPENROUTER_REASONING?.trim().toLowerCase();
+  if (mode === 'on') return null;
+  if (mode === 'low') return { effort: 'low' };
+  return { enabled: false };
+}
+
 export function isOpenRouterConfigured(): boolean {
   return Boolean(process.env.OPENROUTER_API_KEY?.trim());
 }
@@ -142,6 +154,7 @@ export async function openRouterJson(request: OpenRouterJsonRequest): Promise<st
       ...(fallbacks.length > 0 ? { models: [openRouterModel(), ...fallbacks] } : {}),
       temperature: request.temperature ?? 0,
       max_tokens: openRouterMaxTokens(),
+      ...(openRouterReasoning() ? { reasoning: openRouterReasoning() } : {}),
       messages: [
         { role: 'system', content: request.systemInstruction },
         { role: 'user', content: toContentParts(request.parts) },
