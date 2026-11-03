@@ -15,7 +15,7 @@ import type {
 } from '../../src/types/documentAi.ts';
 import { FILE_KIND_MIME } from '../../src/types/documentAi.ts';
 import type { Part } from '@google/genai';
-import { ExtractionError, generateJson, geminiModelName, isLlmConfigured } from './gemini.ts';
+import { ExtractionError, activeModelName, generateJson, isLlmConfigured } from './gemini.ts';
 import { buildBankMonthlyTotals, buildCandidates, mergeSession } from './merge.ts';
 import {
   buildClassificationInstruction,
@@ -126,7 +126,7 @@ async function runExtraction(input: ExtractDocumentInput): Promise<DocumentExtra
       bankMonthlyTotals: [],
       injectionSuspected: prepared.injectionInText || classification.suspicious,
       droppedLowConfidence: 0,
-      model: geminiModelName(),
+      model: activeModelName(),
     };
   }
 
@@ -167,7 +167,7 @@ async function runExtraction(input: ExtractDocumentInput): Promise<DocumentExtra
     bankMonthlyTotals: buildBankMonthlyTotals(extraction.bankMonthlyTotals, context),
     injectionSuspected,
     droppedLowConfidence,
-    model: geminiModelName(),
+    model: activeModelName(),
   };
 }
 

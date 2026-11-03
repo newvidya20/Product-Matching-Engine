@@ -736,6 +736,9 @@ Env vars, added to `.env.example` and `render.yaml` (`sync: false`) by storage-e
 | `DOCUMENT_AI_ENABLED` | unset | `false` forces off, overriding settings. Needed on an ephemeral disk, where a stored "off" is lost |
 | `DOCUMENT_AI_GEMINI_MODEL` | `gemini-3.8-flash` | Same model as `server/` today |
 | `GEMINI_API_KEY` | existing | Server only |
+| `LLM_PROVIDER` | `openrouter` or `gemini`; unset picks OpenRouter when its key is set | Server only |
+| `OPENROUTER_API_KEY` | new; read only in `server/llm/openrouter.ts` | Server only |
+| `OPENROUTER_MODEL`, `OPENROUTER_FALLBACK_MODELS` | default `anthropic/claude-haiku-5.5`, then `openai/gpt-6-luna`, `google/gemini-3.8-flash` | Server only |
 
 ## 10. Settings
 
@@ -790,7 +793,9 @@ before logging, mask any substring matching a PAN or GSTIN shape with `[MASKED]`
 
 ## 12. Security
 
-**Key.** `GEMINI_API_KEY` is read only in `server/documentAi/gemini.ts`, is never logged or returned, and never has a `VITE_`
+**Provider.** Every AI call goes through the provider chosen in `server/llm/provider.ts`. OpenRouter requests ask only for providers that do not collect data (`provider.data_collection: deny`). Gemini code is kept intact as the alternative.
+
+**Key.** `OPENROUTER_API_KEY` is read only in `server/llm/openrouter.ts`. `GEMINI_API_KEY` is read only in `server/documentAi/gemini.ts`, is never logged or returned, and never has a `VITE_`
 prefix. Only `llmConfigured` reaches the client. Map provider errors to `ExtractionErrorCode`. Do not forward
 `err.message`, which `server/` does elsewhere.
 

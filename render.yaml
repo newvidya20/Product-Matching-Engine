@@ -14,6 +14,10 @@ services:
         value: 10000
       - key: GEMINI_API_KEY
         sync: false
+      - key: LLM_PROVIDER
+        value: openrouter
+      - key: OPENROUTER_API_KEY
+        sync: false
       - key: GOOGLE_SERVICE_ACCOUNT_JSON
         sync: false
       - key: GOOGLE_SHEETS_SPREADSHEET_ID

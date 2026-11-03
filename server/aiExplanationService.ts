@@ -5,6 +5,8 @@ import type {
   MatchingEvaluationRecord,
 } from '../src/types/domain.ts';
 import { localStudyMaterialReferenceDocuments } from './localStudyMaterialMatcher.ts';
+import { generateContentViaOpenRouter } from './llm/openrouter.ts';
+import { activeLlmProvider, activeServiceModel } from './llm/provider.ts';
 
 function getSourceExcerpt(sourceId: string, evidence: string[]): string {
   const document = localStudyMaterialReferenceDocuments.find(
@@ -47,7 +49,7 @@ function getAiClient(): GoogleGenAI {
 }
 
 async function generateContentWithRetry(
-  ai: GoogleGenAI,
+  ai: GoogleGenAI | null,
   payload: Parameters<GoogleGenAI['models']['generateContent']>[0],
   maxAttempts = 3
 ) {
@@ -55,7 +57,7 @@ async function generateContentWithRetry(
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
-      return await ai.models.generateContent(payload);
+      return ai ? await ai.models.generateContent(payload) : await generateContentViaOpenRouter(payload);
     } catch (error) {
       lastError = error;
       const message =
@@ -90,8 +92,9 @@ export async function generateSeparatedAdvisoryExplanation(
   assessment: BorrowerAssessment,
   evaluation: MatchingEvaluationRecord
 ): Promise<AIAdvisoryExplanation> {
-  const ai = getAiClient();
-  const modelName = 'gemini-3.8-flash';
+  // Gemini is only needed when it is the active provider (server/llm/provider.ts).
+  const ai = activeLlmProvider() === 'gemini' ? getAiClient() : null;
+  const modelName = activeServiceModel();
 
   const structuredContext = {
     datasetMode: evaluation.datasetMode,
@@ -203,7 +206,7 @@ export async function generateSeparatedAdvisoryExplanation(
 
   const rawText = response.text;
   if (!rawText) {
-    throw new Error('Empty response received from the server-side Gemini explanation model.');
+    throw new Error('Empty response received from the server-side AI explanation model.');
   }
 
   const parsed = JSON.parse(rawText.trim()) as {

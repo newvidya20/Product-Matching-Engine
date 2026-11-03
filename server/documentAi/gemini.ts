@@ -4,6 +4,8 @@
  */
 import { ApiError, GoogleGenAI, type Part, type Schema } from '@google/genai';
 import type { ExtractionErrorCode } from '../../src/types/documentAi.ts';
+import { openRouterJson, openRouterModel } from '../llm/openrouter.ts';
+import { activeLlmProvider, isActiveLlmConfigured } from '../llm/provider.ts';
 
 const DEFAULT_MODEL = 'gemini-3.8-flash';
 /**
@@ -49,12 +51,18 @@ export class LlmNotConfiguredError extends ExtractionError {
   }
 }
 
+/** True when the active provider (server/llm/provider.ts) has its key. */
 export function isLlmConfigured(): boolean {
-  return Boolean(process.env.GEMINI_API_KEY?.trim());
+  return isActiveLlmConfigured();
 }
 
 export function geminiModelName(): string {
   return process.env.DOCUMENT_AI_GEMINI_MODEL?.trim() || DEFAULT_MODEL;
+}
+
+/** The model recorded on results: OpenRouter's primary model, or the Gemini one. */
+export function activeModelName(): string {
+  return activeLlmProvider() === 'openrouter' ? openRouterModel() : geminiModelName();
 }
 
 /**
@@ -91,8 +99,8 @@ function providerMessage(error: unknown): string {
 
 function isRateLimited(error: unknown): boolean {
   const status = providerStatus(error);
-  if (status !== null) return status === 429 || status === 503;
-  return /\b(?:429|503)\b|UNAVAILABLE|RESOURCE_EXHAUSTED/.test(providerMessage(error));
+  if (status !== null) return status === 429 || status === 502 || status === 503;
+  return /\b(?:429|502|503)\b|UNAVAILABLE|RESOURCE_EXHAUSTED/.test(providerMessage(error));
 }
 
 function isProviderTimeout(error: unknown): boolean {
@@ -107,7 +115,8 @@ export function classifyProviderError(error: unknown): ExtractionErrorCode {
   if (isRateLimited(error)) return 'llm_rate_limited';
   if (isProviderTimeout(error)) return 'llm_timeout';
   // A rejected key is an operator problem, the same one as a missing key.
-  if (status === 401 || status === 403 || /API[_ ]KEY[_ ]INVALID|API key not valid/i.test(message)) {
+  // 402 is OpenRouter's "out of credits", which only the operator can fix.
+  if (status === 401 || status === 402 || status === 403 || /API[_ ]KEY[_ ]INVALID|API key not valid/i.test(message)) {
     return 'llm_not_configured';
   }
   if (status === 400 && /no pages|invalid (?:pdf|document|image|file)|unable to process/i.test(message)) {
@@ -209,6 +218,13 @@ export interface GeminiJsonRequest {
  */
 export async function generateJson(request: GeminiJsonRequest): Promise<string> {
   const { systemInstruction, parts, responseSchema, signal } = request;
+  if (activeLlmProvider() === 'openrouter') {
+    if (!isActiveLlmConfigured()) throw new LlmNotConfiguredError();
+    return callWithRetry(
+      (attemptSignal) => openRouterJson({ systemInstruction, parts, responseSchema, signal: attemptSignal }),
+      signal
+    );
+  }
   const client = createClient();
 
   return callWithRetry(async (attemptSignal) => {

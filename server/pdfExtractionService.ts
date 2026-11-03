@@ -1,6 +1,8 @@
 import { GoogleGenAI, Type } from '@google/genai';
 import JSZip from 'jszip';
 import type { ExtractedPdfDraft } from '../src/types/domain.ts';
+import { generateContentViaOpenRouter } from './llm/openrouter.ts';
+import { activeLlmProvider, activeServiceModel } from './llm/provider.ts';
 
 function getAiClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -144,7 +146,8 @@ export async function extractPolicyDraftFromPdfBase64(
   fileName: string,
   mimeType = 'application/pdf'
 ): Promise<ExtractedPdfDraft> {
-  const ai = getAiClient();
+  // Gemini is only needed when it is the active provider (server/llm/provider.ts).
+  const ai = activeLlmProvider() === 'gemini' ? getAiClient() : null;
   const ext = inferExtension(fileName);
   const lowerMime = (mimeType || '').toLowerCase();
 
@@ -226,8 +229,8 @@ export async function extractPolicyDraftFromPdfBase64(
     '7. Valid operator values ONLY: number_min, number_max, boolean_equals, text_equals, in_list, not_in_list, custom_Presence.',
   ].join('\n');
 
-  const response = await ai.models.generateContent({
-    model: 'gemini-3.8-flash',
+  const payload = {
+    model: activeServiceModel(),
     contents: {
       parts: [
         documentPart,
@@ -355,11 +358,14 @@ export async function extractPolicyDraftFromPdfBase64(
         ],
       },
     },
-  });
+  };
 
+  const response = ai
+    ? await ai.models.generateContent(payload)
+    : await generateContentViaOpenRouter(payload);
   const text = response.text;
   if (!text) {
-    throw new Error('Gemini returned an empty extraction response for this study material.');
+    throw new Error('The AI model returned an empty extraction response for this study material.');
   }
 
   const parsed = JSON.parse(text.trim()) as Omit<ExtractedPdfDraft, 'extractedAt'>;
