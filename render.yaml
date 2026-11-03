@@ -18,6 +18,8 @@ services:
         value: openrouter
       - key: OPENROUTER_API_KEY
         sync: false
+      - key: OPENROUTER_ALLOW_DATA_COLLECTION
+        value: "false"
       - key: GOOGLE_SERVICE_ACCOUNT_JSON
         sync: false
       - key: GOOGLE_SHEETS_SPREADSHEET_ID

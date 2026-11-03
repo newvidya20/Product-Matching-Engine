@@ -16,6 +16,8 @@ import type {
 import { FILE_KIND_MIME } from '../../src/types/documentAi.ts';
 import type { Part } from '@google/genai';
 import { ExtractionError, activeModelName, generateJson, isLlmConfigured } from './gemini.ts';
+import { openRouterSendsPdfAsText } from '../llm/openrouter.ts';
+import { activeLlmProvider } from '../llm/provider.ts';
 import { buildBankMonthlyTotals, buildCandidates, mergeSession } from './merge.ts';
 import {
   buildClassificationInstruction,
@@ -52,8 +54,30 @@ interface PreparedDocument {
   injectionInText: boolean;
 }
 
+/**
+ * A digital PDF as the text the server read itself, page by page, so page citations still work.
+ * A scan has no text layer, and free models cannot read the file, so it fails as unreadable.
+ */
+async function preparePdfAsText(bytes: Uint8Array, signal: AbortSignal): Promise<PreparedDocument> {
+  const source = await readPdfSource(bytes, signal);
+  if (source.kind !== 'pdf') throw new ExtractionError('unreadable_document');
+  const pages = source.pages ?? [source.lines];
+  const promptText = pages.map((lines, index) => `--- Page ${index + 1} ---\n${lines.join('\n')}`).join('\n\n');
+  const delimiter = newDelimiter();
+  return {
+    classificationPart: { text: wrapDocumentText(promptText.slice(0, CLASSIFICATION_TEXT_CHARS), delimiter) },
+    extractionPart: { text: wrapDocumentText(promptText, delimiter) },
+    sheetNames: [],
+    source,
+    injectionInText: containsInjectionPhrases(promptText),
+  };
+}
+
 async function prepareDocument(input: ExtractDocumentInput): Promise<PreparedDocument> {
   const { kind, bytes, signal } = input;
+  if (kind === 'pdf' && activeLlmProvider() === 'openrouter' && openRouterSendsPdfAsText()) {
+    return preparePdfAsText(bytes, signal);
+  }
   if (kind !== 'xlsx' && kind !== 'csv') {
     const part: Part = {
       inlineData: { mimeType: FILE_KIND_MIME[kind], data: Buffer.from(bytes).toString('base64') },

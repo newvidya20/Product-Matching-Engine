@@ -8,10 +8,27 @@ import type { Part, Schema } from '@google/genai';
 
 const ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 
-/** Reads PDFs and images and supports JSON schema output; not Google, so a Gemini outage does not stop it. */
-export const DEFAULT_OPENROUTER_MODEL = 'anthropic/claude-haiku-5.5';
+/**
+ * Free models by default (no credits needed). dots-3 reads images, supports JSON schema and is offered
+ * by a provider that does not collect data. Nemotron is stronger but every host of it trains on
+ * prompts, so OpenRouter only uses it when OPENROUTER_ALLOW_DATA_COLLECTION=true.
+ */
+export const DEFAULT_OPENROUTER_MODEL = 'dots-studio/dots-3-note-preview:free';
 /** Tried in order by OpenRouter when the primary model fails or is unavailable. */
-export const DEFAULT_OPENROUTER_FALLBACKS = ['openai/gpt-6-luna', 'google/gemini-3.8-flash'];
+export const DEFAULT_OPENROUTER_FALLBACKS = ['nvidia/nemotron-3.5-super-vl:free'];
+
+/** Off unless set to true: borrower documents are KYC material. */
+export function openRouterAllowsDataCollection(): boolean {
+  return process.env.OPENROUTER_ALLOW_DATA_COLLECTION?.trim().toLowerCase() === 'true';
+}
+
+/**
+ * Free models take no PDF files (and OpenRouter wants paid credit for files), so by default a digital
+ * PDF goes as the text the server read itself. OPENROUTER_PDF_INPUT=file sends the file instead.
+ */
+export function openRouterSendsPdfAsText(): boolean {
+  return process.env.OPENROUTER_PDF_INPUT?.trim().toLowerCase() !== 'file';
+}
 
 export function openRouterModel(): string {
   return process.env.OPENROUTER_MODEL?.trim() || DEFAULT_OPENROUTER_MODEL;
@@ -133,9 +150,9 @@ export async function openRouterJson(request: OpenRouterJsonRequest): Promise<st
         type: 'json_schema',
         json_schema: { name: 'response', strict: false, schema: toJsonSchema(request.responseSchema) },
       },
-      // require_parameters is left off: with data_collection deny no Claude or GPT host also passes the
-      // schema check. Responses are parsed strictly downstream, so a non-conforming answer is rejected.
-      provider: { data_collection: 'deny' },
+      // require_parameters is left off: with data_collection deny few hosts also pass the schema check.
+      // Responses are parsed strictly downstream, so a non-conforming answer is rejected.
+      provider: { data_collection: openRouterAllowsDataCollection() ? 'allow' : 'deny' },
     }),
   });
 
