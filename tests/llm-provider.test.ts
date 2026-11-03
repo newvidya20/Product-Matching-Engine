@@ -120,7 +120,8 @@ describe('openRouterJson', () => {
     assert.equal(sent.auth, 'Bearer or-key');
     assert.equal(sent.body.model, DEFAULT_OPENROUTER_MODEL);
     assert.ok(Array.isArray(sent.body.models) && (sent.body.models as string[]).length > 1);
-    assert.deepEqual(sent.body.provider, { data_collection: 'deny', require_parameters: true });
+    assert.deepEqual(sent.body.provider, { data_collection: 'deny' });
+    assert.equal(sent.body.max_tokens, 12000);
     assert.equal((sent.body.response_format as { type: string }).type, 'json_schema');
     assert.equal(sent.body.temperature, 0);
   });

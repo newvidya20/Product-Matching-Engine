@@ -26,6 +26,12 @@ export function openRouterFallbackModels(): string[] {
     .filter(Boolean);
 }
 
+/** Caps the output reservation: without it a fallback model reserves its own maximum (65k tokens) of credit. */
+export function openRouterMaxTokens(): number {
+  const value = Number(process.env.OPENROUTER_MAX_TOKENS);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 12_000;
+}
+
 export function isOpenRouterConfigured(): boolean {
   return Boolean(process.env.OPENROUTER_API_KEY?.trim());
 }
@@ -118,6 +124,7 @@ export async function openRouterJson(request: OpenRouterJsonRequest): Promise<st
       model: openRouterModel(),
       ...(fallbacks.length > 0 ? { models: [openRouterModel(), ...fallbacks] } : {}),
       temperature: request.temperature ?? 0,
+      max_tokens: openRouterMaxTokens(),
       messages: [
         { role: 'system', content: request.systemInstruction },
         { role: 'user', content: toContentParts(request.parts) },
@@ -126,7 +133,9 @@ export async function openRouterJson(request: OpenRouterJsonRequest): Promise<st
         type: 'json_schema',
         json_schema: { name: 'response', strict: false, schema: toJsonSchema(request.responseSchema) },
       },
-      provider: { data_collection: 'deny', require_parameters: true },
+      // require_parameters is left off: with data_collection deny no Claude or GPT host also passes the
+      // schema check. Responses are parsed strictly downstream, so a non-conforming answer is rejected.
+      provider: { data_collection: 'deny' },
     }),
   });
 
