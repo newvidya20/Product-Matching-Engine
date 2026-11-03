@@ -7,7 +7,7 @@
     "dev": "tsx server.ts",
     "build": "npm run index:study-material && vite build",
     "start": "node --import tsx server.ts",
-    "prestart": "npm run index:study-material",
+    "prestart": "node scripts/ensure-study-material-index.mjs",
     "preview": "vite preview",
     "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true });\"",
     "lint": "tsc --noEmit",
@@ -15,7 +15,7 @@
     "index:study-material": "tsx scripts/buildStudyMaterialReference.ts"
   },
   "engines": {
-    "node": ">=22.13 <23"
+    "node": "22.x"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
