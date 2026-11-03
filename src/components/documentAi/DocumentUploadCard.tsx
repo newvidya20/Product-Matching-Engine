@@ -150,7 +150,7 @@ export function DocumentUploadCard(props: Props) {
             choose files
           </button>
         </p>
-        <p className="mt-1 text-[11px] text-stone-500">PDF, Word, Excel, CSV, TXT, PNG, JPG, WebP or ZIP · up to 12 MB each · 25 files</p>
+        <p className="mt-1 text-[11px] text-stone-500">PDF, Word, Excel, CSV, TXT, PNG, JPG, WebP or ZIP · up to 50 MB per file, ZIP up to 2 GB · 300 files</p>
         <input
           ref={inputRef}
           type="file"

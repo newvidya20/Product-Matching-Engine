@@ -29,6 +29,8 @@ import type {
 import { logActivity } from './activity.ts';
 import { authStatus, createAuthSession, getActor, logout, requireDocumentAuth, sendError } from './auth.ts';
 import { isZipUpload, readZipEntries, validateUpload } from './fileValidation.ts';
+import { forEachZipEntry, maxUploadBytes, receiveToTempFile, UploadTooLargeError } from './archiveUpload.ts';
+import fsp from 'node:fs/promises';
 import { abortDocumentExtraction, JobInProgressError, startExtraction } from './jobs.ts';
 import { readSpreadsheetPreview } from './pipeline.ts';
 import {
@@ -300,6 +302,112 @@ export function createDocumentAiRouter(options: DocumentAiRouterOptions): expres
       });
     }
     res.status(201).json({ document: added.document, duplicate: added.duplicate });
+  }));
+
+  /**
+   * Streamed upload for large files and ZIPs: raw bytes in the body, the name in X-File-Name. The body
+   * goes to a temp file, and a ZIP is unpacked from disk one entry at a time.
+   */
+  router.post('/sessions/:sessionId/uploads', wrap(async (req, res) => {
+    const actor = getActor(res);
+    const { sessionId } = req.params;
+    if (!(await isFeatureEnabled())) return sendError(res, 403, 'disabled', 'Document AI is turned off.');
+    let rawName = '';
+    try {
+      rawName = decodeURIComponent(String(req.headers['x-file-name'] || ''));
+    } catch {
+      rawName = '';
+    }
+    if (!rawName.trim()) return sendError(res, 400, 'invalid_request', 'X-File-Name is required.');
+    const originalName = sanitizeOriginalName(rawName);
+    const limit = maxUploadBytes();
+    const declared = Number(req.headers['content-length']);
+    if (Number.isFinite(declared) && declared > limit) {
+      req.resume();
+      return sendError(res, 413, 'file_too_large', `This upload is larger than the ${Math.round(limit / 1048576)} MB limit.`);
+    }
+
+    let received: { filePath: string; bytes: number };
+    try {
+      received = await receiveToTempFile(req, limit);
+    } catch (error) {
+      if (error instanceof UploadTooLargeError) {
+        return sendError(res, 413, 'file_too_large', `This upload is larger than the ${Math.round(limit / 1048576)} MB limit.`);
+      }
+      return sendError(res, 400, 'invalid_request', 'The upload was interrupted. Try again.');
+    }
+
+    const stored: unknown[] = [];
+    const skipped: Array<{ fileName: string; reason: string }> = [];
+    let allDuplicate = true;
+    const store = async (name: string, bytes: Buffer) => {
+      const entryName = sanitizeOriginalName(name);
+      const validation = await validateUpload(entryName, bytes);
+      if (!validation.ok) {
+        skipped.push({ fileName: entryName, reason: validation.message });
+        return;
+      }
+      const added = await addDocument({
+        sessionId,
+        actorEmail: actor.email,
+        originalName: entryName,
+        kind: validation.kind,
+        mimeType: FILE_KIND_MIME[validation.kind],
+        bytes,
+      });
+      if (!added.ok) {
+        skipped.push({ fileName: entryName, reason: added.message });
+        return;
+      }
+      if (added.sessionCreated) void logActivity({ type: 'session_created', actor: actor.email, sessionId });
+      if (!added.duplicate) {
+        allDuplicate = false;
+        void logActivity({
+          type: 'file_uploaded',
+          actor: actor.email,
+          sessionId,
+          documentId: added.document.documentId,
+          fileName: entryName,
+          code: validation.kind,
+          counts: { bytes: bytes.byteLength },
+        });
+      }
+      stored.push(added.document);
+    };
+
+    try {
+      const head = Buffer.alloc(4);
+      const handle = await fsp.open(received.filePath, 'r');
+      try {
+        await handle.read(head, 0, 4, 0);
+      } finally {
+        await handle.close();
+      }
+      if (isZipUpload(originalName, head)) {
+        try {
+          await forEachZipEntry(
+            received.filePath,
+            (entry) => store(entry.name, entry.bytes),
+            (fileName, reason) => skipped.push({ fileName, reason })
+          );
+        } catch (error) {
+          return sendError(res, 415, 'unsupported_type', (error as Error).message);
+        }
+      } else if (received.bytes > DOCUMENT_AI_LIMITS.maxFileBytes) {
+        return sendError(res, 413, 'file_too_large', `One document can be up to ${DOCUMENT_AI_LIMITS.maxFileBytes / 1048576} MB. Put larger sets of files in a ZIP.`);
+      } else {
+        await store(originalName, await fsp.readFile(received.filePath));
+      }
+    } finally {
+      await fsp.rm(received.filePath, { force: true });
+    }
+
+    if (stored.length === 0) {
+      const reason = skipped[0]?.reason ?? 'No readable documents were found in this upload.';
+      void logActivity({ type: 'file_rejected', actor: actor.email, sessionId, fileName: originalName, code: 'unsupported_type', counts: { bytes: received.bytes } });
+      return sendError(res, 415, 'unsupported_type', reason);
+    }
+    res.status(201).json({ document: stored[0], duplicate: allDuplicate, documents: stored, skipped });
   }));
 
   router.get('/sessions/:sessionId/documents', wrap(async (req, res) => {

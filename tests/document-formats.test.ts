@@ -67,3 +67,28 @@ describe('scanned PDFs', () => {
     assert.equal(Buffer.from(images[0], 'base64').subarray(1, 4).toString(), 'PNG');
   });
 });
+
+describe('streamed ZIP reading from disk', () => {
+  it('yields each document one at a time and reports skipped files', async () => {
+    const { forEachZipEntry } = await import('../server/documentAi/archiveUpload.ts');
+    const { fileURLToPath } = await import('node:url');
+    const names: string[] = [];
+    const skipped: string[] = [];
+    const result = await forEachZipEntry(
+      fileURLToPath(new URL('./fixtures/FICTIONAL-borrower-documents.zip', import.meta.url)),
+      async (entry) => {
+        names.push(entry.name);
+        assert.ok(entry.bytes.length > 0);
+      },
+      (fileName) => skipped.push(fileName)
+    );
+    assert.equal(result.files, 4);
+    assert.deepEqual(names.sort(), [
+      'FICTIONAL-itr-acknowledgement.txt',
+      'FICTIONAL-loan-application.docx',
+      'FICTIONAL-scanned-gst-return.pdf',
+      'notes.exe',
+    ]);
+    assert.deepEqual(skipped, [], 'macOS junk is ignored silently');
+  });
+});

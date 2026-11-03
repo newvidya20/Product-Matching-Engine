@@ -159,6 +159,17 @@ export const documentAiClient = {
       body: body({ assessmentId }),
     }),
 
+  /** Streams the file itself (no base64), so large files and multi-GB ZIPs stay out of memory. */
+  uploadFile: (sessionId: string, file: File) =>
+    json<UploadDocumentResponse>(`/sessions/${enc(sessionId)}/uploads`, {
+      method: 'POST',
+      body: file,
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'X-File-Name': encodeURIComponent(file.name),
+        'X-Document-AI-Upload': '1',
+      },
+    }),
   uploadDocument: (sessionId: string, request: UploadDocumentRequest) =>
     json<UploadDocumentResponse>(`/sessions/${enc(sessionId)}/documents`, {
       method: 'POST',

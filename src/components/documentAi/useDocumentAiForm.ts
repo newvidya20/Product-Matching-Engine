@@ -784,14 +784,17 @@ export function useDocumentAiForm({
             extension === 'xls' || extension === 'doc'
               ? 'Old .xls and .doc files cannot be read. Save a copy as .xlsx or .docx.'
               : 'Use PDF, Word (.docx), Excel (.xlsx), CSV, TXT, PNG, JPG, WebP or a ZIP of these.';
-        } else if (file.size > DOCUMENT_AI_LIMITS.maxFileBytes) {
-          rejection = 'Larger than 12 MB.';
+        } else if (extension === 'zip' ? file.size > DOCUMENT_AI_LIMITS.maxUploadBytes : file.size > DOCUMENT_AI_LIMITS.maxFileBytes) {
+          rejection =
+            extension === 'zip'
+              ? `Larger than the ${DOCUMENT_AI_LIMITS.maxUploadBytes / 1073741824} GB limit for one ZIP.`
+              : `Larger than ${DOCUMENT_AI_LIMITS.maxFileBytes / 1048576} MB. Put large sets of files in a ZIP.`;
         } else if (file.size === 0) {
           rejection = 'The file is empty.';
         } else if (count >= DOCUMENT_AI_LIMITS.maxFilesPerSession) {
-          rejection = 'This assessment already has 25 files.';
-        } else if (totalBytes + file.size > DOCUMENT_AI_LIMITS.maxSessionBytes) {
-          rejection = 'This would pass the 100 MB limit for one assessment.';
+          rejection = `This assessment already has ${DOCUMENT_AI_LIMITS.maxFilesPerSession} files.`;
+        } else if (extension !== 'zip' && totalBytes + file.size > DOCUMENT_AI_LIMITS.maxSessionBytes) {
+          rejection = 'This would pass the storage limit for one assessment.';
         }
         if (rejection) {
           setUploads((items) => [...items, { key, name: file.name, status: 'error', message: rejection! }]);
@@ -801,11 +804,7 @@ export function useDocumentAiForm({
         totalBytes += file.size;
         setUploads((items) => [...items, { key, name: file.name, status: 'uploading' }]);
         try {
-          const base64 = await fileToBase64(file);
-          const response = await documentAiClient.uploadDocument(sid, {
-            fileName: file.name,
-            base64,
-          });
+          const response = await documentAiClient.uploadFile(sid, file);
           if (!same()) return;
           sessionExistsRef.current = true;
           if (response.skipped?.length) {

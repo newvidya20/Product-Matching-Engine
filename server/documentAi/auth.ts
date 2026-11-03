@@ -338,7 +338,10 @@ export function requireDocumentAuth(req: Request, res: Response, next: NextFunct
     sendError(res, 401, 'unauthenticated', 'Enter the Document AI access code to continue.');
     return;
   }
-  if (['POST', 'PUT', 'PATCH'].includes(req.method)) {
+  // The streamed upload route takes raw bytes; its custom header still forces a CORS preflight.
+  const isStreamedUpload =
+    req.method === 'POST' && /\/uploads$/.test(req.path) && req.headers['x-document-ai-upload'] === '1';
+  if (['POST', 'PUT', 'PATCH'].includes(req.method) && !isStreamedUpload) {
     const ct = String(req.headers['content-type'] || '').toLowerCase();
     if (!ct.startsWith('application/json')) {
       sendError(res, 415, 'invalid_request', 'Content-Type must be application/json.');
