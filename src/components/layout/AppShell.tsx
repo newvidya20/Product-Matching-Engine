@@ -4,6 +4,7 @@ import {
   ClipboardPlus,
   Cpu,
   History,
+  ListChecks,
   LayoutDashboard,
   Lock,
   Menu,
@@ -32,6 +33,12 @@ const NAV_ITEMS: NavEntry[] = [
     label: 'Dashboard',
     group: 'Advisory Operations',
     icon: LayoutDashboard,
+  },
+  {
+    id: 'eligibility',
+    label: 'Eligibility Check',
+    group: 'Advisory Operations',
+    icon: ListChecks,
   },
   {
     id: 'new-assessment',

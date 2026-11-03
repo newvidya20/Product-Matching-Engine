@@ -32,6 +32,7 @@ import {
 } from './server/googleWorkspaceService.ts';
 import { extractPolicyDraftFromPdfBase64 } from './server/pdfExtractionService.ts';
 import { createDocumentAiRouter } from './server/documentAi/router.ts';
+import { createEligibilityRouter } from './server/eligibility/router.ts';
 import { logActivity } from './server/documentAi/activity.ts';
 import { hasValidDocumentSession } from './server/documentAi/auth.ts';
 import { recoverInterruptedJobs } from './server/documentAi/jobs.ts';
@@ -2787,6 +2788,7 @@ async function startServer() {
       assessmentExists: (id) => db.assessments.some((a) => a.id === id),
     })
   );
+  app.use('/api/eligibility', createEligibilityRouter({ getAssessment: (id) => db.assessments.find((a) => a.id === id) }));
 
   // --- Frontend Mounting ---
   const isProd = process.env.NODE_ENV === 'production';

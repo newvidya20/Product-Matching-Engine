@@ -110,13 +110,16 @@ function candidateSignature(result: FieldResult | undefined): string {
 }
 
 /** Saved non-default values on a reopened draft count as the person's own. Pure, needs no network. */
-function preexistingEntries(form: FormState): EditedFieldEntry[] {
+function preexistingEntries(form: FormState, protectedIds?: ReadonlySet<string>): EditedFieldEntry[] {
   const at = new Date().toISOString();
   const entries: EditedFieldEntry[] = [];
   for (const definition of FIELD_DEFINITIONS) {
     if (!definition.extractable || !isFormBacked(definition)) continue;
     if (definition.target.kind === 'dynamic' && definition.target.purpose !== form.fundingPurpose) continue;
-    if (readField(form, definition) !== (definition.defaultValue ?? '')) {
+    const value = readField(form, definition);
+    // Prefilled fields are protected whenever they hold a value, even one equal to the field's default.
+    const prefilled = protectedIds ? protectedIds.has(definition.fieldId) && value !== '' : false;
+    if (prefilled || value !== (definition.defaultValue ?? '')) {
       entries.push({ fieldId: definition.fieldId, origin: 'preexisting_value', at });
     }
   }
@@ -127,12 +130,24 @@ export interface UseDocumentAiFormOptions {
   createBlank: () => FormState;
   editingAssessment: BorrowerAssessment | null;
   defaultCurrency: string;
+  /** A blank form that starts with values (Eligibility prefill): they count as entered, so documents never overwrite them. */
+  protectInitialValues?: boolean;
+  /** With protectInitialValues: the field IDs the prefill set. Each non-empty one is marked as the person's own. */
+  protectedFieldIds?: string[];
+  /**
+   * Eligibility prefill: use this session (null means start a NEW session). Never resumes the stored one,
+   * and does not overwrite it. A session already linked to an assessment is replaced by a fresh one on load.
+   */
+  sessionOverride?: { sessionId: string | null };
 }
 
 export function useDocumentAiForm({
   createBlank,
   editingAssessment,
   defaultCurrency,
+  protectInitialValues = false,
+  protectedFieldIds,
+  sessionOverride,
 }: UseDocumentAiFormOptions) {
   const isEditing = Boolean(editingAssessment);
   const [form, setForm] = useState<FormState>(() =>
@@ -144,9 +159,14 @@ export function useDocumentAiForm({
   const docStateRef = useRef<DocumentSessionState | null>(null);
   const sessionIdRef = useRef<string>('');
   if (!sessionIdRef.current) {
-    sessionIdRef.current = isEditing ? newSessionId() : readStoredSession() || newSessionId();
-    if (!isEditing) writeStoredSession(sessionIdRef.current);
+    if (isEditing) sessionIdRef.current = newSessionId();
+    else if (sessionOverride) sessionIdRef.current = sessionOverride.sessionId?.trim() || newSessionId();
+    else {
+      sessionIdRef.current = readStoredSession() || newSessionId();
+      writeStoredSession(sessionIdRef.current);
+    }
   }
+  const protectInitialRef = useRef(protectInitialValues);
   const sessionExistsRef = useRef(false);
   // Bumped whenever the session is swapped, so late results from the old one can be dropped.
   const generationRef = useRef(0);
@@ -164,9 +184,12 @@ export function useDocumentAiForm({
   // Reopened draft: protect saved values straight from the assessment, before any network call.
   if (!seededRef.current) {
     seededRef.current = true;
-    if (editingAssessment) {
+    if (editingAssessment || protectInitialValues) {
       savedFormRef.current = formRef.current;
-      for (const entry of preexistingEntries(formRef.current)) {
+      for (const entry of preexistingEntries(
+        formRef.current,
+        protectInitialValues && !editingAssessment ? new Set(protectedFieldIds ?? []) : undefined
+      )) {
         editedRef.current[entry.fieldId] = entry;
         pendingRef.current.setEdited[entry.fieldId] = entry;
       }
@@ -362,7 +385,8 @@ export function useDocumentAiForm({
       // Reopen-time guesses are void for fields a document applied: only explicit delete-and-clear may clear them.
       const comparisons: Record<string, AppliedComparison> = {};
       const savedForm = savedFormRef.current;
-      for (const [id, entry] of Object.entries(state.edits.appliedFields)) {
+      // A prefilled form's values came from Eligibility, not a document: their marks are never dropped.
+      for (const [id, entry] of protectInitialRef.current ? [] : Object.entries(state.edits.appliedFields)) {
         const definition = getFieldDefinition(id);
         if (!savedForm || !definition || !isFormBacked(definition)) continue;
         const candidate = state.fields[id]?.candidates.find((c) => c.candidateId === entry.candidateId);
@@ -645,6 +669,8 @@ export function useDocumentAiForm({
     sessionIdRef.current = next;
     writeStoredSession(next);
     editingRef.current = null;
+    // The form no longer holds Eligibility's values once its session is swapped (Reset, Populate Demo).
+    if (!options.keepEdits) protectInitialRef.current = false;
     lookupDoneRef.current = true;
     loadedRef.current = true;
     sessionExistsRef.current = false;
@@ -891,9 +917,19 @@ export function useDocumentAiForm({
   );
 
   const retryDocument = useCallback(
-    (documentId: string) => startExtraction([documentId], true),
+    (documentId: string | string[]) =>
+      startExtraction(Array.isArray(documentId) ? documentId : [documentId], true),
     [startExtraction]
   );
+
+  /** Retries every file that failed and can still be read, in one job. */
+  const retryFailed = useCallback(() => {
+    const ids = (docState?.documents ?? [])
+      .filter((d) => d.status === 'failed' && d.errorCode !== 'password_protected' && !d.fileDeletedAt)
+      .map((d) => d.documentId);
+    if (ids.length === 0) return Promise.resolve();
+    return startExtraction(ids, true);
+  }, [docState, startExtraction]);
 
   const refresh = useCallback(async () => {
     setPollTimedOut(false);
@@ -962,6 +998,7 @@ export function useDocumentAiForm({
     removeDocument,
     changeDocumentType,
     retryDocument,
+    retryFailed,
     refresh,
   };
 }

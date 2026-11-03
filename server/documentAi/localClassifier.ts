@@ -1,14 +1,19 @@
 /**
  * Recognises common Indian lending documents from their own text and file name, so they skip the
- * model's classification call (one request per file instead of two). It answers only when exactly one
- * document type has a strong, specific signal; anything ambiguous returns null and goes to the model.
+ * model's classification call, and let a file be read with no AI at all. It answers only when exactly
+ * one document type has a strong, specific signal; anything ambiguous returns null and goes to the
+ * model, or, with no model available, is treated as 'other' (nothing is extracted from it).
  */
 import type { DocumentType } from '../../src/types/documentAi.ts';
 
 const RULES: Array<{ type: DocumentType; test: (text: string) => boolean }> = [
   {
     type: 'gst_return',
-    test: (t) => /\bGSTR[\s-]?(?:1|2A|2B|3B|4|9C?)\b/i.test(t) || /goods and services tax return/i.test(t),
+    // OCR reads 3B as 38 now and then.
+    test: (t) =>
+      /\bGSTR[\s-]?(?:1|2A|2B|3B?|38|4|9C?)\b/i.test(t) ||
+      /goods and services tax return/i.test(t) ||
+      /\bGST\s+(?:annual\s+|monthly\s+|quarterly\s+)?return\b/i.test(t),
   },
   {
     type: 'gst_certificate',
@@ -39,6 +44,10 @@ const RULES: Array<{ type: DocumentType; test: (text: string) => boolean }> = [
   {
     type: 'cma_projection',
     test: (t) => /\bCMA data\b/i.test(t) || /projected balance sheet/i.test(t),
+  },
+  {
+    type: 'pan_card',
+    test: (t) => /permanent account number/i.test(t) && /income tax department/i.test(t),
   },
   {
     type: 'loan_application',

@@ -1,0 +1,12 @@
+FICTIONAL SAMPLE - ILLUSTRATIVE DOCUMENT, NOT REAL FINANCIAL STATEMENTS
+FICTIONAL SAMPLE TRADERS PRIVATE LIMITED
+Balance Sheet and Statement of Profit and Loss (FICTIONAL)
+(Rs. in lakhs)
+Particulars  Note  FY 2024-25  FY 2023-24
+Revenue from operations  18  1,250.00  1,000.00
+Finance costs  21  (60.00)  (50.00)
+Profit after tax  32.20  18.50
+Total current assets  310.00  280.00
+Total current liabilities  120.00  110.00
+Revenue growth %  25  18
+EBITDA  140.00

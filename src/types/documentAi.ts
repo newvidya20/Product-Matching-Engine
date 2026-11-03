@@ -30,6 +30,9 @@ export const DOCUMENT_AI_THRESHOLDS = {
   maxAutoApply: 0.99,
   /** Below this a candidate is dropped and only counted. */
   discardBelow: 0.5,
+  /** Review-panel badges: at or above is High, at or above mediumFrom is Medium, below is Low. */
+  highConfidenceFrom: 0.9,
+  mediumConfidenceFrom: 0.75,
   /** Relative tolerance for currency comparison, plus an absolute 1 rupee. */
   currencyRelativeTolerance: 0.005,
   currencyAbsoluteTolerance: 1,

@@ -328,6 +328,8 @@ export interface SpreadsheetText {
   visibleSheetNames: string[];
   /** Visible cells, so a value that exists only in a hidden row fails the source check. */
   sourceRows: SourceRow[];
+  /** Visible sheets with column positions, for the local extractors. */
+  visibleSheets: ParsedSheet[];
 }
 
 function visiblePart(sheet: ParsedSheet): ParsedSheet {
@@ -350,6 +352,7 @@ export function renderSpreadsheetText(parsed: ParsedSpreadsheet): SpreadsheetTex
       .slice(0, MAX_PROMPT_TEXT_CHARS),
     scanText: parsed.sheets.map((sheet) => renderSheet(sheet, parsed.kind)).join('\n\n'),
     visibleSheetNames: visible.map((sheet) => sheet.name),
+    visibleSheets: visible,
     sourceRows: visible.flatMap((sheet) =>
       sheet.rows.map((row) => ({
         sheetName: sheet.name,

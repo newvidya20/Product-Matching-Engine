@@ -2,7 +2,15 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { isZipUpload, readZipEntries, validateUpload } from '../server/documentAi/fileValidation.ts';
-import { readDocxLines, readPlainTextLines, renderPdfPagesToPng } from '../server/documentAi/textDocuments.ts';
+import {
+  MAX_RENDER_PIXELS,
+  readDocxLines,
+  readPlainTextLines,
+  renderPdfPages,
+  renderPdfPagesToPng,
+  renderScaleFor,
+} from '../server/documentAi/textDocuments.ts';
+import { runObserved, type ExtractionObserver } from '../server/documentAi/ocr.ts';
 import { readPdfSource } from '../server/documentAi/spreadsheet.ts';
 
 const fixture = (name: string) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url));
@@ -65,6 +73,65 @@ describe('scanned PDFs', () => {
     const images = await renderPdfPagesToPng(bytes, signal());
     assert.equal(images.length, 1);
     assert.equal(Buffer.from(images[0], 'base64').subarray(1, 4).toString(), 'PNG');
+  });
+
+  it('renders a normal page at scale 2', () => {
+    // A4 in points: 595 x 842 at scale 2 is about 2 MP, under the 4 MP default.
+    assert.equal(MAX_RENDER_PIXELS, 4_000_000);
+    assert.equal(renderScaleFor(595, 842), 2);
+  });
+
+  it('lowers the scale of a large page so its canvas stays under the pixel cap', () => {
+    for (const [width, height] of [
+      [2384, 3370], // A0
+      [14400, 14400], // the PDF maximum page size
+      [100_000, 50], // a long strip
+      [1191, 842],
+    ]) {
+      const scale = renderScaleFor(width, height);
+      assert.ok(scale !== null && scale > 0 && scale <= 2, `${width}x${height}`);
+      const pixels = Math.ceil(width * scale) * Math.ceil(height * scale);
+      assert.ok(pixels <= MAX_RENDER_PIXELS, `${width}x${height}: ${pixels} pixels`);
+      assert.ok(Math.ceil(width * scale) <= 8_000 && Math.ceil(height * scale) <= 8_000);
+    }
+    const a0 = renderScaleFor(2384, 3370)!;
+    assert.ok(Math.ceil(2384 * a0) * Math.ceil(3370 * a0) > MAX_RENDER_PIXELS * 0.95, 'uses most of the allowance');
+  });
+
+  it('honours a smaller pixel cap, and refuses a page with no usable size', () => {
+    const scale = renderScaleFor(595, 842, 1_000_000)!;
+    assert.ok(Math.ceil(595 * scale) * Math.ceil(842 * scale) <= 1_000_000);
+    assert.equal(renderScaleFor(0, 842), null);
+    assert.equal(renderScaleFor(595, Number.NaN), null);
+    assert.equal(renderScaleFor(-1, 10), null);
+  });
+
+  it('renders one page at a time across files, reporting the wait to each file', async () => {
+    const bytes = fixture('FICTIONAL-scanned-gst-return.pdf');
+    let waits = 0;
+    let waiting = 0;
+    const observer = (): ExtractionObserver => ({
+      phase: 'reading',
+      queueWaitStarted: () => {
+        waits += 1;
+        waiting += 1;
+      },
+      queueWaitEnded: () => {
+        waiting -= 1;
+      },
+    });
+    const results = await Promise.all(
+      [0, 1, 2].map(() => runObserved(observer(), () => renderPdfPages(bytes, signal())))
+    );
+    assert.ok(results.every((images) => images.length === 1));
+    assert.ok(waits >= 1, 'parallel renders queued for the renderer');
+    assert.equal(waiting, 0, 'every wait ended');
+  });
+
+  it('an aborted render stops and returns no pages', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    assert.deepEqual(await renderPdfPages(fixture('FICTIONAL-scanned-gst-return.pdf'), controller.signal), []);
   });
 });
 

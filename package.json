@@ -11,7 +11,7 @@
     "preview": "vite preview",
     "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true });\"",
     "lint": "tsc --noEmit",
-    "test": "node --import tsx --test tests/field-map.test.ts tests/validators.test.ts tests/merge.test.ts tests/apply-field-results.test.ts tests/fixtures.test.ts tests/llm-provider.test.ts tests/document-formats.test.ts tests/local-classifier.test.ts",
+    "test": "node --import tsx --test tests/field-map.test.ts tests/validators.test.ts tests/merge.test.ts tests/apply-field-results.test.ts tests/fixtures.test.ts tests/llm-provider.test.ts tests/document-formats.test.ts tests/local-classifier.test.ts tests/local-extraction.test.ts tests/offline-extraction.test.ts tests/ocr-safety.test.ts tests/eligibility-engine.test.ts tests/eligibility-prefill.test.ts tests/eligibility-routes.test.ts",
     "index:study-material": "tsx scripts/buildStudyMaterialReference.ts"
   },
   "engines": {
@@ -20,6 +20,7 @@
   "dependencies": {
     "@google/genai": "^2.4.0",
     "@tailwindcss/vite": "^4.3.3",
+    "@tesseract.js-data/eng": "^1.0.0",
     "@vitejs/plugin-react": "^6.1.1",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
@@ -29,6 +30,7 @@
     "pdfjs-dist": "^5.4.624",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
+    "tesseract.js": "^7.0.0",
     "tsx": "^4.21.0",
     "vite": "^8.3.0",
     "yauzl": "3.4.0"

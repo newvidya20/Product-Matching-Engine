@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { DOCUMENT_AI_THRESHOLDS } from '../../types/documentAi';
 import { AlertTriangle, Check, ChevronDown, ChevronRight, ClipboardList, ShieldAlert, X } from 'lucide-react';
 import type {
   EditedFieldEntry,
@@ -86,8 +87,27 @@ function Reasons({ reasons }: { reasons: FieldReasonCode[] }) {
   );
 }
 
-function SourceText({ field }: { field: Pick<ExtractedField, 'source'> }) {
-  const [open, setOpen] = useState(false);
+/** Confidence as a plain label plus the percentage, never colour alone. */
+function ConfidenceBadge({ value }: { value: number }) {
+  const pct = Math.round(Math.max(0, Math.min(1, value)) * 100);
+  const [label, tone] =
+    value >= DOCUMENT_AI_THRESHOLDS.highConfidenceFrom
+      ? ['High', 'bg-emerald-50 text-emerald-800 border-emerald-200']
+      : value >= DOCUMENT_AI_THRESHOLDS.mediumConfidenceFrom
+        ? ['Medium', 'bg-amber-50 text-amber-800 border-amber-200']
+        : ['Low', 'bg-red-50 text-red-700 border-red-200'];
+  return (
+    <span
+      title={`Reading confidence ${pct}%`}
+      className={`inline-flex items-center px-1.5 py-0.5 rounded border text-[10px] font-semibold leading-none whitespace-nowrap ${tone}`}
+    >
+      {label} confidence · {pct}%
+    </span>
+  );
+}
+
+function SourceText({ field, defaultOpen = false }: { field: Pick<ExtractedField, 'source'>; defaultOpen?: boolean }) {
+  const [open, setOpen] = useState(defaultOpen);
   if (!field.source.snippet) return null;
   return (
     <div>
@@ -208,18 +228,20 @@ export function ReviewPanel(props: ReviewPanelProps) {
 
       {stillNeeded.length > 0 && (
         <div className="px-4 sm:px-5 py-3 space-y-1.5">
-          <h4 className="text-xs font-semibold text-stone-800">Still needed</h4>
+          <h4 className="text-xs font-semibold text-stone-800">Not found in the documents</h4>
           <p className="text-[11px] text-stone-500">
-            Documents rarely state these. Enter them in the form; they are the borrower&apos;s request, not
-            something to guess.
+            {busy
+              ? 'Documents are still being read, so this list may shrink.'
+              : 'These were not found, so the form is incomplete until you enter them. They are never guessed.'}
           </p>
-          <ul className="flex flex-wrap gap-1.5">
+          <ul className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
             {stillNeeded.map((definition) => (
               <li
                 key={definition.fieldId}
-                className="px-2 py-1 text-[11px] font-medium text-amber-900 bg-amber-50 border border-amber-200 rounded"
+                className="px-2 py-1 text-[11px] text-amber-900 bg-amber-50 border border-amber-200 rounded"
               >
-                {definition.label}
+                <span className="font-medium">{definition.label}</span>
+                <span className="block text-amber-800">Not found - enter manually</span>
               </li>
             ))}
           </ul>
@@ -237,8 +259,8 @@ export function ReviewPanel(props: ReviewPanelProps) {
                 return (
                   <ItemShell key={result.fieldId} definition={definition} badge={<ConflictBadge />}>
                     <p className="text-[11px] text-stone-500">
-                      {SECTION_TITLES[definition.section]} · documents show different values. Pick one, or type your
-                      own in the form.
+                      {SECTION_TITLES[definition.section]} · documents disagree. Neither value has been
+                      applied to the form. Pick one, or type your own in the form.
                     </p>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                       {result.candidates
@@ -262,7 +284,8 @@ export function ReviewPanel(props: ReviewPanelProps) {
                               {sourceLabel({ source: candidate.source })}
                               {candidate.period ? ` · ${candidate.period}` : ''}
                             </p>
-                            <SourceText field={candidate} />
+                            <ConfidenceBadge value={candidate.confidence} />
+                            <SourceText field={candidate} defaultOpen />
                             <button
                               type="button"
                               onClick={() => acceptCandidate(result.fieldId, candidate.candidateId, 'resolved_conflict')}
@@ -297,12 +320,13 @@ export function ReviewPanel(props: ReviewPanelProps) {
                       <span className="text-stone-500">from {sourceLabel(result)}</span>
                     </p>
                   )}
+                  {!invalid && <ConfidenceBadge value={result.confidence} />}
                   <Reasons reasons={result.reasons} />
                   {(() => {
                     const shown =
                       result.candidates.find((c) => c.candidateId === result.suggestedCandidateId) ??
                       result.candidates[0];
-                    return shown ? <SourceText field={shown} /> : null;
+                    return shown ? <SourceText field={shown} defaultOpen /> : null;
                   })()}
                   <div className="flex flex-wrap gap-2">
                     {!invalid && writable && !wrongPurpose && (
@@ -346,6 +370,19 @@ export function ReviewPanel(props: ReviewPanelProps) {
                   </span>{' '}
                   <span className="text-stone-500">({sourceLabel(result)})</span>
                 </p>
+                <p className="text-[11px] text-stone-500 break-words">
+                  Your entry in the form:{' '}
+                  <span className="font-mono tabular-nums font-semibold text-stone-800">
+                    {readField(form, definition) || '—'}
+                  </span>
+                </p>
+                <ConfidenceBadge value={result.confidence} />
+                {(() => {
+                  const shown =
+                    result.candidates.find((c) => c.candidateId === result.suggestedCandidateId) ??
+                    result.candidates[0];
+                  return shown ? <SourceText field={shown} /> : null;
+                })()}
                 <button
                   type="button"
                   onClick={() =>
@@ -408,6 +445,7 @@ export function ReviewPanel(props: ReviewPanelProps) {
                     {formatFieldValue(definition, result.value)}
                   </span>
                   <span className="text-[11px] text-stone-500 break-words">{sourceLabel(result)}</span>
+                  <ConfidenceBadge value={result.confidence} />
                 </li>
               ))}
             </ul>

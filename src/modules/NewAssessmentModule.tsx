@@ -29,6 +29,9 @@ import { DocumentUploadCard } from '../components/documentAi/DocumentUploadCard'
 import { DocumentPreviewDrawer } from '../components/documentAi/DocumentPreviewDrawer';
 import { DeleteDocumentDialog } from '../components/documentAi/DeleteDocumentDialog';
 import { ReviewPanel } from '../components/documentAi/ReviewPanel';
+import { prefillToForm } from '../components/eligibility/prefillToForm';
+import { eligibilityClient } from '../api/eligibilityClient';
+import type { NewAssessmentPrefill } from '../types/eligibility';
 
 const INPUT =
   'w-full px-3.5 py-2 text-sm bg-white border border-stone-300 rounded-lg focus:outline-none focus:border-orange-600';
@@ -61,6 +64,18 @@ const MORE_FINANCIAL_FIELD_IDS = FINANCIAL_FIELDS_NEEDING_INPUT.map((d) => d.fie
 
 const SIGNED_DECIMAL = /^-?\d*\.?\d*$/;
 
+/** Field-map IDs for every value the Eligibility prefill set. */
+function prefillFieldIds(prefill: NewAssessmentPrefill): string[] {
+  const ids = ['applicantLabel'];
+  for (const key of Object.keys(prefill.assessment)) ids.push(key);
+  for (const [key, value] of Object.entries(prefill.financialProfile)) {
+    if (key === 'ratios' && value && typeof value === 'object') {
+      for (const sub of Object.keys(value)) ids.push(`financialProfile.ratios.${sub}`);
+    } else ids.push(`financialProfile.${key}`);
+  }
+  return ids;
+}
+
 function UnresolvedWarning({ count }: { count: number }) {
   return (
     <div role="alert" className="px-4 py-3 bg-amber-50 border border-amber-300 rounded-xl text-xs text-amber-900 font-medium">
@@ -71,7 +86,13 @@ function UnresolvedWarning({ count }: { count: number }) {
 }
 
 export function NewAssessmentModule() {
-  const { state } = useAppState();
+  const { state, clearEligibilityPrefill } = useAppState();
+  // Taken once when this page opens from Eligibility Check, then cleared so a later visit starts blank.
+  const [prefill] = useState<NewAssessmentPrefill | null>(() => (state.editingAssessmentId ? null : state.eligibilityPrefill));
+  useEffect(() => {
+    if (state.eligibilityPrefill) clearEligibilityPrefill();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // editingAssessmentId is added to AppStateContext by the storage branch (docs/contracts.md section 8).
   const editingId = state.editingAssessmentId;
   const editing = useMemo(
@@ -86,14 +107,16 @@ export function NewAssessmentModule() {
     if (editingId) setDetachedKey(null);
   }, [editingId]);
   const key = !editingId && detachedKey ? detachedKey : editing?.id ?? 'new';
-  return <AssessmentForm key={key} editingAssessment={editing} onDetach={() => setDetachedKey(key)} />;
+  return <AssessmentForm key={key} editingAssessment={editing} prefill={prefill} onDetach={() => setDetachedKey(key)} />;
 }
 
 function AssessmentForm({
   editingAssessment,
+  prefill,
   onDetach,
 }: {
   editingAssessment: BorrowerAssessment | null;
+  prefill: NewAssessmentPrefill | null;
   onDetach: () => void;
 }) {
   const { state, createAssessment, updateAssessment, openAssessmentInEngine, navigateTo, notify } = useAppState();
@@ -101,7 +124,11 @@ function AssessmentForm({
   const defaultCurrency = state.settings.defaultCurrency;
 
   const ai = useDocumentAiForm({
-    createBlank: () => createBlankForm(defaultCurrency, officerDefault),
+    createBlank: () =>
+      prefill ? prefillToForm(prefill, defaultCurrency, officerDefault) : createBlankForm(defaultCurrency, officerDefault),
+    protectInitialValues: Boolean(prefill),
+    protectedFieldIds: prefill ? prefillFieldIds(prefill) : undefined,
+    sessionOverride: prefill ? { sessionId: prefill.documentSessionId } : undefined,
     editingAssessment,
     defaultCurrency,
   });
@@ -114,6 +141,9 @@ function AssessmentForm({
     editingAssessment ? { id: editingAssessment.id, referenceCode: editingAssessment.referenceCode } : null
   );
   const savedIdRef = useRef<string | null>(editingAssessment?.id ?? null);
+  // The eligibility record this form came from. Cleared on detach so a different borrower's save never links to it.
+  const eligibilityRecordRef = useRef<string | null>(prefill?.eligibilityRecordId ?? null);
+  const [conditions, setConditions] = useState(prefill?.conditions ?? []);
   // Bumped on every detach (Reset, Populate Demo) so a save started earlier never binds the form to its record.
   const detachGenRef = useRef(0);
   const [moreOpen, setMoreOpen] = useState(false);
@@ -154,6 +184,8 @@ function AssessmentForm({
   /** Leaves the saved record: the next Save creates a new one and the heading stops saying Edit Draft. */
   const detachFromSaved = (): boolean => {
     detachGenRef.current += 1;
+    eligibilityRecordRef.current = null;
+    setConditions([]);
     const wasSaved = savedIdRef.current !== null;
     savedIdRef.current = null;
     setSaved(null);
@@ -278,8 +310,14 @@ function AssessmentForm({
 
     // createAssessment(payload, true) navigates away and unmounts this module, so nothing after it
     // may rely on component state. Everything below uses refs and module-level calls only.
+    // Captured before the await: the link belongs to the form that started this save, even if it detaches meanwhile.
+    const eligibilityRecordId = eligibilityRecordRef.current;
     const created = await createAssessment(payload, !asDraft);
     if (!created) return;
+    if (eligibilityRecordId) {
+      // Best effort: the assessment is saved either way; this only links the eligibility record to it.
+      void eligibilityClient.updateRecord(eligibilityRecordId, { linkedAssessmentId: created.id }).catch(() => undefined);
+    }
     // Reset or Populate Demo ran while the create was in flight: the record exists, but this form is no longer it.
     if (detachGenRef.current !== startedGen) return;
     savedIdRef.current = created.id;
@@ -444,6 +482,19 @@ function AssessmentForm({
           }
         />
 
+        {conditions.length > 0 && (
+          <div role="status" className="px-4 py-3 bg-amber-50 border border-amber-300 rounded-xl text-xs text-amber-900 space-y-1.5">
+            <p className="font-semibold">Conditionally eligible. These conditions still apply:</p>
+            <ul className="list-disc pl-5 space-y-0.5">
+              {conditions.map((c) => (
+                <li key={c.criterionId}>
+                  {c.label}: {c.reason}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         {validationError && (
           <div role="alert" className="px-4 py-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-800 font-medium">
             {validationError}
@@ -464,6 +515,7 @@ function AssessmentForm({
             onPreview={setPreviewDoc}
             onDelete={setDeleteDoc}
             onRetry={(id) => void ai.retryDocument(id)}
+            onRetryFailed={() => void ai.retryFailed()}
             onChangeType={(id, type) => void ai.changeDocumentType(id, type)}
             onRefresh={() => void ai.refresh()}
           />

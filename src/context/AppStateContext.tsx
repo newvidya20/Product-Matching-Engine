@@ -8,6 +8,7 @@ import React, {
   useState,
 } from 'react';
 import { apiClient } from '../api/client';
+import type { NewAssessmentPrefill } from '../types/eligibility';
 import {
   WorkspaceConfirmModal,
   type WorkspaceConfirmRequest,
@@ -44,6 +45,8 @@ interface AppState {
   selectedAssessmentId: string | null;
   /** Set only by OPEN_ASSESSMENT_FOR_EDIT; cleared by SET_MODULE. */
   editingAssessmentId: string | null;
+  /** One-shot values handed from Eligibility Check to New Assessment; New Assessment clears it. */
+  eligibilityPrefill: NewAssessmentPrefill | null;
   selectedAdminCategoryId: string | null;
   selectedAdminTab: 'master' | 'pdfs' | 'verification' | 'logs';
   catalogViewMode: 'official_catalog' | 'fictional_demo_sandbox';
@@ -168,6 +171,7 @@ const initialState: AppState = {
   activeModule: 'dashboard',
   selectedAssessmentId: null,
   editingAssessmentId: null,
+  eligibilityPrefill: null,
   selectedAdminCategoryId: 'cat-01',
   selectedAdminTab: 'master',
   catalogViewMode: 'official_catalog',
@@ -201,6 +205,8 @@ type Action =
   | { type: 'SET_WORKSPACE_CONFIG'; workspaceConfig: WorkspaceConnectionConfig }
   | { type: 'SET_MODULE'; moduleId: AppModuleId }
   | { type: 'OPEN_ASSESSMENT_FOR_EDIT'; assessmentId: string }
+  | { type: 'OPEN_NEW_ASSESSMENT_WITH_PREFILL'; prefill: NewAssessmentPrefill }
+  | { type: 'CLEAR_ELIGIBILITY_PREFILL' }
   | { type: 'SET_SELECTED_ASSESSMENT'; assessmentId: string | null }
   | { type: 'SET_ADMIN_CATEGORY'; categoryId: string }
   | { type: 'SET_ADMIN_TAB'; tab: 'master' | 'pdfs' | 'verification' | 'logs' }
@@ -266,6 +272,10 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, workspaceConfig: action.workspaceConfig };
     case 'SET_MODULE':
       return { ...state, activeModule: action.moduleId, editingAssessmentId: null };
+    case 'OPEN_NEW_ASSESSMENT_WITH_PREFILL':
+      return { ...state, editingAssessmentId: null, eligibilityPrefill: action.prefill, activeModule: 'new-assessment' };
+    case 'CLEAR_ELIGIBILITY_PREFILL':
+      return state.eligibilityPrefill ? { ...state, eligibilityPrefill: null } : state;
     case 'OPEN_ASSESSMENT_FOR_EDIT':
       return {
         ...state,
@@ -405,6 +415,8 @@ interface AppContextValue {
   openAdminTab: (tab: 'master' | 'pdfs' | 'verification' | 'logs') => void;
   openAssessmentInEngine: (assessmentId: string) => void;
   openAssessmentForEdit: (assessmentId: string) => void;
+  openNewAssessmentWithPrefill: (prefill: NewAssessmentPrefill) => void;
+  clearEligibilityPrefill: () => void;
   openCategoryInAdmin: (categoryId: string) => void;
   setCatalogViewMode: (mode: 'official_catalog' | 'fictional_demo_sandbox') => void;
   setSelectedAssessmentId: (id: string | null) => void;
@@ -1148,6 +1160,14 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     dispatch({ type: 'OPEN_ASSESSMENT_FOR_EDIT', assessmentId });
   }, []);
 
+  const openNewAssessmentWithPrefill = useCallback((prefill: NewAssessmentPrefill) => {
+    dispatch({ type: 'OPEN_NEW_ASSESSMENT_WITH_PREFILL', prefill });
+  }, []);
+
+  const clearEligibilityPrefill = useCallback(() => {
+    dispatch({ type: 'CLEAR_ELIGIBILITY_PREFILL' });
+  }, []);
+
   const openCategoryInAdmin = useCallback((categoryId: string) => {
     dispatch({ type: 'SET_ADMIN_CATEGORY', categoryId });
     dispatch({ type: 'SET_ADMIN_TAB', tab: 'master' });
@@ -1637,6 +1657,8 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
         openAdminTab,
         openAssessmentInEngine,
         openAssessmentForEdit,
+        openNewAssessmentWithPrefill,
+        clearEligibilityPrefill,
         openCategoryInAdmin,
         setCatalogViewMode,
         setSelectedAssessmentId,

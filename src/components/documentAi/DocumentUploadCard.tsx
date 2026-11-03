@@ -52,13 +52,15 @@ function KindIcon({ kind }: { kind: StoredDocument['kind'] }) {
   return <ImageIcon className={cls} aria-hidden="true" />;
 }
 
-function StatusChip({ doc }: { doc: StoredDocument }) {
+function StatusChip({ doc, inRunningJob }: { doc: StoredDocument; inRunningJob: boolean }) {
   const base = 'inline-flex items-center gap-1 text-[11px] font-medium';
-  switch (doc.status) {
+  // A file the running job has not reached yet is queued, whatever its stored status says.
+  const status = inRunningJob && doc.status === 'uploaded' ? 'queued' : doc.status;
+  switch (status) {
     case 'extracted':
       return (
         <span className={`${base} text-emerald-700`}>
-          <CheckCircle2 className="w-3 h-3" aria-hidden="true" /> Read
+          <CheckCircle2 className="w-3 h-3" aria-hidden="true" /> Done
         </span>
       );
     case 'failed':
@@ -70,13 +72,13 @@ function StatusChip({ doc }: { doc: StoredDocument }) {
     case 'extracting':
       return (
         <span className={`${base} text-orange-700`}>
-          <Loader2 className="w-3 h-3 animate-spin" aria-hidden="true" /> Reading
+          <Loader2 className="w-3 h-3 animate-spin" aria-hidden="true" /> Reading now
         </span>
       );
     case 'queued':
-      return <span className={`${base} text-stone-600`}>Waiting</span>;
+      return <span className={`${base} text-stone-600`}>Queued</span>;
     default:
-      return <span className={`${base} text-stone-600`}>Uploaded</span>;
+      return <span className={`${base} text-stone-600`}>Uploaded, not read yet</span>;
   }
 }
 
@@ -92,6 +94,8 @@ interface Props {
   onPreview: (doc: StoredDocument) => void;
   onDelete: (doc: StoredDocument) => void;
   onRetry: (documentId: string) => void;
+  /** Retries every failed file in one job. The retry-all button is hidden when this is not passed. */
+  onRetryFailed?: () => void;
   onChangeType: (documentId: string, type: DocumentType) => void;
   onRefresh: () => void;
 }
@@ -101,6 +105,17 @@ export function DocumentUploadCard(props: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
   const running = Boolean(job && !TERMINAL_JOB_STATUSES.includes(job.status));
+  const jobIds = new Set(running && job ? job.documentIds : []);
+
+  // Counts come from each document's own stored state, not from a job counter.
+  const readable = documents.filter((d) => !(d.fileDeletedAt && d.status !== 'extracted'));
+  const doneCount = readable.filter((d) => d.status === 'extracted').length;
+  const failedDocs = readable.filter((d) => d.status === 'failed');
+  const readingCount = readable.filter((d) => d.status === 'extracting').length;
+  const remainingCount = readable.filter(
+    (d) => d.status === 'queued' || d.status === 'extracting' || (d.status === 'uploaded' && running)
+  ).length;
+  const retryable = failedDocs.filter((d) => d.errorCode !== 'password_protected' && !d.fileDeletedAt);
 
   const takeFiles = (list: FileList | null) => {
     if (!list || list.length === 0) return;
@@ -118,13 +133,39 @@ export function DocumentUploadCard(props: Props) {
             filled where the documents state a value clearly; check everything before you submit.
           </p>
         </div>
-        {running && (
-          <span className="inline-flex items-center gap-1.5 text-xs font-medium text-orange-700 shrink-0">
-            <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
-            Reading {job ? `${Math.min(job.processed + 1, job.documentIds.length)} of ${job.documentIds.length}` : ''}
-          </span>
-        )}
       </div>
+
+      {readable.length > 0 && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="px-3 py-2 bg-stone-50 border border-stone-200 rounded-lg text-xs text-stone-700 flex flex-wrap items-center gap-x-3 gap-y-1.5"
+        >
+          {running && <Loader2 className="w-3.5 h-3.5 text-orange-600 animate-spin" aria-hidden="true" />}
+          <span className="font-medium text-emerald-700">{doneCount} done</span>
+          <span className={failedDocs.length > 0 ? 'font-medium text-red-700' : 'text-stone-500'}>
+            {failedDocs.length} failed
+          </span>
+          <span className="text-stone-600">
+            {remainingCount} remaining
+            {readingCount > 0 ? ` (${readingCount} reading now)` : ''}
+          </span>
+          {!running && failedDocs.length > 0 && remainingCount === 0 && (
+            <span className="text-stone-500">Finished. The failed files did not stop the others.</span>
+          )}
+          {retryable.length > 0 && props.onRetryFailed && (
+            <button
+              type="button"
+              disabled={running}
+              onClick={props.onRetryFailed}
+              title={running ? 'Wait for the current reading to finish' : undefined}
+              className="inline-flex items-center gap-1 ml-auto font-semibold text-orange-700 hover:text-orange-800 disabled:opacity-50 cursor-pointer"
+            >
+              <RefreshCw className="w-3 h-3" aria-hidden="true" /> Retry all failed ({retryable.length})
+            </button>
+          )}
+        </div>
+      )}
 
       <div
         onDragOver={(e) => {
@@ -230,7 +271,7 @@ export function DocumentUploadCard(props: Props) {
                   <p className="text-xs font-medium text-stone-800 break-words">{doc.originalName}</p>
                   <div className="mt-0.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-stone-500">
                     <span>{formatSize(doc.sizeBytes)}</span>
-                    <StatusChip doc={doc} />
+                    <StatusChip doc={doc} inRunningJob={jobIds.has(doc.documentId)} />
                     {doc.fileDeletedAt && <span>File removed</span>}
                   </div>
                 </div>
@@ -277,12 +318,13 @@ export function DocumentUploadCard(props: Props) {
                 {doc.status === 'failed' && (
                   <>
                     <span className="text-[11px] text-red-700">
-                      {doc.errorCode ? ERROR_COPY[doc.errorCode] : 'Reading failed.'}
+                      {doc.errorCode ? (ERROR_COPY[doc.errorCode] ?? 'Reading failed.') : 'Reading failed.'}
                     </span>
                     {doc.errorCode !== 'password_protected' && !doc.fileDeletedAt && (
                       <button
                         type="button"
                         disabled={running}
+                        title={running ? 'Wait for the current reading to finish' : undefined}
                         onClick={() => props.onRetry(doc.documentId)}
                         className="inline-flex items-center gap-1 text-[11px] font-semibold text-orange-700 hover:text-orange-800 disabled:opacity-50 cursor-pointer"
                       >

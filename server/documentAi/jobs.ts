@@ -1,6 +1,14 @@
 /**
  * Extraction job queue (docs/contracts.md section 7.6).
- * In-process FIFO, global concurrency 2, 300 s per file. Calls only the exported pipeline signatures.
+ * In-process FIFO, 300 s of work per file, more for a file that may need rendering and OCR
+ * (fileWorkBudgetMs). Calls only the exported pipeline signatures.
+ *
+ * Progress is per document: each StoredDocument moves queued -> extracting -> extracted | failed (with
+ * its errorCode) and is saved as it changes, and the job's `processed` count is saved as each file
+ * ends. No file can hang: extraction is aborted when its work time runs out (time queued for the
+ * shared renderer or OCR worker is not counted, up to MAX_QUEUE_WAIT_MS), and a hard deadline just
+ * after the abort settles the file even if a reader ignores it. Any unexpected error still leaves
+ * the document in `failed`, never in queued or extracting.
  */
 import crypto from 'node:crypto';
 import type {
@@ -13,6 +21,8 @@ import type {
 import { TERMINAL_JOB_STATUSES } from '../../src/types/documentAi.ts';
 import { logActivity } from './activity.ts';
 import { extractDocument } from './pipeline.ts';
+import { OCR_DOCUMENT_BUDGET_MS, runObserved, type ExtractionObserver } from './ocr.ts';
+import { RENDER_DOCUMENT_BUDGET_MS } from './textDocuments.ts';
 import {
   getActiveJob,
   getDocument,
@@ -29,7 +39,124 @@ import {
 
 /** Files read at once. Free OpenRouter allows about 20 requests a minute, so 3 stays well inside it. */
 const CONCURRENCY = Math.max(1, Math.min(8, Number(process.env.DOCUMENT_AI_CONCURRENCY) || 3));
+/** Work time for any file: local reading plus the model's share (pipeline.ts LLM_BUDGET_MS). */
 const PER_FILE_TIMEOUT_MS = 300_000;
+/** No file is given more work time than this, whatever the budgets add up to. */
+const MAX_FILE_WORK_MS = 15 * 60_000;
+/**
+ * Time queued for a shared reader (the page renderer, an OCR worker) does not count as work, but a
+ * file is stopped regardless once its work time plus this much waiting has passed.
+ */
+const MAX_QUEUE_WAIT_MS = 20 * 60_000;
+/** After the abort, how long a file may take to wind down before it is failed regardless. */
+const HARD_DEADLINE_GRACE_MS = 10_000;
+
+class HardDeadlineError extends Error {}
+
+/**
+ * Work time for one file, sized to what it may need: a PDF may be a scan that is rendered and read
+ * by OCR, an image is read by OCR, on top of the base budget. Bounded by MAX_FILE_WORK_MS.
+ */
+export function fileWorkBudgetMs(kind: StoredDocument['kind']): number {
+  const extra =
+    kind === 'pdf'
+      ? RENDER_DOCUMENT_BUDGET_MS + OCR_DOCUMENT_BUDGET_MS
+      : kind === 'png' || kind === 'jpeg' || kind === 'webp'
+        ? OCR_DOCUMENT_BUDGET_MS
+        : 0;
+  return Math.min(MAX_FILE_WORK_MS, PER_FILE_TIMEOUT_MS + extra);
+}
+
+interface FileTimer {
+  observer: ExtractionObserver;
+  /** The file was stopped by its timer (work time or the wait bound ran out). */
+  readonly expired: boolean;
+  /**
+   * The step the file was in when its timer stopped it, taken at that moment: once the abort lands,
+   * a model call unwinding resets the observer's phase, so reading it later could misreport.
+   */
+  readonly phaseAtExpiry: ExtractionObserver['phase'] | null;
+  /** Rejects with HardDeadlineError HARD_DEADLINE_GRACE_MS after the timer stops the file. */
+  hardDeadline: Promise<never>;
+  cancel(): void;
+}
+
+/**
+ * A timer that runs only while the file is working: it is paused while the file is queued for a
+ * shared reader, so a file is never aborted merely for waiting its turn. `onExpire` aborts the file.
+ */
+export function startFileTimer(workMs: number, onExpire: () => void, maxWaitMs: number = MAX_QUEUE_WAIT_MS): FileTimer {
+  let expired = false;
+  let phaseAtExpiry: ExtractionObserver['phase'] | null = null;
+  let remaining = workMs;
+  let runningSince = Date.now();
+  let waits = 0;
+  let workTimer: NodeJS.Timeout | null = null;
+  let graceTimer: NodeJS.Timeout | null = null;
+  let rejectHard: (error: Error) => void = () => undefined;
+  const hardDeadline = new Promise<never>((_, reject) => {
+    rejectHard = reject;
+  });
+  hardDeadline.catch(() => undefined);
+
+  const expire = () => {
+    if (expired) return;
+    expired = true;
+    phaseAtExpiry = observer.phase;
+    if (workTimer) clearTimeout(workTimer);
+    clearTimeout(absoluteTimer);
+    workTimer = null;
+    onExpire();
+    graceTimer = setTimeout(() => rejectHard(new HardDeadlineError()), HARD_DEADLINE_GRACE_MS);
+  };
+  workTimer = setTimeout(expire, remaining);
+  const absoluteTimer = setTimeout(expire, workMs + maxWaitMs);
+
+  const observer: ExtractionObserver = {
+    phase: 'reading',
+    queueWaitStarted() {
+      waits += 1;
+      if (waits === 1 && workTimer && !expired) {
+        clearTimeout(workTimer);
+        workTimer = null;
+        remaining -= Date.now() - runningSince;
+      }
+    },
+    queueWaitEnded() {
+      waits = Math.max(0, waits - 1);
+      if (waits === 0 && !workTimer && !expired) {
+        runningSince = Date.now();
+        workTimer = setTimeout(expire, Math.max(0, remaining));
+      }
+    },
+  };
+
+  return {
+    observer,
+    get expired() {
+      return expired;
+    },
+    get phaseAtExpiry() {
+      return phaseAtExpiry;
+    },
+    hardDeadline,
+    cancel() {
+      if (workTimer) clearTimeout(workTimer);
+      if (graceTimer) clearTimeout(graceTimer);
+      clearTimeout(absoluteTimer);
+      workTimer = null;
+    },
+  };
+}
+
+/**
+ * The code for a file stopped by its timer. Only a model call that ran out of time is
+ * `llm_timeout`; running out of time while rendering or OCR-reading the file is not the AI's doing,
+ * and is reported as `unreadable_document` (the server could not read it in time).
+ */
+export function timeoutCode(phase: ExtractionObserver['phase']): ExtractionErrorCode {
+  return phase === 'model' ? 'llm_timeout' : 'unreadable_document';
+}
 
 interface QueuedTask {
   job: ExtractionJob;
@@ -114,10 +241,6 @@ function pump(): void {
   }
 }
 
-/** Set when the provider reports its daily allowance is used up; later files fail at once until then. */
-let quotaExhaustedUntil = 0;
-const QUOTA_PAUSE_MS = 15 * 60 * 1000;
-
 async function processDocument(job: ExtractionJob, documentId: string, actorEmail: string): Promise<void> {
   const { sessionId } = job;
   const doc = await getDocument(sessionId, documentId);
@@ -163,10 +286,6 @@ async function processDocument(job: ExtractionJob, documentId: string, actorEmai
     await fail('file_missing');
     return;
   }
-  if (Date.now() < quotaExhaustedUntil) {
-    await fail('llm_quota_exhausted');
-    return;
-  }
   await updateDocument(sessionId, documentId, (d) => {
     d.status = 'extracting';
   });
@@ -174,19 +293,24 @@ async function processDocument(job: ExtractionJob, documentId: string, actorEmai
   const controller = new AbortController();
   const flightKey = `${sessionId}:${documentId}`;
   inFlight.set(flightKey, controller);
-  const timer = setTimeout(() => controller.abort(), PER_FILE_TIMEOUT_MS);
+  const timer = startFileTimer(fileWorkBudgetMs(doc.kind), () => controller.abort());
   try {
-    const result = await extractDocument({
-      documentId,
-      fileName: doc.originalName,
-      kind: doc.kind,
-      bytes,
-      declaredDocumentType: doc.documentTypeOverridden ? doc.documentType : null,
-      today: new Date().toISOString().slice(0, 10),
-      signal: controller.signal,
-    });
+    // The pipeline handles a daily model quota itself: the file still completes with what the
+    // server read locally, so nothing is failed up front here.
+    const extraction = runObserved(timer.observer, () =>
+      extractDocument({
+        documentId,
+        fileName: doc.originalName,
+        kind: doc.kind,
+        bytes,
+        declaredDocumentType: doc.documentTypeOverridden ? doc.documentType : null,
+        today: new Date().toISOString().slice(0, 10),
+        signal: controller.signal,
+      })
+    );
+    extraction.catch(() => undefined);
+    const result = await Promise.race([extraction, timer.hardDeadline]);
     if (!result.ok) {
-      if (result.errorCode === 'llm_quota_exhausted') quotaExhaustedUntil = Date.now() + QUOTA_PAUSE_MS;
       await fail(result.errorCode);
       return;
     }
@@ -222,11 +346,41 @@ async function processDocument(job: ExtractionJob, documentId: string, actorEmai
         fileName: doc.originalName,
       });
     }
-  } catch {
-    await fail(controller.signal.aborted ? 'llm_timeout' : 'llm_failed');
+  } catch (error) {
+    const abortedBefore = controller.signal.aborted;
+    controller.abort();
+    // A timed-out file is reported by the step it was in; any other abort (a delete) is settled by
+    // fail() as a deletion, and is never blamed on the AI.
+    const code: ExtractionErrorCode =
+      timer.expired || error instanceof HardDeadlineError || abortedBefore
+        ? timeoutCode(timer.phaseAtExpiry ?? timer.observer.phase)
+        : 'llm_failed';
+    await fail(code);
   } finally {
     if (inFlight.get(flightKey) === controller) inFlight.delete(flightKey);
-    clearTimeout(timer);
+    timer.cancel();
+  }
+}
+
+/**
+ * After an unexpected error (storage, say): a document still queued or extracting is failed, so the
+ * UI never shows it as reading forever. Best effort; it must not throw.
+ */
+async function settleUnfinishedDocument(job: ExtractionJob, documentId: string): Promise<void> {
+  try {
+    let settled = false;
+    await updateDocument(job.sessionId, documentId, (d) => {
+      if (d.status === 'queued' || d.status === 'extracting') {
+        d.status = 'failed';
+        d.errorCode = 'llm_failed';
+        settled = true;
+      }
+    });
+    if (settled && !job.errors.some((e) => e.documentId === documentId)) {
+      job.errors.push({ documentId, code: 'llm_failed' });
+    }
+  } catch {
+    if (!job.errors.some((e) => e.documentId === documentId)) job.errors.push({ documentId, code: 'llm_failed' });
   }
 }
 
@@ -244,10 +398,10 @@ async function runJob(task: QueuedTask): Promise<void> {
       try {
         await processDocument(job, documentId, actorEmail);
       } catch {
-        job.errors.push({ documentId, code: 'llm_failed' });
+        await settleUnfinishedDocument(job, documentId);
       }
       job.processed += 1;
-      await saveJob(job);
+      await saveJob(job).catch(() => undefined);
     }
   };
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, pending.length) }, worker));

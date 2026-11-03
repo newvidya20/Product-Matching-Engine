@@ -9,12 +9,25 @@ import { AppStateProvider, useAppState } from './context/AppStateContext';
 import { AppShell } from './components/layout/AppShell';
 import { AuthModule } from './modules/AuthModule';
 import { DashboardModule } from './modules/DashboardModule';
+import { EligibilityModule } from './modules/EligibilityModule';
 import { NewAssessmentModule } from './modules/NewAssessmentModule';
 import { ProductMatchingModule } from './modules/ProductMatchingModule';
 import { ProductDirectoryModule } from './modules/ProductDirectoryModule';
 import { AssessmentHistoryModule } from './modules/AssessmentHistoryModule';
 import { AdminProductManagementModule } from './modules/AdminProductManagementModule';
 import { SettingsModule } from './modules/SettingsModule';
+
+function EligibilityRoute() {
+  const { openAssessmentForEdit, openNewAssessmentWithPrefill } = useAppState();
+  return (
+    <EligibilityModule
+      onContinueToAssessment={(response) => {
+        if (response.existingAssessmentId) openAssessmentForEdit(response.existingAssessmentId);
+        else if (response.prefill) openNewAssessmentWithPrefill({ ...response.prefill, conditions: response.conditions ?? [] });
+      }}
+    />
+  );
+}
 
 function WorkspaceRouter() {
   const { state, refreshBootstrap } = useAppState();
@@ -47,6 +60,7 @@ function WorkspaceRouter() {
   return (
     <AppShell>
       {state.activeModule === 'dashboard' && <DashboardModule />}
+      {state.activeModule === 'eligibility' && <EligibilityRoute />}
       {state.activeModule === 'new-assessment' && <NewAssessmentModule />}
       {state.activeModule === 'matching-engine' && <ProductMatchingModule />}
       {state.activeModule === 'directory' && <ProductDirectoryModule />}

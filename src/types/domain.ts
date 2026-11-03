@@ -1,5 +1,6 @@
 export type AppModuleId =
   | 'dashboard'
+  | 'eligibility'
   | 'new-assessment'
   | 'matching-engine'
   | 'directory'
