@@ -93,3 +93,14 @@ describe('XLSX fixture', () => {
     assert.match(sheet, /FICTIONAL/);
   });
 });
+
+describe('PDF text layer from a Node Buffer', () => {
+  it('reads the fixture when given a Buffer, as the upload pipeline does', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { readPdfSource } = await import('../server/documentAi/spreadsheet.ts');
+    const bytes = readFileSync(new URL('./fixtures/FICTIONAL-gst-return-fy2024-25.pdf', import.meta.url));
+    const source = await readPdfSource(bytes, new AbortController().signal);
+    assert.equal(source.kind, 'pdf');
+    assert.equal(bytes.length > 0, true, 'the caller keeps its bytes for the model');
+  });
+});

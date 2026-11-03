@@ -432,7 +432,8 @@ async function readPdfLines(
   if (signal.aborted) throw new DOMException('Extraction was aborted.', 'AbortError');
   // pdf.js detaches the buffer it is given, and these bytes still go to the model.
   const task = engine.getDocument({
-    data: bytes.slice(),
+    // A plain Uint8Array copy: pdf.js refuses a Node Buffer, and detaches what it is given.
+    data: new Uint8Array(bytes),
     disableFontFace: true,
     useSystemFonts: false,
     verbosity: 0,
