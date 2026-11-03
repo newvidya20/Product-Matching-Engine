@@ -74,7 +74,9 @@ export const DOCUMENT_TYPES = [
 ] as const;
 export type DocumentType = (typeof DOCUMENT_TYPES)[number];
 
-export const ACCEPTED_FILE_KINDS = ['pdf', 'xlsx', 'csv', 'png', 'jpeg', 'webp'] as const;
+export const ACCEPTED_FILE_KINDS = ['pdf', 'xlsx', 'csv', 'png', 'jpeg', 'webp', 'docx', 'txt'] as const;
+/** A ZIP is not stored: each file inside is validated and stored as its own document. */
+export const ZIP_UPLOAD_LIMITS = { maxEntries: 25, maxTotalUncompressedBytes: 60 * 1024 * 1024 } as const;
 export type AcceptedFileKind = (typeof ACCEPTED_FILE_KINDS)[number];
 
 export const FILE_KIND_MIME: Record<AcceptedFileKind, string> = {
@@ -84,6 +86,8 @@ export const FILE_KIND_MIME: Record<AcceptedFileKind, string> = {
   png: 'image/png',
   jpeg: 'image/jpeg',
   webp: 'image/webp',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  txt: 'text/plain',
 };
 
 export const FILE_KIND_EXTENSION: Record<AcceptedFileKind, string> = {
@@ -93,6 +97,8 @@ export const FILE_KIND_EXTENSION: Record<AcceptedFileKind, string> = {
   png: 'png',
   jpeg: 'jpg',
   webp: 'webp',
+  docx: 'docx',
+  txt: 'txt',
 };
 
 export type FieldValue = string | number;
@@ -516,6 +522,9 @@ export interface UploadDocumentRequest {
 
 export interface UploadDocumentResponse {
   document: StoredDocument;
+  /** A ZIP upload: every document stored from it, and the files inside it that could not be used. */
+  documents?: StoredDocument[];
+  skipped?: Array<{ fileName: string; reason: string }>;
   /** True when the same bytes are already in this session; `document` is the existing one. */
   duplicate: boolean;
 }

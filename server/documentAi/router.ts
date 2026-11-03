@@ -28,7 +28,7 @@ import type {
 } from '../../src/types/documentAi.ts';
 import { logActivity } from './activity.ts';
 import { authStatus, createAuthSession, getActor, logout, requireDocumentAuth, sendError } from './auth.ts';
-import { validateUpload } from './fileValidation.ts';
+import { isZipUpload, readZipEntries, validateUpload } from './fileValidation.ts';
 import { abortDocumentExtraction, JobInProgressError, startExtraction } from './jobs.ts';
 import { readSpreadsheetPreview } from './pipeline.ts';
 import {
@@ -217,6 +217,57 @@ export function createDocumentAiRouter(options: DocumentAiRouterOptions): expres
     if (bytes.byteLength === 0) return sendError(res, 400, 'invalid_request', 'The file is empty.');
     if (bytes.byteLength > DOCUMENT_AI_LIMITS.maxFileBytes) {
       return reject(413, 'file_too_large', 'This file is larger than the 12 MB limit.', bytes.byteLength);
+    }
+
+    if (isZipUpload(originalName, bytes)) {
+      const unpacked = await readZipEntries(bytes);
+      if (!unpacked.ok) return reject(415, 'unsupported_type', unpacked.message, bytes.byteLength);
+      const stored: Array<{ document: unknown; duplicate: boolean }> = [];
+      const skipped: Array<{ fileName: string; reason: string }> = [];
+      for (const entry of unpacked.entries) {
+        const entryName = sanitizeOriginalName(entry.name);
+        const entryValidation = await validateUpload(entryName, entry.bytes);
+        if (!entryValidation.ok) {
+          skipped.push({ fileName: entryName, reason: entryValidation.message });
+          continue;
+        }
+        const entryAdded = await addDocument({
+          sessionId,
+          actorEmail: actor.email,
+          originalName: entryName,
+          kind: entryValidation.kind,
+          mimeType: FILE_KIND_MIME[entryValidation.kind],
+          bytes: entry.bytes,
+        });
+        if (!entryAdded.ok) {
+          skipped.push({ fileName: entryName, reason: entryAdded.message });
+          continue;
+        }
+        if (entryAdded.sessionCreated) void logActivity({ type: 'session_created', actor: actor.email, sessionId });
+        if (!entryAdded.duplicate) {
+          void logActivity({
+            type: 'file_uploaded',
+            actor: actor.email,
+            sessionId,
+            documentId: entryAdded.document.documentId,
+            fileName: entryName,
+            code: entryValidation.kind,
+            counts: { bytes: entry.bytes.byteLength },
+          });
+        }
+        stored.push({ document: entryAdded.document, duplicate: entryAdded.duplicate });
+      }
+      skipped.push(...unpacked.skipped);
+      if (stored.length === 0) {
+        return reject(415, 'unsupported_type', 'No readable files were found in this ZIP.', bytes.byteLength);
+      }
+      res.status(201).json({
+        document: stored[0].document,
+        duplicate: stored.every((item) => item.duplicate),
+        documents: stored.map((item) => item.document),
+        skipped,
+      });
+      return;
     }
 
     const validation = await validateUpload(originalName, bytes);

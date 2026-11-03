@@ -42,7 +42,7 @@ import {
 } from './formModel';
 
 const SESSION_STORAGE_KEY = 'lb.docai.activeSession';
-const ACCEPTED_EXTENSIONS = ['pdf', 'xlsx', 'csv', 'png', 'jpg', 'jpeg', 'webp'];
+const ACCEPTED_EXTENSIONS = ['pdf', 'xlsx', 'csv', 'png', 'jpg', 'jpeg', 'webp', 'docx', 'txt', 'text', 'md', 'zip'];
 const COLLATERAL_DETAIL_IDS = ['collateralType', 'collateralValue', 'collateralDescription'];
 const POLL_GIVE_UP_MS = 70 * 60 * 1000;
 
@@ -781,9 +781,9 @@ export function useDocumentAiForm({
         let rejection: string | null = null;
         if (!ACCEPTED_EXTENSIONS.includes(extension)) {
           rejection =
-            extension === 'xls'
-              ? 'Old .xls files are not supported. Save a copy as .xlsx.'
-              : 'Use PDF, XLSX, CSV, PNG, JPG or WebP.';
+            extension === 'xls' || extension === 'doc'
+              ? 'Old .xls and .doc files cannot be read. Save a copy as .xlsx or .docx.'
+              : 'Use PDF, Word (.docx), Excel (.xlsx), CSV, TXT, PNG, JPG, WebP or a ZIP of these.';
         } else if (file.size > DOCUMENT_AI_LIMITS.maxFileBytes) {
           rejection = 'Larger than 12 MB.';
         } else if (file.size === 0) {
@@ -808,6 +808,15 @@ export function useDocumentAiForm({
           });
           if (!same()) return;
           sessionExistsRef.current = true;
+          if (response.skipped?.length) {
+            const skippedItems = response.skipped.map((item, index) => ({
+              key: `${key}-skipped-${index}`,
+              name: item.fileName,
+              status: 'error' as const,
+              message: item.reason,
+            }));
+            setUploads((items) => [...items, ...skippedItems]);
+          }
           if (response.duplicate) {
             setUploads((items) =>
               items.map((i) =>

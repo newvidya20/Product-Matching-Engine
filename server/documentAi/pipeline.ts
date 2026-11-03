@@ -34,7 +34,10 @@ import {
   wrapDocumentText,
 } from './prompt.ts';
 import { buildSpreadsheetPreview, parseSpreadsheet, readPdfSource, renderSpreadsheetText } from './spreadsheet.ts';
+import { readDocxLines, readPlainTextLines, renderPdfPagesToPng } from './textDocuments.ts';
 import type { DocumentSource } from './validators.ts';
+
+const asParts = (part: Part | Part[]): Part[] => (Array.isArray(part) ? part : [part]);
 
 /** Enough to tell a balance sheet from a bank statement, and much cheaper than the whole sheet. */
 const CLASSIFICATION_TEXT_CHARS = 20_000;
@@ -45,8 +48,9 @@ function isEncryptedPdf(bytes: Uint8Array): boolean {
 }
 
 interface PreparedDocument {
-  classificationPart: Part;
-  extractionPart: Part;
+  /** Usually one part; a rendered scan is one image part per page. */
+  classificationPart: Part | Part[];
+  extractionPart: Part | Part[];
   sheetNames: string[];
   /** What the server read itself, to check the model against. Held in memory only. */
   source: DocumentSource;
@@ -54,15 +58,10 @@ interface PreparedDocument {
   injectionInText: boolean;
 }
 
-/**
- * A digital PDF as the text the server read itself, page by page, so page citations still work.
- * A scan has no text layer, and free models cannot read the file, so it fails as unreadable.
- */
-async function preparePdfAsText(bytes: Uint8Array, signal: AbortSignal): Promise<PreparedDocument> {
-  const source = await readPdfSource(bytes, signal);
-  if (source.kind !== 'pdf') throw new ExtractionError('unreadable_document');
-  const pages = source.pages ?? [source.lines];
+/** Text the server read itself, page by page, as one prompt part. `source` is what values are checked against. */
+function prepareText(pages: ReadonlyArray<readonly string[]>, source: DocumentSource): PreparedDocument {
   const promptText = pages.map((lines, index) => `--- Page ${index + 1} ---\n${lines.join('\n')}`).join('\n\n');
+  if (!promptText.replace(/--- Page \d+ ---/g, '').trim()) throw new ExtractionError('unreadable_document');
   const delimiter = newDelimiter();
   return {
     classificationPart: { text: wrapDocumentText(promptText.slice(0, CLASSIFICATION_TEXT_CHARS), delimiter) },
@@ -73,8 +72,31 @@ async function preparePdfAsText(bytes: Uint8Array, signal: AbortSignal): Promise
   };
 }
 
+/**
+ * A digital PDF goes as the text the server read itself, so page citations still work. A scan has no
+ * text layer, so its pages are rendered to images for the vision model; values from it are never
+ * checked against server text (the documented scan limit).
+ */
+async function preparePdfAsText(bytes: Uint8Array, signal: AbortSignal): Promise<PreparedDocument> {
+  const source = await readPdfSource(bytes, signal);
+  if (source.kind === 'pdf') return prepareText(source.pages ?? [source.lines], source);
+  const images = await renderPdfPagesToPng(bytes, signal);
+  if (images.length === 0) throw new ExtractionError('unreadable_document');
+  const parts: Part[] = images.map((data) => ({ inlineData: { mimeType: 'image/png', data } }));
+  return { classificationPart: parts.slice(0, 2), extractionPart: parts, sheetNames: [], source, injectionInText: false };
+}
+
 async function prepareDocument(input: ExtractDocumentInput): Promise<PreparedDocument> {
   const { kind, bytes, signal } = input;
+  if (kind === 'docx' || kind === 'txt') {
+    let lines: string[];
+    try {
+      lines = kind === 'docx' ? await readDocxLines(bytes) : readPlainTextLines(bytes);
+    } catch {
+      throw new ExtractionError('unreadable_document');
+    }
+    return prepareText([lines], { kind: 'pdf', lines, pages: [lines] });
+  }
   if (kind === 'pdf' && activeLlmProvider() === 'openrouter' && openRouterSendsPdfAsText()) {
     return preparePdfAsText(bytes, signal);
   }
@@ -110,7 +132,7 @@ async function classify(
 ): Promise<{ documentType: DocumentType; confidence: number; suspicious: boolean }> {
   const response = await generateJson({
     systemInstruction: buildClassificationInstruction(),
-    parts: [prepared.classificationPart, { text: CLASSIFICATION_REQUEST }],
+    parts: [...asParts(prepared.classificationPart), { text: CLASSIFICATION_REQUEST }],
     responseSchema: CLASSIFICATION_SCHEMA,
     signal,
   });
@@ -156,7 +178,7 @@ async function runExtraction(input: ExtractDocumentInput): Promise<DocumentExtra
 
   const response = await generateJson({
     systemInstruction: buildExtractionInstruction(documentType),
-    parts: [prepared.extractionPart, { text: EXTRACTION_REQUEST }],
+    parts: [...asParts(prepared.extractionPart), { text: EXTRACTION_REQUEST }],
     responseSchema: EXTRACTION_SCHEMA,
     signal,
   });

@@ -150,12 +150,12 @@ export function DocumentUploadCard(props: Props) {
             choose files
           </button>
         </p>
-        <p className="mt-1 text-[11px] text-stone-500">PDF, XLSX, CSV, PNG, JPG or WebP · up to 12 MB each · 25 files</p>
+        <p className="mt-1 text-[11px] text-stone-500">PDF, Word, Excel, CSV, TXT, PNG, JPG, WebP or ZIP · up to 12 MB each · 25 files</p>
         <input
           ref={inputRef}
           type="file"
           multiple
-          accept=".pdf,.xlsx,.csv,.png,.jpg,.jpeg,.webp"
+          accept=".pdf,.xlsx,.csv,.png,.jpg,.jpeg,.webp,.docx,.txt,.md,.zip"
           onChange={(e) => takeFiles(e.target.files)}
           className="sr-only"
           aria-label="Choose documents to upload"
