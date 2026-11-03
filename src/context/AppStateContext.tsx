@@ -1001,7 +1001,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       const confirmed = await confirmIfSheetsConnected({
         title: 'Save AI-Extracted Draft Records to Google Sheets?',
         description:
-          'Gemini will extract product metadata and eligibility rules strictly from this PDF and save them as unverified DRAFT rows in Sub_Products, Eligibility_Rules, and Product_Documents. Rules will NOT become active until verified by an Admin.',
+          'The AI model will extract product metadata and eligibility rules strictly from this PDF and save them as unverified DRAFT rows in Sub_Products, Eligibility_Rules, and Product_Documents. Rules will NOT become active until verified by an Admin.',
         affectedTarget: `${fileName} -> Draft Rows in Google Sheets`,
         confirmLabel: 'Extract & Save Drafts',
       });

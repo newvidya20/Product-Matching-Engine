@@ -24,7 +24,7 @@ import { humanize } from './formModel';
 import type { UploadItem } from './useDocumentAiForm';
 
 const DATA_NOTE =
-  "Uploaded documents are sent to Google's Gemini API for processing and may contain personal and financial data, including PAN and bank details. Upload only documents you are authorised to process.";
+  "Uploaded documents are sent to the external AI service configured on this server (OpenRouter or Google Gemini) for processing and may contain personal and financial data, including PAN and bank details. Upload only documents you are authorised to process.";
 
 const ERROR_COPY: Record<ExtractionErrorCode, string> = {
   password_protected: 'This PDF is password protected. Upload an unlocked copy.',

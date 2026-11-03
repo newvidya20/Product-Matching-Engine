@@ -10,7 +10,7 @@ import {
 import { DocumentAccessGate } from './DocumentAccessGate';
 
 const DATA_NOTE =
-  "Uploaded documents are sent to Google's Gemini API for processing and may contain personal and financial data, including PAN and bank details. Upload only documents you are authorised to process.";
+  "Uploaded documents are sent to the external AI service configured on this server (OpenRouter or Google Gemini) for processing and may contain personal and financial data, including PAN and bank details. Upload only documents you are authorised to process.";
 
 interface Props {
   user?: { email?: string; displayName?: string } | null;
@@ -137,7 +137,7 @@ export function DocumentAiSettingsCard({ user }: Props) {
             <div className="flex items-start gap-2 rounded-lg bg-amber-50 border border-amber-200 p-3 text-xs text-amber-900">
               <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" aria-hidden="true" />
               <span>
-                No Gemini API key is configured on the server. Files can be uploaded but will not be read until an admin
+                No AI provider key (OPENROUTER_API_KEY or GEMINI_API_KEY) is configured on the server. Files can be uploaded but will not be read until an admin
                 sets it.
               </span>
             </div>

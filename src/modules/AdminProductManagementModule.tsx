@@ -1459,7 +1459,7 @@ export function AdminProductManagementModule() {
                   </h3>
                   <p className="text-xs text-stone-500 mt-0.5">
                     Click &ldquo;Extract Draft with AI&rdquo; to read the PDF from Google
-                    Drive via Gemini and populate draft specifications & candidate rules.
+                    Drive via the AI model and populate draft specifications & candidate rules.
                   </p>
                 </div>
               </div>

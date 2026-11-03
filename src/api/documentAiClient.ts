@@ -64,7 +64,8 @@ export function promptForAccessCode(): Promise<boolean> {
 const FRIENDLY_MESSAGES: Partial<Record<DocumentAiErrorCode | 'network', string>> = {
   unauthenticated: 'Enter the Document AI access code to continue.',
   forbidden: 'Only an admin can do that.',
-  auth_not_configured: 'Document AI is not configured on this server yet.',
+  auth_not_configured:
+    'Document AI is locked because no access code is set. An admin must add DOCUMENT_AI_ACCESS_CODE and DOCUMENT_AI_ADMIN_CODE in the server environment (Render > Environment).',
   too_many_attempts: 'Too many attempts. Try again in a few minutes.',
   disabled: 'Document AI is turned off in Settings.',
   file_too_large: 'That file is larger than 12 MB.',

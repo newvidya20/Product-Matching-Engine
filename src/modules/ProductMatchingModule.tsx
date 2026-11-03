@@ -273,7 +273,7 @@ export function ProductMatchingModule() {
                 Optional AI Advisory Explanation
               </h2>
               <p className="max-w-3xl text-xs text-stone-600 leading-relaxed">
-                On request, Gemini receives this borrower’s intake, the deterministic
+                On request, the AI model receives this borrower’s intake, the deterministic
                 match results, and short excerpts from the cited local PDFs to draft
                 an explanation. It cannot change the matching or eligibility result.
               </p>
