@@ -3,6 +3,12 @@ import { ArrowRight, ClipboardCheck, FilePlus2, Loader2, Play, RefreshCw, Save, 
 import { useAppState } from '../context/AppStateContext';
 import { PageHeader } from '../components/ui/Primitives';
 import { DocumentAccessGate } from '../components/documentAi/DocumentAccessGate';
+import { DocumentUploadCard } from '../components/documentAi/DocumentUploadCard';
+import { DocumentPreviewDrawer } from '../components/documentAi/DocumentPreviewDrawer';
+import { DeleteDocumentDialog } from '../components/documentAi/DeleteDocumentDialog';
+import { ReviewPanel } from '../components/documentAi/ReviewPanel';
+import { useDocumentAiForm } from '../components/documentAi/useDocumentAiForm';
+import { createBlankForm } from '../components/documentAi/formModel';
 import { EligibilityError, eligibilityClient } from '../api/eligibilityClient';
 import {
   ELIGIBILITY_INPUT_FIELDS,
@@ -22,6 +28,7 @@ import { EligibilityInputForm, PendingSummary } from '../components/eligibility/
 import { EligibilityResultsView, ResultComparison } from '../components/eligibility/EligibilityResultsView';
 import { EligibilityRulesPanel, UnconfirmedRulesBanner } from '../components/eligibility/EligibilityRulesPanel';
 import { EligibilityRecordsList } from '../components/eligibility/EligibilityRecordsList';
+import type { DeleteDocumentMode, StoredDocument } from '../types/documentAi';
 
 export interface EligibilityModuleProps {
   documentSessionId?: string;
@@ -77,6 +84,16 @@ export function EligibilityModule(props: EligibilityModuleProps = {}) {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [confirmFinal, setConfirmFinal] = useState(false);
+  const [previewDoc, setPreviewDoc] = useState<StoredDocument | null>(null);
+  const [deleteDoc, setDeleteDoc] = useState<StoredDocument | null>(null);
+
+  const defaultCurrency = state.settings.defaultCurrency;
+  const officerDefault = state.currentUser?.displayName || state.currentUser?.email || '';
+  const ai = useDocumentAiForm({
+    createBlank: () => createBlankForm(defaultCurrency, officerDefault),
+    editingAssessment: null,
+    defaultCurrency,
+  });
 
   const isFinal = record?.status === 'final';
 
@@ -216,6 +233,16 @@ export function EligibilityModule(props: EligibilityModuleProps = {}) {
       void doPrefill(assessmentProp ?? '', sessionProp ?? '');
     }
   }, [assessmentProp, sessionProp, doPrefill]);
+
+  useEffect(() => {
+    if (!ai.sessionId || !ai.documents.length || sessionId.trim()) return;
+    setSessionId(ai.sessionId);
+    void doPrefill(assessmentId, ai.sessionId);
+  }, [ai.documents.length, ai.sessionId, assessmentId, doPrefill, sessionId]);
+
+  const handleDeleteDocument = async (documentId: string, mode: DeleteDocumentMode) => {
+    await ai.removeDocument(documentId, mode);
+  };
 
   const runCheck = () =>
     run('evaluate', async () => {
@@ -393,6 +420,49 @@ export function EligibilityModule(props: EligibilityModuleProps = {}) {
           {notice}
         </div>
       )}
+
+      <div className="bg-white border border-stone-200 rounded-xl divide-y divide-stone-200">
+        <DocumentUploadCard
+          documents={ai.documents}
+          uploads={ai.uploads}
+          job={ai.job}
+          pollTimedOut={ai.pollTimedOut}
+          notice={ai.notice}
+          loading={ai.loadingSession}
+          onFiles={ai.uploadFiles}
+          onDismissUpload={ai.dismissUpload}
+          onPreview={setPreviewDoc}
+          onDelete={setDeleteDoc}
+          onRetry={(id) => void ai.retryDocument(id)}
+          onRetryFailed={() => void ai.retryFailed()}
+          onChangeType={() => undefined}
+          onRefresh={() => void ai.refresh()}
+        />
+        {ai.documents.length > 0 && (
+          <div className="p-4 sm:p-6">
+            <ReviewPanel
+              form={ai.form}
+              fields={ai.docState?.fields ?? {}}
+              warnings={ai.docState?.warnings ?? []}
+              edited={ai.edited}
+              applied={ai.applied}
+              isDismissed={ai.fieldContext.isDismissed}
+              acceptCandidate={ai.acceptCandidate}
+              dismiss={ai.dismiss}
+              hasDocuments
+              busy={ai.isBusy}
+            />
+          </div>
+        )}
+      </div>
+
+      <DocumentPreviewDrawer sessionId={ai.sessionId} document={previewDoc} onClose={() => setPreviewDoc(null)} />
+      <DeleteDocumentDialog
+        document={deleteDoc}
+        allowClearFields
+        onCancel={() => setDeleteDoc(null)}
+        onConfirm={handleDeleteDocument}
+      />
       {isFinal && (
         <div className="px-4 py-3 bg-stone-100 border border-stone-300 rounded-xl text-xs text-stone-800">
           This record is final, so the inputs cannot be edited. You can reassess it with the current rules, or start a

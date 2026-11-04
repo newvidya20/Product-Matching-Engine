@@ -25,10 +25,8 @@ import {
 import { DocAiFieldContext, FieldShell } from '../components/documentAi/FieldShell';
 import { useDocumentAiForm } from '../components/documentAi/useDocumentAiForm';
 import { DocumentAccessGate } from '../components/documentAi/DocumentAccessGate';
-import { DocumentUploadCard } from '../components/documentAi/DocumentUploadCard';
 import { DocumentPreviewDrawer } from '../components/documentAi/DocumentPreviewDrawer';
 import { DeleteDocumentDialog } from '../components/documentAi/DeleteDocumentDialog';
-import { ReviewPanel } from '../components/documentAi/ReviewPanel';
 import { prefillToForm } from '../components/eligibility/prefillToForm';
 import { eligibilityClient } from '../api/eligibilityClient';
 import type { NewAssessmentPrefill } from '../types/eligibility';
@@ -500,42 +498,6 @@ function AssessmentForm({
             {validationError}
           </div>
         )}
-
-        {/* Document AI: upload, file list, review */}
-        <div className="bg-white border border-stone-200 rounded-xl divide-y divide-stone-200">
-          <DocumentUploadCard
-            documents={ai.documents}
-            uploads={ai.uploads}
-            job={ai.job}
-            pollTimedOut={ai.pollTimedOut}
-            notice={ai.notice}
-            loading={ai.loadingSession}
-            onFiles={ai.uploadFiles}
-            onDismissUpload={ai.dismissUpload}
-            onPreview={setPreviewDoc}
-            onDelete={setDeleteDoc}
-            onRetry={(id) => void ai.retryDocument(id)}
-            onRetryFailed={() => void ai.retryFailed()}
-            onChangeType={(id, type) => void ai.changeDocumentType(id, type)}
-            onRefresh={() => void ai.refresh()}
-          />
-          {ai.documents.length > 0 && (
-            <div className="p-4 sm:p-6">
-              <ReviewPanel
-                form={form}
-                fields={ai.docState?.fields ?? {}}
-                warnings={ai.docState?.warnings ?? []}
-                edited={ai.edited}
-                applied={ai.applied}
-                isDismissed={ai.fieldContext.isDismissed}
-                acceptCandidate={ai.acceptCandidate}
-                dismiss={ai.dismiss}
-                hasDocuments
-                busy={ai.isBusy}
-              />
-            </div>
-          )}
-        </div>
 
         <DocumentPreviewDrawer sessionId={ai.sessionId} document={previewDoc} onClose={() => setPreviewDoc(null)} />
         <DeleteDocumentDialog
