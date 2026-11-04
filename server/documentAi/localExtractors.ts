@@ -17,6 +17,7 @@ import { getFieldDefinition } from '../../src/documentAi/fieldMap.ts';
 import type { DocumentType } from '../../src/types/documentAi.ts';
 import type { RawBankMonth, RawField } from './prompt.ts';
 import type { ParsedSheet } from './spreadsheet.ts';
+import { readGstr3b, type RawGstReturnPeriod } from './gstr3b.ts';
 import { normalizeFinancialYear, normalizePeriod, parseDate, type AmountUnit } from './validators.ts';
 
 /** Text read from a text layer: at or above the default auto-apply threshold, so it can apply when every check passes. */
@@ -42,6 +43,49 @@ export interface LocalExtractionInput {
 export interface LocalExtraction {
   fields: RawField[];
   bankMonthlyTotals: RawBankMonth[];
+  /** GSTR-3B Table 3.1 periods (gstr3b.ts). Absent or empty when the file is not a GSTR-3B read for certain. */
+  gstReturnPeriods?: RawGstReturnPeriod[];
+  /**
+   * A fixed-layout form recognised by its printed title, whose layout is known to state no more key
+   * fields than were read here (an ITR-V prints no turnover or profit), so the model is not asked.
+   */
+  recognisedForm?: 'gstr3b' | 'itr_acknowledgement';
+}
+
+// ------------------------------------------------------------------ ITR-V (acknowledgement)
+
+const ITR_ACK_TITLE = /^indian\s+income\s+tax\s+return\s+acknowledgement\b/i;
+const ITR_ACK_NAME = /^name\s+(?![:\-])(.+)$/i;
+
+/**
+ * The e-filing ITR-V: `INDIAN INCOME TAX RETURN ACKNOWLEDGEMENT`, then `PAN <pan>` and, on the next
+ * line, `Name <name>`. Its figures are taxable income and tax, not turnover or profit, so nothing
+ * else is taken. Status (Individual, company) is not read as the entity type: a proprietor files as
+ * an individual, so it would misstate a proprietorship.
+ */
+function readItrAcknowledgement(pages: ReadonlyArray<readonly string[]>, confidence: number): RawField[] | null {
+  const lines = pages.flatMap((page, index) => page.map((text) => ({ text: clean(text), page: index + 1 })));
+  if (!lines.slice(0, 15).some((line) => ITR_ACK_TITLE.test(line.text))) return null;
+  const panIndex = lines.findIndex((line) => /^PAN\s+[A-Z]{5}\d{4}[A-Z]$/.test(line.text));
+  const nameLine = panIndex >= 0 ? lines[panIndex + 1] : undefined;
+  const name = nameLine?.text.match(ITR_ACK_NAME)?.[1]?.trim();
+  if (!nameLine || !name || name.length < 3 || name.length > 120 || !/[A-Za-z]{2}/.test(name) || /\d/.test(name)) return [];
+  return [
+    {
+      fieldId: 'applicantLabel',
+      rawValue: name,
+      enumValue: null,
+      page: nameLine.page,
+      sheetName: null,
+      cellRef: null,
+      snippet: snip(nameLine.text),
+      confidence,
+      statedUnit: null,
+      unitText: null,
+      period: null,
+      subjectRef: null,
+    },
+  ];
 }
 
 const SNIPPET_MAX = 300;
@@ -823,15 +867,33 @@ export function extractLocally(input: LocalExtractionInput): LocalExtraction {
       ? extractFromText(documentType, content.pages, confidence, complete)
       : extractFromSheets(documentType, content.fileKind, content.sheets, confidence);
 
+  // A GSTR-3B is read by its own fixed layout: its legal name and its Table 3.1 period.
+  const gstr3b =
+    documentType === 'gst_return' && content.kind === 'text' ? readGstr3b(content.pages, confidence) : null;
+  const generic = emitted.map((e) => e.raw);
+  const itrAck =
+    documentType === 'itr' && content.kind === 'text' ? readItrAcknowledgement(content.pages, confidence) : null;
+  const own = [...(gstr3b?.fields ?? []), ...(itrAck ?? [])].filter(
+    (field) => !generic.some((g) => g.fieldId === field.fieldId && g.rawValue === field.rawValue)
+  );
   const seen = new Set<string>();
-  const fields = emitted.filter((e) => !seen.has(e.key) && seen.add(e.key)).map((e) => e.raw);
+  const fields = [
+    ...emitted.filter((e) => !seen.has(e.key) && seen.add(e.key)).map((e) => e.raw),
+    ...own.filter((field) => fieldAllowed(field.fieldId, documentType)),
+  ];
   const bankMonthlyTotals =
     documentType !== 'bank_statement'
       ? []
       : content.kind === 'text'
         ? bankMonthsFromText(content.pages, confidence)
         : bankMonthsFromSheets(content.fileKind, content.sheets, confidence);
-  return { fields, bankMonthlyTotals };
+  const recognisedForm = gstr3b?.period ? 'gstr3b' : itrAck ? 'itr_acknowledgement' : undefined;
+  return {
+    fields,
+    bankMonthlyTotals,
+    gstReturnPeriods: gstr3b?.period ? [gstr3b.period] : [],
+    ...(recognisedForm ? { recognisedForm } : {}),
+  };
 }
 
 /** Field IDs the local pass found a value for. */

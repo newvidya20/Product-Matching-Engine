@@ -20,6 +20,7 @@ import type {
   FieldReasonCode,
   FieldResult,
   FieldValue,
+  GstReturnPeriodTotal,
   MergeSessionInput,
   MergeSessionOutput,
   SessionWarning,
@@ -27,6 +28,7 @@ import type {
 } from '../../src/types/documentAi.ts';
 import { deriveCandidates } from './derive.ts';
 import type { RawBankMonth, RawField, RawLocation } from './prompt.ts';
+import { periodMonths, type RawGstReturnPeriod } from './gstr3b.ts';
 import {
   applySignPolicy,
   createSourceVerifier,
@@ -551,6 +553,65 @@ export function buildBankMonthlyTotals(rows: RawBankMonth[], ctx: DocumentContex
     });
   }
   return totals;
+}
+
+/**
+ * GSTR-3B Table 3.1 periods. Each figure is parsed as printed (no unit: the return prints rupees,
+ * `Amount in ₹`), must be non-negative, and must be in the text the server read, on its own line.
+ * A period with any figure that fails, a Year that is not a FY, a Period that is not one month or
+ * one FY quarter, or a month that has not begun, is dropped whole: nothing partial is kept.
+ */
+export function buildGstReturnPeriods(rows: RawGstReturnPeriod[], ctx: DocumentContext): GstReturnPeriodTotal[] {
+  if (ctx.documentType !== 'gst_return' || ctx.source.kind === 'unreadable') return [];
+  const verify = createSourceVerifier(ctx.source);
+  const out: GstReturnPeriodTotal[] = [];
+  for (const row of rows) {
+    const confidence = roundConfidence(row.confidence);
+    if (!(confidence >= DOCUMENT_AI_THRESHOLDS.discardBelow) || confidence > 1) continue;
+    const fy = normalizeFinancialYear(`FY ${row.yearText}`);
+    if (!fy.ok) continue;
+    const startYear = Number(fy.value.slice(3, 7));
+    const months = periodMonths(row.periodText, startYear);
+    if (!months || months.some((month) => `${month}-01` > ctx.today)) continue;
+    const figure = (raw: string, line: string): number | null => {
+      const parsed = parseIndianAmount(raw, { statedUnit: null, documentType: 'gst_return' });
+      if (!parsed.ok || parsed.inlineUnit !== null || parsed.value < 0) return null;
+      const finding = verify({
+        valueType: 'number',
+        rawValue: raw,
+        value: parsed.value,
+        snippet: line,
+        unitText: null,
+        page: row.page,
+        sheetName: null,
+        cellRef: null,
+        inlineUnit: null,
+        creditMarker: false,
+        evidence: [],
+        wantRowLabel: false,
+      });
+      return finding.check === 'failed' ? null : parsed.value;
+    };
+    const outwardTaxable = figure(row.outwardTaxable, row.lines.outwardTaxable);
+    const zeroRated = figure(row.zeroRated, row.lines.zeroRated);
+    const nilExempt = figure(row.nilExempt, row.lines.nilExempt);
+    if (outwardTaxable === null || zeroRated === null || nilExempt === null) continue;
+    const nonGst = row.nonGst !== null && row.lines.nonGst !== null ? figure(row.nonGst, row.lines.nonGst) : null;
+    const gstin = row.gstin ? validateGstin(row.gstin) : null;
+    out.push({
+      form: 'GSTR-3B',
+      financialYear: fy.value,
+      months,
+      outwardTaxable,
+      zeroRated,
+      nilExempt,
+      nonGst,
+      gstin: gstin?.ok ? gstin.value : null,
+      confidence,
+      source: buildSource({ page: row.page, sheetName: null, cellRef: null, snippet: row.snippet }, ctx),
+    });
+  }
+  return out;
 }
 
 // ------------------------------------------------------------------- Identity check

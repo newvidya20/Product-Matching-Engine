@@ -741,7 +741,7 @@ describe('source text check (contract 4.2, 12)', () => {
     const stuck = engine(new Promise<never>(() => undefined), () => destroyed.push(true));
     const source = await readPdfSource(new Uint8Array(4), signal, { loadEngine: async () => stuck, timeoutMs: 5 });
     assert.deepEqual(source, { kind: 'unreadable', reason: 'pdf_read_timeout' });
-    assert.deepEqual(destroyed, [true]);
+    assert.deepEqual(destroyed, [true, true], 'the timed-out read is retried once, and each task destroyed');
   });
 
   it('keeps bank months from a file it could not read, and shows why on the average', () => {

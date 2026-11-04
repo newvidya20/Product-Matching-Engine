@@ -30,7 +30,7 @@ import type { Part } from '@google/genai';
 import { ExtractionError, activeModelName, generateJson, isLlmConfigured } from './gemini.ts';
 import { openRouterSendsPdfAsText } from '../llm/openrouter.ts';
 import { activeLlmProvider } from '../llm/provider.ts';
-import { buildBankMonthlyTotals, buildCandidates, mergeSession } from './merge.ts';
+import { buildBankMonthlyTotals, buildCandidates, buildGstReturnPeriods, mergeSession } from './merge.ts';
 import {
   buildClassificationInstruction,
   buildExtractionInstruction,
@@ -110,19 +110,52 @@ export function isEncryptedPdf(bytes: Uint8Array): boolean {
 
 let llmPausedUntil = 0;
 
+/**
+ * Per-job circuit breaker. Once a model call in a job has timed out, been rate limited past its
+ * retries, or hit the daily quota, the model is not asked again for that job for
+ * JOB_MODEL_PAUSE_MS. The job's other files then finish with what the server read itself, or fail
+ * at once with the code that tripped the breaker, so a job of many files never crawls for hours
+ * behind a slow free model.
+ */
+export const JOB_MODEL_PAUSE_MS = 10 * 60 * 1000;
+const BREAKER_CODES: ReadonlySet<ExtractionErrorCode> = new Set(['llm_timeout', 'llm_rate_limited', 'llm_quota_exhausted']);
+const jobBreakers = new Map<string, { until: number; code: ExtractionErrorCode }>();
+
+/** Trips the breaker for `jobId` when `code` is a timeout, rate limit or quota failure. jobs.ts calls it too. */
+export function noteJobModelFailure(jobId: string | undefined, code: ExtractionErrorCode, now = Date.now()): void {
+  if (!jobId || !BREAKER_CODES.has(code)) return;
+  for (const [key, entry] of jobBreakers) if (entry.until <= now) jobBreakers.delete(key);
+  jobBreakers.set(jobId, { until: now + JOB_MODEL_PAUSE_MS, code });
+}
+
+/** The code that tripped this job's breaker, while it is open. */
+export function jobModelPaused(jobId: string | undefined, now = Date.now()): ExtractionErrorCode | null {
+  if (!jobId) return null;
+  const entry = jobBreakers.get(jobId);
+  if (!entry) return null;
+  if (entry.until <= now) {
+    jobBreakers.delete(jobId);
+    return null;
+  }
+  return entry.code;
+}
+
 /** A configured model that has not reported its daily allowance used up, and fallback not switched off. */
-function llmUsable(): boolean {
+function llmUsable(jobId?: string): boolean {
   if (process.env.DOCUMENT_AI_LLM_FALLBACK?.trim().toLowerCase() === 'off') return false;
-  return isLlmConfigured() && Date.now() >= llmPausedUntil;
+  return isLlmConfigured() && Date.now() >= llmPausedUntil && jobModelPaused(jobId) === null;
 }
 
 /** Why a file the server could not read itself got no model either. */
-function modelUnavailableCode(): ExtractionErrorCode {
-  return isLlmConfigured() && Date.now() < llmPausedUntil ? 'llm_quota_exhausted' : 'unreadable_document';
+function modelUnavailableCode(jobId?: string): ExtractionErrorCode {
+  if (!isLlmConfigured()) return 'unreadable_document';
+  if (Date.now() < llmPausedUntil) return 'llm_quota_exhausted';
+  return jobModelPaused(jobId) ?? 'unreadable_document';
 }
 
-function noteLlmFailure(code: ExtractionErrorCode): void {
+function noteLlmFailure(code: ExtractionErrorCode, jobId?: string): void {
   if (code === 'llm_quota_exhausted') llmPausedUntil = Date.now() + LLM_QUOTA_PAUSE_MS;
+  noteJobModelFailure(jobId, code);
 }
 
 // ------------------------------------------------------------------ Reading the file
@@ -237,9 +270,13 @@ function forModelOnly(
  * rendered and read by local OCR, and OCR text is then the text values are checked against. A PDF
  * the parser rejected stays `unreadable` for the check (it fails closed), even when OCR reads it.
  */
-async function preparePdf(bytes: Uint8Array, signal: AbortSignal): Promise<PreparedDocument> {
+async function preparePdf(bytes: Uint8Array, signal: AbortSignal, jobId?: string): Promise<PreparedDocument> {
   const { source, totalPages, pagesRead } = await readPdfText(bytes, signal);
   const filePart = (): Part => ({ inlineData: { mimeType: FILE_KIND_MIME.pdf, data: toBase64(bytes) } });
+  // A read that ran out of time (twice) says nothing about the file being a scan: it is a busy
+  // server. It fails as unreadable, which the user can retry, and is never sent to the model or OCR
+  // as if it had no text.
+  if (source.kind === 'unreadable' && source.reason === 'pdf_read_timeout') throw new ExtractionError('unreadable_document');
   if (source.kind === 'pdf') {
     const prepared = { ...prepareText(source.pages ?? [source.lines], source), partial: pagesRead < totalPages };
     return modelTakesText() ? prepared : { ...prepared, classificationPart: filePart, extractionPart: filePart };
@@ -249,7 +286,7 @@ async function preparePdf(bytes: Uint8Array, signal: AbortSignal): Promise<Prepa
   // OCR_RENDER_PAGES; a vision model (text-only provider otherwise blind to a scan) reads up to
   // MAX_RENDERED_PDF_PAGES, and only those extra pages are rendered, only when it is asked.
   const ocrOn = isOcrAvailable();
-  const visionFallback = () => modelTakesText() && llmUsable();
+  const visionFallback = () => modelTakesText() && llmUsable(jobId);
   if (!ocrOn && !visionFallback()) return forModelOnly(filePart, filePart, source);
 
   const wanted = ocrOn ? OCR_RENDER_PAGES : MAX_RENDERED_PDF_PAGES;
@@ -298,7 +335,7 @@ async function prepareDocument(input: ExtractDocumentInput): Promise<PreparedDoc
     }
     return prepareText([lines], { kind: 'pdf', lines, pages: [lines] });
   }
-  if (kind === 'pdf') return preparePdf(bytes, signal);
+  if (kind === 'pdf') return preparePdf(bytes, signal, input.jobId);
   if (kind === 'png' || kind === 'jpeg' || kind === 'webp') return prepareImage(input);
 
   let text;
@@ -335,11 +372,18 @@ export function modelCallBudgetMs(fileRemainingMs: number | undefined): number {
 }
 
 /** Runs a model call. Returns its value, or the failure code; rejects only when the file's signal aborts. */
-async function tryModel<T>(signal: AbortSignal, run: (callSignal: AbortSignal) => Promise<T>): Promise<
+async function tryModel<T>(
+  signal: AbortSignal,
+  run: (callSignal: AbortSignal) => Promise<T>,
+  jobId?: string
+): Promise<
   { ok: true; value: T } | { ok: false; code: ExtractionErrorCode }
 > {
   const budgetMs = modelCallBudgetMs(currentExtractionObserver()?.remainingMs?.());
-  if (budgetMs < MIN_MODEL_CALL_MS) return { ok: false, code: 'llm_timeout' };
+  if (budgetMs < MIN_MODEL_CALL_MS) {
+    noteJobModelFailure(jobId, 'llm_timeout');
+    return { ok: false, code: 'llm_timeout' };
+  }
   try {
     // jobs.ts tells a model timeout apart from a reading (OCR or render) timeout by this phase.
     const callSignal = AbortSignal.any([signal, AbortSignal.timeout(budgetMs)]);
@@ -348,7 +392,7 @@ async function tryModel<T>(signal: AbortSignal, run: (callSignal: AbortSignal) =
     if (signal.aborted) throw abortError();
     const code: ExtractionErrorCode =
       error instanceof ExtractionError ? error.code : error instanceof DOMException ? 'llm_timeout' : 'llm_failed';
-    noteLlmFailure(code);
+    noteLlmFailure(code, jobId);
     return { ok: false, code };
   }
 }
@@ -408,8 +452,23 @@ const KEY_FIELDS: Partial<Record<DocumentType, ReadonlyArray<readonly string[]>>
   bank_statement: [],
 };
 
-function keyFieldsMissing(documentType: DocumentType, local: LocalExtraction): boolean {
+/**
+ * True when the model should be asked because a key field was not read locally. A GSTR-3B states no
+ * annual turnover by design: its Table 3.1 period, once read and checked, is all it can give, so a
+ * GSTR-3B read that way never calls the model (`gstPeriodsRead`).
+ */
+export function keyFieldsMissing(documentType: DocumentType, local: LocalExtraction, gstPeriodsRead = 0): boolean {
   if (documentType === 'bank_statement') return local.bankMonthlyTotals.length === 0;
+  if (documentType === 'gst_return' && gstPeriodsRead > 0) return false;
+  // An ITR-V prints PAN and name, and no turnover or profit: once its PAN is read there is nothing
+  // more the model could honestly add.
+  if (
+    documentType === 'itr' &&
+    local.recognisedForm === 'itr_acknowledgement' &&
+    local.fields.some((field) => field.fieldId === 'identity.pan')
+  ) {
+    return false;
+  }
   const groups = KEY_FIELDS[documentType];
   const found = new Set(local.fields.map((field) => field.fieldId));
   if (!groups) return found.size === 0;
@@ -419,17 +478,19 @@ function keyFieldsMissing(documentType: DocumentType, local: LocalExtraction): b
 // ------------------------------------------------------------------ One file
 
 async function runExtraction(input: ExtractDocumentInput): Promise<DocumentExtractionResult> {
-  const { documentId, fileName, kind, bytes, declaredDocumentType, today, signal } = input;
+  const { documentId, fileName, kind, bytes, declaredDocumentType, today, signal, jobId } = input;
 
   if (kind === 'pdf' && isEncryptedPdf(bytes)) {
     return { ok: false, documentId, errorCode: 'password_protected' };
   }
 
   const prepared = await prepareDocument(input);
-  if (!prepared.content && !llmUsable()) {
+  if (!prepared.content && !llmUsable(jobId)) {
     // Nothing the server could read, and no model to look at it.
-    return { ok: false, documentId, errorCode: modelUnavailableCode() };
+    return { ok: false, documentId, errorCode: modelUnavailableCode(jobId) };
   }
+  // Set when the model would have been asked but this job's breaker is open.
+  let breakerSkipped = false;
 
   // Classification: the declared type, then the file's own title, then the model, else `other`.
   let usedModel = false;
@@ -443,29 +504,45 @@ async function runExtraction(input: ExtractDocumentInput): Promise<DocumentExtra
   } else if (localType) {
     documentType = localType;
     classificationConfidence = 0.9;
-  } else if (llmUsable()) {
-    const classified = await tryModel(signal, (s) => classifyWithModel(prepared, s));
+  } else if (llmUsable(jobId)) {
+    const classified = await tryModel(signal, (s) => classifyWithModel(prepared, s), jobId);
     if (classified.ok) {
       usedModel = true;
       ({ documentType, confidence: classificationConfidence, suspicious } = classified.value);
     } else if (!prepared.content || !['llm_quota_exhausted', 'llm_not_configured'].includes(classified.code)) {
       return { ok: false, documentId, errorCode: classified.code };
     }
+  } else if (jobModelPaused(jobId)) {
+    breakerSkipped = true;
   }
 
   // Local extraction first.
   const local: LocalExtraction = prepared.content
     ? extractLocally({ documentType, content: prepared.content, fromOcr: prepared.fromOcr, complete: !prepared.partial })
     : { fields: [], bankMonthlyTotals: [] };
-  const localFound = local.fields.length > 0 || local.bankMonthlyTotals.length > 0;
+  const context = {
+    documentId,
+    fileName,
+    documentType,
+    kind,
+    sheetNames: prepared.sheetNames,
+    source: prepared.source,
+    injectionSuspected: false,
+    today,
+  };
+  // Checked now, so a GSTR-3B whose period was read and verified never calls the model.
+  const gstReturnPeriods = buildGstReturnPeriods(local.gstReturnPeriods ?? [], context);
+  const localFound = local.fields.length > 0 || local.bankMonthlyTotals.length > 0 || gstReturnPeriods.length > 0;
 
   // The model, only for what is still missing.
   let modelFields: RawField[] = [];
   let modelMonths: RawBankMonth[] = [];
   let modelSuspicious = false;
-  const wantsModel = fieldsToRequest(documentType).length > 0 && keyFieldsMissing(documentType, local);
-  if (wantsModel && llmUsable()) {
-    const extracted = await tryModel(signal, (s) => extractWithModel(prepared, documentType, s));
+  const wantsModel =
+    fieldsToRequest(documentType).length > 0 && keyFieldsMissing(documentType, local, gstReturnPeriods.length);
+  if (wantsModel && !llmUsable(jobId) && jobModelPaused(jobId)) breakerSkipped = true;
+  if (wantsModel && llmUsable(jobId)) {
+    const extracted = await tryModel(signal, (s) => extractWithModel(prepared, documentType, s), jobId);
     if (extracted.ok) {
       usedModel = true;
       const { value } = extracted;
@@ -483,7 +560,11 @@ async function runExtraction(input: ExtractDocumentInput): Promise<DocumentExtra
       return { ok: false, documentId, errorCode: extracted.code };
     }
   } else if (!prepared.content && !usedModel) {
-    return { ok: false, documentId, errorCode: modelUnavailableCode() };
+    return { ok: false, documentId, errorCode: modelUnavailableCode(jobId) };
+  }
+  // The breaker kept the model away and the server read nothing itself: fail fast with its code.
+  if (breakerSkipped && !usedModel && !localFound) {
+    return { ok: false, documentId, errorCode: jobModelPaused(jobId) ?? 'llm_timeout' };
   }
 
   const injectionSuspected =
@@ -492,20 +573,11 @@ async function runExtraction(input: ExtractDocumentInput): Promise<DocumentExtra
     modelSuspicious ||
     modelFields.some((field) => containsInjectionPhrases(field.snippet));
 
-  const context = {
-    documentId,
-    fileName,
-    documentType,
-    kind,
-    sheetNames: prepared.sheetNames,
-    source: prepared.source,
-    injectionSuspected,
-    today,
-  };
+  const checkContext = { ...context, injectionSuspected };
   // Text read by OCR: every value, local or the model's, goes to review (see OCR_CONFIDENCE_CAP).
   const capped = <T extends { confidence: number }>(rows: T[]): T[] =>
     prepared.fromOcr ? rows.map((row) => ({ ...row, confidence: Math.min(row.confidence, OCR_CONFIDENCE_CAP) })) : rows;
-  const { fields, droppedLowConfidence } = buildCandidates(capped([...local.fields, ...modelFields]), context);
+  const { fields, droppedLowConfidence } = buildCandidates(capped([...local.fields, ...modelFields]), checkContext);
 
   return {
     ok: true,
@@ -513,7 +585,8 @@ async function runExtraction(input: ExtractDocumentInput): Promise<DocumentExtra
     documentType,
     classificationConfidence,
     fields,
-    bankMonthlyTotals: buildBankMonthlyTotals(capped([...local.bankMonthlyTotals, ...modelMonths]), context),
+    bankMonthlyTotals: buildBankMonthlyTotals(capped([...local.bankMonthlyTotals, ...modelMonths]), checkContext),
+    ...(gstReturnPeriods.length > 0 ? { gstReturnPeriods: capped(gstReturnPeriods) } : {}),
     injectionSuspected,
     droppedLowConfidence,
     // The audit name also records a partial read, so a reviewer can tell why a field may be missing.

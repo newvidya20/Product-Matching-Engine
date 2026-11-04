@@ -33,10 +33,11 @@ const ERROR_COPY: Record<ExtractionErrorCode, string> = {
   llm_rate_limited: 'The AI service is busy. Retry in a minute.',
   llm_quota_exhausted:
     "The AI service's daily free limit is used up. Click Retry tomorrow, or use a paid OpenRouter key or Gemini.",
-  llm_timeout: 'Reading took too long. Retry, or split the file.',
+  llm_timeout: 'The AI step timed out. Values read locally were kept, if any. Retry for the rest.',
   llm_invalid_response: 'The AI returned something unusable. Retry.',
   llm_failed: 'The AI service failed. Retry.',
   interrupted: 'Reading was interrupted. Retry.',
+  server_busy: 'The server was busy. Retry.',
   file_missing: 'The stored file is no longer available.',
 };
 

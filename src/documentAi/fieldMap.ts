@@ -683,7 +683,25 @@ export const FIELD_DEFINITIONS: readonly FieldDefinition[] = [
     periodScoped: false,
   }),
   money('ccOdUtilisation', 'CC / OD Utilisation', ['bank_statement'], { hasVisibleInput: false }),
-  money('gstAnnualTurnover', 'GST Annual Turnover', ['gst_return'], ANNUAL),
+  // A GSTR-9 or similar states it directly. With none, it is the sum of GSTR-3B Table 3.1
+  // (a)+(b)+(c) over returns covering all 12 months of one FY: always reviewed, never auto-applied.
+  money('gstAnnualTurnover', 'GST Annual Turnover', ['gst_return'], {
+    ...ANNUAL,
+    derivation: 'annual_from_gst_monthly_returns',
+  }),
+  field({
+    fieldId: 'gst.monthlyOutwardSupplies',
+    section: '04',
+    label: 'GSTR-3B months read: outward supplies, Table 3.1 (a)+(b)+(c), excluding (d) reverse charge and (e) non-GST (review only)',
+    valueType: 'string',
+    target: { kind: 'review_only', key: 'gstMonthlyOutwardSupplies' },
+    sourceDocumentTypes: ['gst_return'],
+    extractionMode: 'derived',
+    derivation: 'gst_monthly_returns_summary',
+    periodScoped: true,
+    hasVisibleInput: false,
+    defaultValue: null,
+  }),
   field({
     fieldId: 'financialProfile.gstComplianceStatus',
     section: '04',

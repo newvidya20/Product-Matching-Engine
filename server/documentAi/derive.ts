@@ -10,6 +10,7 @@ import type {
   DocumentExtractionSuccess,
   ExtractedField,
   FieldValue,
+  GstReturnPeriodTotal,
   SourceCheck,
   SourceRef,
 } from '../../src/types/documentAi.ts';
@@ -204,6 +205,165 @@ function deriveBankAverage(
   return derived;
 }
 
+// ------------------------------------------------------------------ GSTR-3B months
+
+const GST_ANNUAL = 'financialProfile.gstAnnualTurnover';
+const GST_SUMMARY = 'gst.monthlyOutwardSupplies';
+const SHORT_MONTH = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const LONG_MONTH = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+];
+const SUMMARY_MAX = 500;
+const SNIPPET_MAX = 300;
+
+/** Rupees to whole paise, so sums are exact. */
+const toPaise = (rupees: number) => Math.round(rupees * 100);
+
+/** The counted turnover of one return: Table 3.1 (a) + (b) + (c), in paise. (d) and (e) are never counted. */
+function returnTurnoverPaise(period: GstReturnPeriodTotal): number {
+  return toPaise(period.outwardTaxable) + toPaise(period.zeroRated) + toPaise(period.nilExempt);
+}
+
+/** 12345678 paise as `1,23,456.78`, Indian grouping. */
+export function formatInrPaise(paise: number): string {
+  const whole = Math.abs(paise);
+  const digits = String(Math.floor(whole / 100));
+  const last3 = digits.slice(-3);
+  const head = digits.slice(0, -3).replace(/\B(?=(\d{2})+(?!\d))/g, ',');
+  return `${paise < 0 ? '-' : ''}${head ? `${head},${last3}` : last3}.${String(whole % 100).padStart(2, '0')}`;
+}
+
+const monthIndex = (month: string) => Number(month.slice(5, 7)) - 1;
+const shortMonth = (month: string) => `${SHORT_MONTH[monthIndex(month)]} ${month.slice(0, 4)}`;
+const longMonth = (month: string) => `${LONG_MONTH[monthIndex(month)]} ${month.slice(0, 4)}`;
+const periodLabel = (months: string[]) =>
+  months.length === 1 ? shortMonth(months[0]) : `${SHORT_MONTH[monthIndex(months[0])]}-${shortMonth(months[months.length - 1])}`;
+
+/** The twelve YYYY-MM months of `FY 2025-26`, April to March. */
+function fyMonths(financialYear: string): string[] {
+  const start = Number(financialYear.slice(3, 7));
+  return Array.from({ length: 12 }, (_, i) => {
+    const n = ((i + 3) % 12) + 1;
+    return `${n >= 4 ? start : start + 1}-${String(n).padStart(2, '0')}`;
+  });
+}
+
+/** Two readings of the same return (the same file uploaded twice under two names) are one return. */
+function sameReturn(a: GstReturnPeriodTotal, b: GstReturnPeriodTotal): boolean {
+  return (
+    a.months.join() === b.months.join() &&
+    toPaise(a.outwardTaxable) === toPaise(b.outwardTaxable) &&
+    toPaise(a.zeroRated) === toPaise(b.zeroRated) &&
+    toPaise(a.nilExempt) === toPaise(b.nilExempt)
+  );
+}
+
+const maskGstin = (gstin: string) => `GSTIN XXXX${gstin.slice(-4)}`;
+
+/**
+ * GSTR-3B returns, per GSTIN and financial year. Never adds up across GSTINs, and never a part year:
+ * - every FY with any month read gets a review-only summary naming the months read, the missing
+ *   months, and any month two returns disagree about;
+ * - only when all 12 months of the FY are covered, each by exactly one return (two copies of the same
+ *   return count once; a different return for a month already covered is a conflict), is the sum of
+ *   (a)+(b)+(c) offered as gstAnnualTurnover. It is always derived_value, never auto-applied, and a
+ *   GST turnover stated directly for that FY wins.
+ */
+function deriveGstFromReturns(candidates: ExtractedField[], periods: GstReturnPeriodTotal[]): ExtractedField[] {
+  if (periods.length === 0) return [];
+  const direct = ofField(candidates, GST_ANNUAL).filter((candidate) => candidate.derivation === undefined);
+  const groups = new Map<string, GstReturnPeriodTotal[]>();
+  for (const period of periods) {
+    const key = `${period.gstin ?? ''}|${period.financialYear}`;
+    groups.set(key, [...(groups.get(key) ?? []), period]);
+  }
+  const gstins = new Set(periods.map((period) => period.gstin ?? ''));
+  const derived: ExtractedField[] = [];
+  let discriminator = 0;
+
+  for (const group of groups.values()) {
+    const { financialYear, gstin } = group[0];
+    const distinct: GstReturnPeriodTotal[] = [];
+    for (const period of group) if (!distinct.some((kept) => sameReturn(kept, period))) distinct.push(period);
+
+    const coveredBy = new Map<string, GstReturnPeriodTotal[]>();
+    for (const period of distinct) {
+      for (const month of period.months) coveredBy.set(month, [...(coveredBy.get(month) ?? []), period]);
+    }
+    const all = fyMonths(financialYear);
+    const missing = all.filter((month) => !coveredBy.has(month));
+    const disputed = all.filter((month) => (coveredBy.get(month)?.length ?? 0) > 1);
+    const ordered = [...distinct].sort((a, b) => a.months[0].localeCompare(b.months[0]));
+    const latest = ordered[ordered.length - 1];
+    const lastMonth = [...coveredBy.keys()].sort().pop() as string;
+    const subjectRef = gstin ? maskGstin(gstin) : null;
+    const fromCandidateIds = ordered.map((p) => `${p.source.documentId}:gst:${p.months.join('+')}`);
+    const confidence = Math.min(...ordered.map((p) => p.confidence));
+    const complete = missing.length === 0 && disputed.length === 0;
+
+    const whose = gstins.size > 1 && gstin ? ` (${maskGstin(gstin)})` : '';
+    const status = complete
+      ? 'all 12 months read; their total is offered as GST Annual Turnover for review.'
+      : `${all.length - missing.length} of 12 months read, so nothing is added up.` +
+        (missing.length > 0 ? ` Missing: ${missing.map(longMonth).join(', ')}.` : '') +
+        (disputed.length > 0 ? ` Returns disagree for: ${disputed.map(longMonth).join(', ')}.` : '');
+    let text = `${financialYear}${whose}: ${status} Read:`;
+    for (const period of ordered) {
+      const item = ` ${periodLabel(period.months)} ${formatInrPaise(returnTurnoverPaise(period))};`;
+      if (text.length + item.length > SUMMARY_MAX - 2) {
+        text += ' …';
+        break;
+      }
+      text += item;
+    }
+    derived.push(
+      derivedCandidate({
+        fieldId: GST_SUMMARY,
+        ruleId: 'gst_monthly_returns_summary',
+        value: text.replace(/;$/, '.'),
+        fromCandidateIds,
+        confidence,
+        source: {
+          ...latest.source,
+          snippet:
+            'Each amount: GSTR-3B Table 3.1 total taxable value of (a) outward taxable + (b) zero rated + (c) nil rated and exempted, as printed. Excluded: (d) inward supplies on reverse charge, (e) non-GST supplies.'.slice(
+              0,
+              SNIPPET_MAX
+            ),
+        },
+        period: lastDayOfMonth(lastMonth),
+        subjectRef,
+        discriminator: discriminator++,
+      })
+    );
+
+    if (!complete || direct.some((candidate) => candidate.period === financialYear)) continue;
+    const totalPaise = ordered.reduce((sum, period) => sum + returnTurnoverPaise(period), 0);
+    const listed = ordered.map((p) => periodLabel(p.months)).join(', ');
+    derived.push(
+      derivedCandidate({
+        fieldId: GST_ANNUAL,
+        ruleId: 'annual_from_gst_monthly_returns',
+        value: totalPaise / 100,
+        fromCandidateIds,
+        confidence,
+        source: {
+          ...latest.source,
+          snippet: `Sum of GSTR-3B Table 3.1 (a)+(b)+(c) total taxable value for ${financialYear} from ${ordered.length} returns: ${listed}. Excludes (d) reverse charge and (e) non-GST.`.slice(
+            0,
+            SNIPPET_MAX
+          ),
+        },
+        period: financialYear,
+        subjectRef,
+        discriminator: discriminator++,
+      })
+    );
+  }
+  return derived;
+}
+
 /** `candidates` are settled and merged across the session. A direct candidate always wins. */
 export function deriveCandidates(
   candidates: ExtractedField[],
@@ -211,7 +371,9 @@ export function deriveCandidates(
   today: string
 ): ExtractedField[] {
   const rows = documents.flatMap((document) => document.bankMonthlyTotals);
+  const gstPeriods = documents.flatMap((document) => document.gstReturnPeriods ?? []);
   return [
+    ...deriveGstFromReturns(candidates, gstPeriods),
     ...deriveVintage(candidates, today),
     ...deriveProfitability(candidates),
     ...BANK_METRICS.flatMap((metric) => deriveBankAverage(metric, candidates, rows)),

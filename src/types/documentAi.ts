@@ -149,6 +149,8 @@ export type ExtractionErrorCode =
   | 'llm_invalid_response'
   | 'llm_failed'
   | 'interrupted'
+  /** Turned away by the memory gate: the server was too busy to read the file safely. Retryable. */
+  | 'server_busy'
   | 'file_missing';
 
 export type DocumentAiErrorCode =
@@ -242,7 +244,11 @@ export type DerivationRuleId =
   | 'vintage_from_establishment_date'
   | 'profitability_from_pat'
   | 'average_monthly_from_bank_table'
-  | 'gst_compliance_mirror';
+  | 'gst_compliance_mirror'
+  /** gstAnnualTurnover: the sum over GSTR-3B returns covering all 12 months of one FY. */
+  | 'annual_from_gst_monthly_returns'
+  /** Review-only summary of the GSTR-3B months read, with missing months named. */
+  | 'gst_monthly_returns_summary';
 
 /** Merged, per-field view across a session. This is what the form consumes. */
 export interface FieldResult {
@@ -276,6 +282,31 @@ export interface BankMonthlyTotal {
   sourceCheck?: SourceCheck;
 }
 
+/**
+ * One GSTR-3B return's Table 3.1 as printed, parsed by the server. Each figure is the "Total taxable
+ * value" column of its row. The server adds (a)+(b)+(c) only when deriving; (d) inward supplies on
+ * reverse charge are never read, and (e) non-GST supplies are kept for display and never counted.
+ */
+export interface GstReturnPeriodTotal {
+  form: 'GSTR-3B';
+  /** 'FY 2025-26', from the return's printed Year. */
+  financialYear: string;
+  /** YYYY-MM months the return covers: one for a monthly return, three for a quarterly one. */
+  months: string[];
+  /** 3.1(a) Outward taxable supplies (other than zero rated, nil rated and exempted). */
+  outwardTaxable: number;
+  /** 3.1(b) Outward taxable supplies (zero rated). */
+  zeroRated: number;
+  /** 3.1(c) Other outward supplies (nil rated, exempted). */
+  nilExempt: number;
+  /** 3.1(e) Non-GST outward supplies, or null when the row was not read. Never counted. */
+  nonGst: number | null;
+  /** The supplier's GSTIN printed on the return, validated, or null. Returns of different GSTINs are never added up. */
+  gstin: string | null;
+  confidence: number;
+  source: SourceRef;
+}
+
 export interface DocumentExtractionSuccess {
   ok: true;
   documentId: string;
@@ -283,6 +314,8 @@ export interface DocumentExtractionSuccess {
   classificationConfidence: number;
   fields: ExtractedField[];
   bankMonthlyTotals: BankMonthlyTotal[];
+  /** GSTR-3B Table 3.1 periods read by the server. Absent on results stored before this existed. */
+  gstReturnPeriods?: GstReturnPeriodTotal[];
   injectionSuspected: boolean;
   /** Candidates dropped below discardBelow. Counted, never stored. */
   droppedLowConfidence: number;
@@ -313,6 +346,8 @@ export interface ExtractDocumentInput {
   today: string;
   /** Aborted at the per-file timeout. */
   signal: AbortSignal;
+  /** The job reading the file, for the per-job model circuit breaker. Never logged or stored by the pipeline. */
+  jobId?: string;
 }
 
 /** Argument of mergeSessionResults. Must stay pure: no I/O, no clock. */

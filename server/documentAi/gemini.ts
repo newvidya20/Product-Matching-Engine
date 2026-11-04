@@ -26,10 +26,11 @@ const ERROR_MESSAGES: Record<ExtractionErrorCode, string> = {
   llm_not_configured: 'The extraction model is not configured on the server.',
   llm_rate_limited: 'The extraction model is busy or rate limited.',
   llm_quota_exhausted: 'The extraction model daily limit is used up.',
-  llm_timeout: 'The extraction model timed out.',
+  llm_timeout: 'The AI step timed out. Values read locally were kept, if any.',
   llm_invalid_response: 'The extraction model returned an unusable response.',
   llm_failed: 'The extraction model request failed.',
   interrupted: 'Extraction was interrupted.',
+  server_busy: 'The server was busy.',
   file_missing: 'The document file is missing.',
 };
 

@@ -366,7 +366,17 @@ export function renderSpreadsheetText(parsed: ParsedSpreadsheet): SpreadsheetTex
 
 /** Below this, a PDF has no real text layer: a scanner's watermark, say. */
 const MIN_PDF_TEXT_CHARS = 50;
-const PDF_READ_TIMEOUT_MS = 20_000;
+/**
+ * Time one read of a PDF's text layer may take (DOCUMENT_AI_PDF_READ_TIMEOUT_MS, default 60 s). It
+ * starts only once pdf.js has loaded: on a small instance the first import alone can take longer
+ * than a read, and that one-off cost must never be charged to a file.
+ */
+export const PDF_READ_TIMEOUT_MS = (() => {
+  const value = Number(process.env.DOCUMENT_AI_PDF_READ_TIMEOUT_MS);
+  return Number.isFinite(value) && value >= 1_000 ? Math.min(30 * 60_000, Math.floor(value)) : 60_000;
+})();
+/** A read that timed out is tried once more before the file is called unreadable. */
+const PDF_READ_RETRIES = 1;
 /**
  * Pages of a PDF's text layer read for extraction (DOCUMENT_AI_PDF_MAX_TEXT_PAGES, default 150).
  * Hundreds of pages of text objects would crowd a small server's heap; the figures a lender needs
@@ -386,11 +396,38 @@ const PDF_DOCUMENT_ERRORS: ReadonlySet<string> = new Set([
   'UnknownErrorException',
 ]);
 
-type PdfEngine = Pick<typeof import('pdfjs-dist/legacy/build/pdf.mjs'), 'getDocument'>;
+type PdfjsModule = typeof import('pdfjs-dist/legacy/build/pdf.mjs');
+type PdfEngine = Pick<PdfjsModule, 'getDocument'>;
+
+let pdfjsModule: Promise<PdfjsModule> | null = null;
+
+/**
+ * pdf.js, imported once for the whole process and shared by every reader (text layer and page
+ * rendering). Files starting together wait on the same import instead of each paying for it. A
+ * failed import is forgotten, so the next file tries again.
+ */
+export function loadPdfjs(): Promise<PdfjsModule> {
+  if (!pdfjsModule) {
+    const loading = import('pdfjs-dist/legacy/build/pdf.mjs');
+    pdfjsModule = loading;
+    loading.catch(() => {
+      if (pdfjsModule === loading) pdfjsModule = null;
+    });
+  }
+  return pdfjsModule;
+}
+
+/** Starts the pdf.js import in the background, so the first document does not wait for it. Never throws. */
+export function warmUpPdfEngine(): void {
+  loadPdfjs().catch(() => undefined);
+}
 
 export interface PdfReadOptions {
   loadEngine?: () => Promise<PdfEngine>;
+  /** One read attempt, counted from when the engine has loaded. */
   timeoutMs?: number;
+  /** Further attempts after a timed-out read. Defaults to 1. */
+  retries?: number;
   /** Pages read, from the first. Defaults to PDF_MAX_TEXT_PAGES. */
   maxPages?: number;
 }
@@ -445,15 +482,9 @@ export function assemblePdfLines(runs: readonly PdfTextRun[]): string[] {
 async function readPdfLines(
   bytes: Uint8Array,
   signal: AbortSignal,
-  loadEngine: () => Promise<PdfEngine>,
+  engine: PdfEngine,
   maxPages: number
 ): Promise<{ pages: string[][]; totalPages: number }> {
-  let engine: PdfEngine;
-  try {
-    engine = await loadEngine();
-  } catch {
-    throw new PdfEngineError();
-  }
   if (signal.aborted) throw new DOMException('Extraction was aborted.', 'AbortError');
   // pdf.js detaches the buffer it is given, and these bytes still go to the model.
   const task = engine.getDocument({
@@ -511,34 +542,61 @@ export async function readPdfSource(
   return (await readPdfText(bytes, signal, options)).source;
 }
 
-/** readPdfSource, with how many pages were read out of how many. */
+/** Rejects as soon as `signal` fires, even if `run` ignores it. */
+function raceSignal<T>(run: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const onStop = () => reject(new DOMException('PDF read stopped.', 'AbortError'));
+    if (signal.aborted) onStop();
+    signal.addEventListener('abort', onStop, { once: true });
+    run.then(resolve, reject).finally(() => signal.removeEventListener('abort', onStop));
+  });
+}
+
+const unreadable = (reason: PdfReadFailure): PdfText => ({ source: { kind: 'unreadable', reason }, totalPages: 0, pagesRead: 0 });
+
+/**
+ * readPdfSource, with how many pages were read out of how many. The engine is loaded first, bounded
+ * only by the file's own signal; the read timeout then starts. A read that times out is tried once
+ * more (a busy instance, not a bad file) before the file is reported unreadable.
+ */
 export async function readPdfText(bytes: Uint8Array, signal: AbortSignal, options: PdfReadOptions = {}): Promise<PdfText> {
   const {
-    loadEngine = () => import('pdfjs-dist/legacy/build/pdf.mjs'),
+    loadEngine = loadPdfjs,
     timeoutMs = PDF_READ_TIMEOUT_MS,
+    retries = PDF_READ_RETRIES,
     maxPages = PDF_MAX_TEXT_PAGES,
   } = options;
-  const timeout = AbortSignal.timeout(timeoutMs);
-  const stop = AbortSignal.any([signal, timeout]);
-  let onStop = () => {};
-  const stopped = new Promise<never>((_, reject) => {
-    onStop = () => reject(new DOMException('PDF read stopped.', 'AbortError'));
-    stop.addEventListener('abort', onStop, { once: true });
-  });
+  let engine: PdfEngine;
   try {
-    const { pages, totalPages } = await Promise.race([readPdfLines(bytes, stop, loadEngine, maxPages), stopped]);
-    const lines = pages.flat();
-    let characters = 0;
-    for (const line of lines) characters += line.replace(/\s/g, '').length;
-    const source: DocumentSource = characters < MIN_PDF_TEXT_CHARS ? { kind: 'no_text' } : { kind: 'pdf', lines, pages };
-    return { source, totalPages, pagesRead: pages.length };
-  } catch (error) {
+    engine = await raceSignal(loadEngine(), signal);
+  } catch {
     if (signal.aborted) throw new DOMException('Extraction was aborted.', 'AbortError');
-    const reason = readFailure(error, timeout.aborted);
-    console.warn(`[document-ai] ${reason}`);
-    return { source: { kind: 'unreadable', reason }, totalPages: 0, pagesRead: 0 };
-  } finally {
-    stop.removeEventListener('abort', onStop);
+    console.warn('[document-ai] pdf_engine_failed');
+    return unreadable('pdf_engine_failed');
+  }
+  for (let attempt = 0; ; attempt += 1) {
+    const timeout = AbortSignal.timeout(timeoutMs);
+    const stop = AbortSignal.any([signal, timeout]);
+    const startedAt = Date.now();
+    try {
+      const { pages, totalPages } = await raceSignal(readPdfLines(bytes, stop, engine, maxPages), stop);
+      const lines = pages.flat();
+      let characters = 0;
+      for (const line of lines) characters += line.replace(/\s/g, '').length;
+      const source: DocumentSource = characters < MIN_PDF_TEXT_CHARS ? { kind: 'no_text' } : { kind: 'pdf', lines, pages };
+      return { source, totalPages, pagesRead: pages.length };
+    } catch (error) {
+      if (signal.aborted) throw new DOMException('Extraction was aborted.', 'AbortError');
+      const reason = readFailure(error, timeout.aborted);
+      if (reason === 'pdf_read_timeout') {
+        // Reason and elapsed time only: nothing about the file.
+        console.warn(`[document-ai] pdf_read_timeout after ${Date.now() - startedAt} ms${attempt < retries ? ', retrying' : ''}`);
+        if (attempt < retries) continue;
+      } else {
+        console.warn(`[document-ai] ${reason}`);
+      }
+      return unreadable(reason);
+    }
   }
 }
 

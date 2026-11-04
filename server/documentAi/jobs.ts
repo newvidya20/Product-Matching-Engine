@@ -28,7 +28,7 @@ import type {
 } from '../../src/types/documentAi.ts';
 import { TERMINAL_JOB_STATUSES } from '../../src/types/documentAi.ts';
 import { logActivity } from './activity.ts';
-import { extractDocument } from './pipeline.ts';
+import { extractDocument, noteJobModelFailure } from './pipeline.ts';
 import { OCR_DOCUMENT_BUDGET_MS, runObserved, type ExtractionObserver } from './ocr.ts';
 import { RENDER_DOCUMENT_BUDGET_MS } from './textDocuments.ts';
 import {
@@ -76,6 +76,8 @@ class HardDeadlineError extends Error {}
 
 // ------------------------------------------------------------------ Memory and size gate
 
+const MB = 1024 * 1024;
+
 /** What the gate reads before starting a file. Injected in tests. */
 export interface MemoryReading {
   heapUsed: number;
@@ -104,6 +106,8 @@ export interface FileGateOptions {
   /** How often memory is checked again while a file waits on it. */
   pollMs: number;
   readMemory: () => MemoryReading;
+  /** One short diagnostic line (no document data). Defaults to console.warn; tests pass a stub. */
+  warn?: (line: string) => void;
 }
 
 export type Admission = { ok: true; release(): void } | { ok: false };
@@ -131,8 +135,30 @@ export class FileGate {
   private runningAlone = false;
   private readonly waiting: GateWaiter[] = [];
   private poll: NodeJS.Timeout | null = null;
+  /** The gate is holding a file back on memory; logged once per episode, not on every poll. */
+  private holdLogged = false;
 
   constructor(private readonly options: FileGateOptions) {}
+
+  /** Heap used / limit in MB and the queue length. Never anything about a document. */
+  private describe(): string {
+    let heap = 'heap ?/? MB';
+    try {
+      const reading = this.options.readMemory();
+      heap = `heap ${Math.round(reading.heapUsed / MB)}/${Math.round(reading.heapLimit / MB)} MB`;
+    } catch {
+      // keep the placeholder
+    }
+    return `${heap}, ${this.running} running, ${this.waiting.length} queued`;
+  }
+
+  private warn(line: string): void {
+    try {
+      (this.options.warn ?? console.warn)(`[document-ai] ${line}`);
+    } catch {
+      // diagnostics must never break the gate
+    }
+  }
 
   get inFlight(): number {
     return this.running;
@@ -193,13 +219,20 @@ export class FileGate {
           break;
         }
         this.waiting.shift();
+        this.warn(`memory gate turned a file away (server_busy): ${this.describe()}`);
+        this.holdLogged = false;
         head.resolve({ ok: false });
         continue;
       }
       this.waiting.shift();
+      this.holdLogged = false;
       this.start(head);
     }
     if (waitingOnMemory) {
+      if (!this.holdLogged) {
+        this.holdLogged = true;
+        this.warn(`memory gate holding files: ${this.describe()}`);
+      }
       this.poll = setTimeout(() => this.pump(), this.options.pollMs);
       this.poll.unref();
     }
@@ -224,8 +257,6 @@ export class FileGate {
     });
   }
 }
-
-const MB = 1024 * 1024;
 
 /** 90% of the container's memory limit, where Node can see one (cgroups); otherwise off. */
 function defaultRssHighBytes(): number {
@@ -480,7 +511,7 @@ function extractObserved(observer: ExtractionObserver, input: ExtractDocumentInp
 
 /**
  * Waits for the file gate, then reads the file. A file the gate turned away (memory stayed high)
- * fails as `interrupted`, which the user can retry, instead of the server running out of memory.
+ * fails as `server_busy`, which the user can retry, instead of the server running out of memory.
  */
 async function admitAndProcess(job: ExtractionJob, documentId: string, actorEmail: string): Promise<void> {
   const doc = await getDocument(job.sessionId, documentId);
@@ -531,6 +562,8 @@ async function processDocument(
       return; // deleted during the job: not a failure to report
     }
     job.errors.push({ documentId, code });
+    // A file stopped by its timer in the model step opens the job's breaker too (pipeline.ts).
+    noteJobModelFailure(job.jobId, code);
     void logActivity({
       type: 'extraction_document_failed',
       actor: actorEmail,
@@ -543,7 +576,7 @@ async function processDocument(
   };
 
   if (!admitted) {
-    await fail('interrupted');
+    await fail('server_busy');
     return;
   }
 
@@ -572,6 +605,7 @@ async function processDocument(
       declaredDocumentType: doc.documentTypeOverridden ? doc.documentType : null,
       today: new Date().toISOString().slice(0, 10),
       signal: controller.signal,
+      jobId: job.jobId,
     });
     bytes = null; // from here only the pipeline holds the bytes, and only until it settles
     extraction.catch(() => undefined);
@@ -689,6 +723,8 @@ async function runJob(task: QueuedTask): Promise<void> {
 
 /** On boot: queued or running jobs become failed; their unfinished documents fail with `interrupted`. */
 export async function recoverInterruptedJobs(): Promise<void> {
+  let jobsRecovered = 0;
+  let documentsInterrupted = 0;
   for (const sessionId of await listSessionIds()) {
     for (const job of await listJobs(sessionId)) {
       if (TERMINAL_JOB_STATUSES.includes(job.status)) continue;
@@ -701,11 +737,17 @@ export async function recoverInterruptedJobs(): Promise<void> {
             x.errorCode = 'interrupted';
           });
           if (!done.has(documentId)) job.errors.push({ documentId, code: 'interrupted' });
+          documentsInterrupted += 1;
         }
       }
       job.status = 'failed';
       job.finishedAt = new Date().toISOString();
       await saveJob(job);
+      jobsRecovered += 1;
     }
+  }
+  if (jobsRecovered > 0) {
+    // Counts only: a restart (deploy, sleep, out of memory) stopped these mid-way.
+    console.warn(`[document-ai] boot recovery: ${jobsRecovered} unfinished job(s) failed, ${documentsInterrupted} document(s) marked interrupted`);
   }
 }

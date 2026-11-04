@@ -22,8 +22,10 @@ const RULES: Array<{ type: DocumentType; test: (text: string) => boolean }> = [
   {
     type: 'bank_statement',
     test: (t) =>
-      /(statement of account|account statement|bank statement)/i.test(t) &&
-      /(opening balance|closing balance|withdrawal|deposit)/i.test(t),
+      (/(statement of account|account statement|bank statement)/i.test(t) &&
+        /(opening balance|closing balance|withdrawal|deposit)/i.test(t)) ||
+      // A statement that heads its totals `Statement Summary` instead of naming itself.
+      (/\bstatement summary\b/i.test(t) && /total deposit amount/i.test(t) && /closing balance/i.test(t)),
   },
   {
     type: 'itr',

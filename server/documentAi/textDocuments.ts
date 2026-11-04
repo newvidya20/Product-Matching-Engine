@@ -5,6 +5,7 @@
  */
 import JSZip from 'jszip';
 import { currentExtractionObserver } from './ocr.ts';
+import { loadPdfjs } from './spreadsheet.ts';
 
 /** A rendered scan is capped so one long file cannot exhaust memory or the model's input. */
 export const MAX_RENDERED_PDF_PAGES = 10;
@@ -186,7 +187,7 @@ export async function renderPdfPages(
   maxPages: number = MAX_RENDERED_PDF_PAGES,
   firstPage = 1
 ): Promise<Buffer[]> {
-  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const pdfjs = await loadPdfjs(); // shared with the text reader: imported once per process
   const task = pdfjs.getDocument({ data: new Uint8Array(bytes), disableFontFace: true, verbosity: 0 });
   const stop = () => void task.destroy().catch(() => undefined);
   signal.addEventListener('abort', stop, { once: true });

@@ -25,6 +25,8 @@ const KNOWN_DERIVATIONS = [
   'profitability_from_pat',
   'average_monthly_from_bank_table',
   'gst_compliance_mirror',
+  'annual_from_gst_monthly_returns',
+  'gst_monthly_returns_summary',
 ];
 
 const fid = (definition: FieldDefinition) => definition.fieldId;

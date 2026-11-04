@@ -36,6 +36,7 @@ import { createEligibilityRouter } from './server/eligibility/router.ts';
 import { logActivity } from './server/documentAi/activity.ts';
 import { hasValidDocumentSession } from './server/documentAi/auth.ts';
 import { recoverInterruptedJobs } from './server/documentAi/jobs.ts';
+import { warmUpPdfEngine } from './server/documentAi/spreadsheet.ts';
 import { startRetention } from './server/documentAi/retention.ts';
 import {
   initStore as initDocumentAiStore,
@@ -2810,6 +2811,8 @@ async function startServer() {
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`LoanBazaar server listening on http://0.0.0.0:${PORT}`);
+    // Loads pdf.js in the background now, so the first uploaded PDF does not pay for the import.
+    warmUpPdfEngine();
   });
 }
 
