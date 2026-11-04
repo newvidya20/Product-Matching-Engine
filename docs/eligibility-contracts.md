@@ -38,8 +38,15 @@ Render's free disk is wiped on restart. The defaults therefore ship as `server/e
 if the live file is absent, the backend copies the seed there. Edits go to the live file. The seed is data, not code:
 the engine never reads numbers from it except through this copy.
 
-The engine must not use `calculateFinancialRatios` from `src/utils/financialMetrics.ts`: it treats missing principal
-repayments and EMI as 0 for DSCR, which this contract forbids. The engine computes its own metrics (section 4).
+The engine computes its own metrics (section 4) and does not call `calculateFinancialRatios` from
+`src/utils/financialMetrics.ts`, but its DSCR, TOL/TNW and banking turnover formulas are the same as that function's.
+`calculateFinancialRatios` returns a null DSCR unless operating cash flow, principal repayments and EMI are all
+stated (a blank is never read as 0).
+
+**The user's five core credit rules** (CIBIL, CMR, TOL/TNW, DSCR, banking turnover) are named constants in
+`src/utils/coreCreditRules.ts`. The engine still reads its numbers only from the rules file;
+`tests/core-credit-rules.test.ts` fails if the seed's five criteria differ from those constants. The 258-product
+matching engine (`server/ruleEngine.ts`) does not apply them yet (section 9).
 
 No new runtime dependencies.
 
@@ -95,8 +102,8 @@ Consequences, stated so nobody has to infer them:
   documents: no mandatory criterion could be evaluated (Commercial CMR rank: not applicable to this entity type), so
   eligibility cannot be confirmed.`
 
-`outcomeReason` names the rule and the criteria that triggered it, e.g. `Not eligible: DSCR 0.92 is below the
-minimum of 1.10 (mandatory).` or `Incomplete documents: Personal CIBIL score and Average monthly banking credits are
+`outcomeReason` names the rule and the criteria that triggered it, e.g. `Not eligible: Debt service coverage (DSCR)
+0.92 is not above 1.00 (it must be strictly above 1.00) (mandatory).` or `Incomplete documents: Personal CIBIL score and Average monthly banking credits are
 not provided (mandatory).`
 
 ### 2.3 Severity
@@ -112,9 +119,9 @@ Fixed by status and `mandatory`. Never set by hand.
 
 ### 2.4 Result row text
 
-- `expected`: the threshold in words, from the rules file. `number_min`: `At least 1.25 (1.10 to 1.24 is
-  conditional)`. `number_max`: `At most 6 (7 is conditional)`. No band: `At least 3 years`. Enum: `Profitable 2+ years
-  (1 year or breakeven is conditional)`.
+- `expected`: the threshold in words, from the rules file. `number_min`: `At least 750 (700 to 749 is
+  conditional)`. `number_max`: `At most 3.00x (3.01x to 4.00x is conditional)`. No band: `At least 3 years`, `At most
+  4.00`. `strict`: `Above 1.00`, `Below 7`. Enum: `Profitable 2+ years (1 year or breakeven is conditional)`.
 - `actualDisplay`: rupees in Indian grouping (`₹ 48,00,000`), ratios to 2 dp, percent with `%`, `Not provided`
   when missing, or the zero-denominator text in section 4.
 - `reason`: one templated sentence with the actual value and the threshold, or the plain names of the missing
@@ -133,7 +140,7 @@ Validation, all failures 400 `invalid_input` with the keys in `fields`. Nothing 
 | Inputs | Rule |
 |---|---|
 | All numbers | Finite |
-| `netProfitAfterTax`, `ebitda`, `ebit`, `tangibleNetWorth` | Any sign (fieldMap `signed`) |
+| `netProfitAfterTax`, `ebitda`, `ebit`, `tangibleNetWorth`, `operatingCashFlow` | Any sign (fieldMap `signed`) |
 | `depreciation`, `amortization`, `interestExpense` | `>= 0` (stored as magnitude, fieldMap `expense_magnitude`) |
 | Every other currency field | `>= 0` |
 | `requestedAmount` | `> 0`. The New Assessment server stores 0 for blank, so 0 is never a request |
@@ -149,11 +156,18 @@ Validation, all failures 400 `invalid_input` with the keys in `fields`. Nothing 
 All arithmetic is on stated inputs. Results are rounded to 2 dp, half away from zero, **before** comparison, so the
 displayed value is the decided value. **Exception:** bureau scores and CMR ranks (units `score` and `rank`) are compared
 and shown exactly, never rounded; validation already requires them to be integers (section 3), and the engine does
-not round them even for a caller that skips validation, so `699.995` is `conditional` against a pass of 700. Each metric is `null` in `result.derived` when any required input is `null`.
+not round them even for a caller that skips validation, so `699.995` is `failed` against a conditional band that
+starts at 700 (`700` itself is `conditional`). Each metric is `null` in `result.derived`
+when any required input is `null`. A key absent from a stored record's input (saved before the key existed) is read
+as `null`.
+
+**Strict bounds after rounding.** A `strict` criterion compares the rounded value: DSCR must be strictly above 1.00,
+so a raw DSCR of 1.004 rounds to 1.00 and fails, and 1.005 rounds half away from zero to 1.01 and passes. Any raw
+value below 1.005 (displayed 1.00) fails.
 
 | Metric (criterion) | Formula | Required inputs | Zero or negative denominator |
 |---|---|---|---|
-| DSCR (`dscr`) | `(netProfitAfterTax + depreciation + amortization + interestExpense) / (interestExpense + annualScheduledPrincipalRepayments)` | `netProfitAfterTax`, `depreciation`, `interestExpense`, `annualScheduledPrincipalRepayments` | Denominator 0: `passed`, `actual: null`, `No existing debt service` |
+| DSCR (`dscr`) | `operatingCashFlow / (annualScheduledPrincipalRepayments + existingMonthlyEmi * 12)` (the `calculateFinancialRatios` formula) | `operatingCashFlow`, `annualScheduledPrincipalRepayments`, `existingMonthlyEmi` | Denominator 0: `passed`, `actual: null`, `No existing debt service` |
 | Requested to monthly credits (`banking_credits_vs_requested`) | `requestedAmount / averageMonthlyBankingCredits` | `requestedAmount`, `averageMonthlyBankingCredits` | Credits 0: `failed`, `No banking credits` |
 | Banking turnover ratio (`banking_turnover_ratio`) | `averageMonthlyBankingCredits * 12 / annualRevenue * 100` | `averageMonthlyBankingCredits`, `annualRevenue` | Revenue 0: `conditional`, `Revenue reported as 0; check figures` |
 | TOL/TNW (`tol_tnw`) | `totalOutsideLiabilities / tangibleNetWorth` | `totalOutsideLiabilities`, `tangibleNetWorth` | TNW <= 0: `failed`, `Net worth is zero or negative` (never a passing negative ratio) |
@@ -167,12 +181,13 @@ Direct criteria compare the input itself: `business_vintage` (`businessVintageYe
 
 ### 4.1 DSCR, in full
 
-1. **Computed** when all four required inputs are non-null. `dscrBasis: 'computed'`.
-   - `amortization` is the **one** input that may be absent: when `null` it is left out of the numerator, and the
-     reason says so. Leaving it out can only lower DSCR, so this is a conservative omission, not an assumption.
-     Statements usually print one "Depreciation and amortisation" line, which reads as `depreciation`.
-   - `existingMonthlyEmi` is **not** used: its interest and principal are already in the denominator, and adding it
-     would count them twice.
+1. **Computed** when all three required inputs (`operatingCashFlow`, `annualScheduledPrincipalRepayments`,
+   `existingMonthlyEmi`) are non-null: `operatingCashFlow / (annualScheduledPrincipalRepayments + existingMonthlyEmi *
+   12)`, the project formula in `calculateFinancialRatios`. `dscrBasis: 'computed'`.
+   - `0` is a real value for each input; `null` is missing and is never treated as 0.
+   - Both denominator inputs are validated `>= 0`, so the denominator is 0 only when both are 0: `passed`, `No
+     existing debt service`.
+   - The rule (user core rule) is **strictly above 1.00**, compared on the value rounded to 2 dp (section 4).
    - The proposed loan's EMI is **not** included, because no interest rate is known. This is DSCR on existing
      obligations. Section 9.
 2. Else **stated**, when `dscrStated` is non-null. `dscrBasis: 'stated'`. Classified as usual, then **capped at
@@ -196,27 +211,34 @@ when absent (section 1).
 
 ### 5.1 Default values
 
-**These are editable defaults, not LoanBazaar policy.** They reflect common Indian bank and NBFC practice for MSME
-business loans, and `status` stays `editable_default` until LoanBazaar credit confirms or changes each value and sets
-`status: 'confirmed'`, `confirmedBy`, `confirmedAt`. The UI shows an "Unconfirmed default criteria" banner while
-`status` is `editable_default`.
+**Two kinds of criteria.** The five marked *core* are the user's own rules and must equal the constants in
+`src/utils/coreCreditRules.ts` (section 1). The other enabled criteria are architect defaults that the user has kept
+enabled unchanged; they reflect common Indian bank and NBFC practice. Five more architect defaults are kept in the
+file with `enabled: false` (skipped as `disabled`, never a result row, never listed as missing) until the user decides
+on them. `status` stays `editable_default` until LoanBazaar credit confirms every enabled value and sets `status:
+'confirmed'`, `confirmedBy`, `confirmedAt`. The UI shows an "Unconfirmed default criteria" banner while `status` is
+`editable_default`.
 
-| Criterion | Kind | Mandatory | Pass | Conditional band | Fails | Rationale |
-|---|---|---|---|---|---|---|
-| `business_vintage` | min, years | Yes | >= 3 | 2 to < 3 | < 2 | Most lenders want 3 years of operations (two filed ITRs and audited years); some NBFCs accept 2 |
-| `personal_cibil` | min, score | Yes | >= 700 | 650 to 699 | < 650 | 700+ is the usual bank cut-off; NBFCs often go to 650 with higher pricing |
-| `commercial_cmr` | max, rank | No | <= 6 | 7 | >= 8 | CMR 1-6 is low to moderate risk on the CIBIL scale, 7-10 high risk. Applies to partnership, LLP, private and public limited, trust/society; skipped when the commercial report is `not_applicable` |
-| `dscr` | min, ratio | Yes | >= 1.25 | 1.10 to 1.24 | < 1.10 | 1.25 is the common term-loan floor; the existing matching engine uses 1.0-1.25 by purpose |
-| `banking_credits_vs_requested` | max, multiple | Yes | <= 3.0 | > 3.0 to 4.0 | > 4.0 | Unsecured business loans are commonly sized at up to 3-4 times average monthly bank credits |
-| `banking_turnover_ratio` | min, percent | No | >= 60 | 40 to < 60 | < 40 | Lenders expect most sales to pass through the bank; a low ratio suggests cash sales or other accounts |
-| `annual_turnover` | min, rupees | Yes | >= 50,00,000 | 25,00,000 to < 50,00,000 | < 25,00,000 | Typical entry level for unsecured MSME products |
-| `gst_turnover` | min, rupees | No | >= 40,00,000 | 20,00,000 to < 40,00,000 | < 20,00,000 | ₹ 40 lakh is the GST registration threshold for goods; a lower filed turnover usually means part of sales is outside GST. Skipped when GST is `not_applicable` |
-| `gst_compliance` | enum | No | `compliant` | none | `not_compliant` | Filing regularity is checked by most lenders; skipped when `not_applicable` |
-| `tol_tnw` | max, ratio | No | <= 3.0 | > 3.0 to 4.0 | > 4.0 | Banks commonly accept TOL/TNW up to 3 for MSMEs, 4 with justification |
-| `existing_emi_foir` | max, percent | No | <= 50 | > 50 to 65 | > 65 | Existing EMIs above half of EBITDA leave little room for a new loan |
-| `profitability` | enum | Yes | `profitable_2plus_years` | `profitable_1_year`, `breakeven_or_early` | `loss_making` | Two profitable years is standard; one year or breakeven goes to credit discretion |
-| `current_ratio` | min, ratio | No | >= 1.33 | 1.00 to < 1.33 | < 1.00 | 1.33 is the Tandon/Nayak committee benchmark for working capital |
-| `interest_coverage` | min, ratio | No | >= 2.0 | 1.5 to < 2.0 | < 1.5 | EBIT of at least twice interest is a common comfort level |
+| Criterion | Enabled | Kind | Mandatory | Pass | Conditional band | Fails | Rationale |
+|---|---|---|---|---|---|---|---|
+| `business_vintage` | Yes | min, years | Yes | >= 3 | 2 to < 3 | < 2 | Most lenders want 3 years of operations (two filed ITRs and audited years); some NBFCs accept 2 |
+| `personal_cibil` (core) | Yes | min, score | Yes | >= 750 | 700 to 749 | < 700 | User core rule |
+| `commercial_cmr` (core) | Yes | max, rank, `strict` | No | < 7 | none | >= 7 | User core rule. Applies to partnership, LLP, private and public limited, trust/society; skipped when the commercial report is `not_applicable` |
+| `dscr` (core) | Yes | min, ratio, `strict` | Yes | > 1.00 | none | <= 1.00 | User core rule; compared at 2 dp (section 4) |
+| `banking_credits_vs_requested` | Yes | max, multiple | Yes | <= 3.0 | > 3.0 to 4.0 | > 4.0 | Unsecured business loans are commonly sized at up to 3-4 times average monthly bank credits |
+| `banking_turnover_ratio` (core) | Yes | min, percent | No | >= 80 | none | < 80 | User core rule |
+| `annual_turnover` | Yes | min, rupees | Yes | >= 50,00,000 | 25,00,000 to < 50,00,000 | < 25,00,000 | Typical entry level for unsecured MSME products |
+| `gst_turnover` | **No** | min, rupees | No | >= 40,00,000 | 20,00,000 to < 40,00,000 | < 20,00,000 | Disabled by the user's decision; kept for later |
+| `gst_compliance` | **No** | enum | No | `compliant` | none | `not_compliant` | Disabled by the user's decision; kept for later |
+| `tol_tnw` (core) | Yes | max, ratio | No | <= 4.00 | none | > 4.00 | User core rule |
+| `existing_emi_foir` | **No** | max, percent | No | <= 50 | > 50 to 65 | > 65 | Disabled by the user's decision; kept for later |
+| `profitability` | Yes | enum | Yes | `profitable_2plus_years` | `profitable_1_year`, `breakeven_or_early` | `loss_making` | Two profitable years is standard; one year or breakeven goes to credit discretion |
+| `current_ratio` | **No** | min, ratio | No | >= 1.33 | 1.00 to < 1.33 | < 1.00 | Disabled by the user's decision; kept for later |
+| `interest_coverage` | **No** | min, ratio | No | >= 2.0 | 1.5 to < 2.0 | < 1.5 | Disabled by the user's decision; kept for later |
+
+The `mandatory` flags are unchanged from the architect's defaults. Note that `commercial_cmr`, `tol_tnw` and
+`banking_turnover_ratio` are not mandatory, so failing one of them gives `CONDITIONALLY_ELIGIBLE`, not `NOT_ELIGIBLE`
+(section 2.2). Making them mandatory is a one-word rules edit awaiting the user's decision.
 
 ### 5.2 Default file
 
@@ -225,26 +247,26 @@ business loans, and `status` stays `editable_default` until LoanBazaar credit co
 ```json
 {
   "schemaVersion": 1,
-  "rulesVersion": "2026-11-03.1",
+  "rulesVersion": "2026-11-04.1",
   "status": "editable_default",
   "confirmedBy": null,
   "confirmedAt": null,
   "currency": "INR",
   "criteria": {
     "business_vintage": { "enabled": true, "mandatory": true, "label": "Business vintage", "kind": "number_min", "unit": "years", "passAt": 3, "conditionalTo": 2, "appliesToEntityTypes": "all", "skipWhen": null, "rationale": "Most lenders want 3 years of operations (two filed ITRs and audited years); some NBFCs accept 2. Editable default: LoanBazaar to confirm." },
-    "personal_cibil": { "enabled": true, "mandatory": true, "label": "Personal / promoter CIBIL score", "kind": "number_min", "unit": "score", "passAt": 700, "conditionalTo": 650, "appliesToEntityTypes": "all", "skipWhen": null, "rationale": "700+ is the usual bank cut-off; NBFCs often go to 650 with higher pricing. Editable default: LoanBazaar to confirm." },
-    "commercial_cmr": { "enabled": true, "mandatory": false, "label": "Commercial CMR rank", "kind": "number_max", "unit": "rank", "passAt": 6, "conditionalTo": 7, "appliesToEntityTypes": ["partnership", "llp", "private_limited", "public_limited", "trust_society"], "skipWhen": { "field": "commercialCreditReportStatus", "values": ["not_applicable"] }, "rationale": "CMR 1-6 is low to moderate risk, 7-10 high risk. Editable default: LoanBazaar to confirm." },
-    "dscr": { "enabled": true, "mandatory": true, "label": "Debt service coverage (DSCR)", "kind": "number_min", "unit": "ratio", "passAt": 1.25, "conditionalTo": 1.1, "appliesToEntityTypes": "all", "skipWhen": null, "rationale": "1.25 is the common term-loan floor. Editable default: LoanBazaar to confirm." },
+    "personal_cibil": { "enabled": true, "mandatory": true, "label": "Personal / promoter CIBIL score", "kind": "number_min", "unit": "score", "passAt": 750, "conditionalTo": 700, "appliesToEntityTypes": "all", "skipWhen": null, "rationale": "User core rule: 750 or above is eligible; 700 to 749 is conditionally eligible; below 700 is not eligible; missing is flagged, never assumed." },
+    "commercial_cmr": { "enabled": true, "mandatory": false, "label": "Commercial CMR rank", "kind": "number_max", "unit": "rank", "passAt": 7, "conditionalTo": null, "strict": true, "appliesToEntityTypes": ["partnership", "llp", "private_limited", "public_limited", "trust_society"], "skipWhen": { "field": "commercialCreditReportStatus", "values": ["not_applicable"] }, "rationale": "User core rule: CMR rank must be below 7 to satisfy; 7 or above does not satisfy; missing is flagged." },
+    "dscr": { "enabled": true, "mandatory": true, "label": "Debt service coverage (DSCR)", "kind": "number_min", "unit": "ratio", "passAt": 1, "conditionalTo": null, "strict": true, "appliesToEntityTypes": "all", "skipWhen": null, "rationale": "User core rule: DSCR must be strictly above 1.00 (compared at 2 dp); 1.00 or below does not satisfy; missing inputs are flagged, never fabricated." },
     "banking_credits_vs_requested": { "enabled": true, "mandatory": true, "label": "Requested amount vs average monthly bank credits", "kind": "number_max", "unit": "multiple", "passAt": 3, "conditionalTo": 4, "appliesToEntityTypes": "all", "skipWhen": null, "rationale": "Unsecured business loans are commonly sized at up to 3-4 times average monthly credits. Editable default: LoanBazaar to confirm." },
-    "banking_turnover_ratio": { "enabled": true, "mandatory": false, "label": "Banking turnover vs reported revenue", "kind": "number_min", "unit": "percent", "passAt": 60, "conditionalTo": 40, "appliesToEntityTypes": "all", "skipWhen": null, "rationale": "Most sales should pass through the bank. Editable default: LoanBazaar to confirm." },
+    "banking_turnover_ratio": { "enabled": true, "mandatory": false, "label": "Banking turnover vs reported revenue", "kind": "number_min", "unit": "percent", "passAt": 80, "conditionalTo": null, "appliesToEntityTypes": "all", "skipWhen": null, "rationale": "User core rule: banking turnover must be at least 80% of annual revenue; below 80% does not satisfy; missing banking data is flagged." },
     "annual_turnover": { "enabled": true, "mandatory": true, "label": "Annual turnover", "kind": "number_min", "unit": "currency", "passAt": 5000000, "conditionalTo": 2500000, "appliesToEntityTypes": "all", "skipWhen": null, "rationale": "Typical entry level for unsecured MSME products. Editable default: LoanBazaar to confirm." },
-    "gst_turnover": { "enabled": true, "mandatory": false, "label": "GST annual turnover", "kind": "number_min", "unit": "currency", "passAt": 4000000, "conditionalTo": 2000000, "appliesToEntityTypes": "all", "skipWhen": { "field": "gstComplianceStatus", "values": ["not_applicable"] }, "rationale": "Rs 40 lakh is the GST registration threshold for goods. Editable default: LoanBazaar to confirm." },
-    "gst_compliance": { "enabled": true, "mandatory": false, "label": "GST filing compliance", "kind": "enum", "unit": "enum", "pass": ["compliant"], "conditional": [], "fail": ["not_compliant"], "appliesToEntityTypes": "all", "skipWhen": { "field": "gstComplianceStatus", "values": ["not_applicable"] }, "rationale": "Filing regularity is checked by most lenders. Editable default: LoanBazaar to confirm." },
-    "tol_tnw": { "enabled": true, "mandatory": false, "label": "TOL / TNW", "kind": "number_max", "unit": "ratio", "passAt": 3, "conditionalTo": 4, "appliesToEntityTypes": "all", "skipWhen": null, "rationale": "Banks commonly accept up to 3 for MSMEs, 4 with justification. Editable default: LoanBazaar to confirm." },
-    "existing_emi_foir": { "enabled": true, "mandatory": false, "label": "Existing EMI to EBITDA (FOIR)", "kind": "number_max", "unit": "percent", "passAt": 50, "conditionalTo": 65, "appliesToEntityTypes": "all", "skipWhen": null, "rationale": "EMIs above half of EBITDA leave little room for a new loan. Editable default: LoanBazaar to confirm." },
+    "gst_turnover": { "enabled": false, "mandatory": false, "label": "GST annual turnover", "kind": "number_min", "unit": "currency", "passAt": 4000000, "conditionalTo": 2000000, "appliesToEntityTypes": "all", "skipWhen": { "field": "gstComplianceStatus", "values": ["not_applicable"] }, "rationale": "Rs 40 lakh is the GST registration threshold for goods. Editable default: LoanBazaar to confirm." },
+    "gst_compliance": { "enabled": false, "mandatory": false, "label": "GST filing compliance", "kind": "enum", "unit": "enum", "pass": ["compliant"], "conditional": [], "fail": ["not_compliant"], "appliesToEntityTypes": "all", "skipWhen": { "field": "gstComplianceStatus", "values": ["not_applicable"] }, "rationale": "Filing regularity is checked by most lenders. Editable default: LoanBazaar to confirm." },
+    "tol_tnw": { "enabled": true, "mandatory": false, "label": "TOL / TNW", "kind": "number_max", "unit": "ratio", "passAt": 4, "conditionalTo": null, "appliesToEntityTypes": "all", "skipWhen": null, "rationale": "User core rule: TOL/TNW at most 4.00; above 4.00 does not satisfy; missing inputs are flagged." },
+    "existing_emi_foir": { "enabled": false, "mandatory": false, "label": "Existing EMI to EBITDA (FOIR)", "kind": "number_max", "unit": "percent", "passAt": 50, "conditionalTo": 65, "appliesToEntityTypes": "all", "skipWhen": null, "rationale": "EMIs above half of EBITDA leave little room for a new loan. Editable default: LoanBazaar to confirm." },
     "profitability": { "enabled": true, "mandatory": true, "label": "Profitability track record", "kind": "enum", "unit": "enum", "pass": ["profitable_2plus_years"], "conditional": ["profitable_1_year", "breakeven_or_early"], "fail": ["loss_making"], "appliesToEntityTypes": "all", "skipWhen": null, "rationale": "Two profitable years is standard; one year or breakeven goes to credit discretion. Editable default: LoanBazaar to confirm." },
-    "current_ratio": { "enabled": true, "mandatory": false, "label": "Current ratio", "kind": "number_min", "unit": "ratio", "passAt": 1.33, "conditionalTo": 1, "appliesToEntityTypes": "all", "skipWhen": null, "rationale": "1.33 is the Tandon/Nayak benchmark for working capital. Editable default: LoanBazaar to confirm." },
-    "interest_coverage": { "enabled": true, "mandatory": false, "label": "Interest coverage", "kind": "number_min", "unit": "ratio", "passAt": 2, "conditionalTo": 1.5, "appliesToEntityTypes": "all", "skipWhen": null, "rationale": "EBIT of at least twice interest is a common comfort level. Editable default: LoanBazaar to confirm." }
+    "current_ratio": { "enabled": false, "mandatory": false, "label": "Current ratio", "kind": "number_min", "unit": "ratio", "passAt": 1.33, "conditionalTo": 1, "appliesToEntityTypes": "all", "skipWhen": null, "rationale": "1.33 is the Tandon/Nayak benchmark for working capital. Editable default: LoanBazaar to confirm." },
+    "interest_coverage": { "enabled": false, "mandatory": false, "label": "Interest coverage", "kind": "number_min", "unit": "ratio", "passAt": 2, "conditionalTo": 1.5, "appliesToEntityTypes": "all", "skipWhen": null, "rationale": "EBIT of at least twice interest is a common comfort level. Editable default: LoanBazaar to confirm." }
   }
 }
 ```
@@ -255,7 +277,9 @@ business loans, and `status` stays `editable_default` until LoanBazaar credit co
   JSON re-serialised with keys sorted.
 - Valid only if: `schemaVersion` is 1; every id in `ELIGIBILITY_CRITERION_IDS` is present and no other; each `kind`
   equals `CRITERION_DEFINITIONS[id].kind`; numbers are finite; for `number_min` `conditionalTo` is null or `<=
-  passAt`, for `number_max` null or `>= passAt`; for enums, every allowed value of the input type except
+  passAt`, for `number_max` null or `>= passAt`; `strict` is absent or a boolean, only on numeric kinds, and `strict:
+  true` requires `conditionalTo: null` (pass is `value > passAt` for `number_min`, `value < passAt` for
+  `number_max`); for enums, every allowed value of the input type except
   `not_provided` appears in exactly one of `pass`, `conditional`, `fail` and the criterion's `skipWhen.values`; and at
   least one criterion has `enabled` and `mandatory` both true.
 - File missing after seeding: 503 `rules_unavailable`. Invalid: 503 `rules_invalid`. Neither falls back to built-in
@@ -295,6 +319,7 @@ are `manual`.
 | `tangibleNetWorth` | `financialProfile.tangibleNetWorth` | `financialProfile.tangibleNetWorth` | Signed |
 | `annualScheduledPrincipalRepayments` | `financialProfile.annualScheduledPrincipalRepayments` | `financialProfile.annualScheduledPrincipalRepayments` | |
 | `existingMonthlyEmi` | `financialProfile.existingMonthlyEmi`, fallback `existingEmiObligations` | `financialProfile.existingMonthlyEmi` | fieldMap mirror pair. `0` is real |
+| `operatingCashFlow` | `financialProfile.operatingCashFlow` | `financialProfile.operatingCashFlow` | Signed. DSCR numerator. New Assessment has no visible input for it (fieldMap `hasVisibleInput: false`), so it usually comes from Document AI or is typed in the check |
 | `averageMonthlyBankingCredits` | `financialProfile.averageMonthlyBankingCredits` | `financialProfile.averageMonthlyBankingCredits` | Bank-table average is a derivation, so `needs_verification` |
 | `gstAnnualTurnover` | `financialProfile.gstAnnualTurnover` | `financialProfile.gstAnnualTurnover` | |
 | `gstComplianceStatus` | `financialProfile.gstComplianceStatus`, fallback `gstTaxCompliant` (`yes` → `compliant`, `no` → `not_compliant`) | `financialProfile.gstComplianceStatus` | `not_provided` → `null`. Doc value is `alwaysReview`, so never taken. `no` may have been `not_applicable`; the reason shows the source, and a person corrects it |
@@ -404,7 +429,9 @@ data/
 
 | Item | Status |
 |---|---|
-| Defaults in section 5 are market-practice estimates | `editable_default` until LoanBazaar confirms. UI shows a banner |
+| Non-core defaults in section 5 are market-practice estimates | `editable_default` until LoanBazaar confirms. UI shows a banner |
+| The matching engine (`server/ruleEngine.ts` `evaluateFinancialSignals`) still uses its own per-purpose CIBIL, CMR, TOL/TNW and DSCR thresholds, has no banking turnover check and does not report those inputs as missing | Left unchanged by the user's decision; the user's core rules apply to this check only for now |
+| A live rules file seeded before `2026-11-04.1` keeps the old values | The seed never overwrites the live file (section 1). Delete or edit `data/eligibility-rules.json` to pick up the core rules |
 | DSCR excludes the proposed loan's EMI | No interest rate is known, and assuming one is guessing. A future rules field for an assumed rate would need explicit approval |
 | `entityType` on a saved assessment may be the form default | Indistinguishable from a choice. Affects only `commercial_cmr` applicability. Shown in the input view for checking |
 | `requestedTenureMonths` from an assessment may be the server's default of 12 | No criterion reads it |

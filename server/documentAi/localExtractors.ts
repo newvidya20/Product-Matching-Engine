@@ -38,6 +38,12 @@ export interface LocalExtractionInput {
    * unread pages may state another period, so "the document's one period" cannot be known.
    */
   complete?: boolean;
+  /**
+   * 1-based pages of a PDF read by OCR while its other pages were read from the text layer. A
+   * figure on a text page takes the document's one period only when the text pages state it too,
+   * never from OCR text alone.
+   */
+  ocrPages?: ReadonlySet<number>;
 }
 
 export interface LocalExtraction {
@@ -115,6 +121,8 @@ const rule = (fieldId: string, kind: ValueKind, label: string, extra: Partial<Fi
 
 const NOT_TOTAL_OF_PARTS = /\b(?:non[\s-]*current|other\s+current|previous\s+year|growth|ratio|margin|%)/i;
 const PRIOR_PERIOD = /\b(?:preceding|previous|prior|last)\s+(?:financial\s+)?year\b/i;
+/** `TOL/TNW: 1.52`, `TOL to TNW ratio`: a ratio of the two, never either amount. */
+const LEVERAGE_RATIO = /\bratio\b|%|\b(?:tol|outside\s+liabilities)\s*\/|(?:\/|\bto)\s*(?:tnw|tangible\s+net\s*worth)\b/i;
 
 /** Most specific first: the first rule whose label matches a line takes it. */
 const RULES: readonly FieldRule[] = [
@@ -141,8 +149,9 @@ const RULES: readonly FieldRule[] = [
     { exclude: /\b(?:cmr|commercial|promoter)\b/i }),
   rule('financialProfile.commercialCmrRank', 'rank',
     String.raw`(?:cibil\s+)?msme\s+rank(?:\s*\(cmr\))?|cmr(?:\s+rank)?|commercial\s+(?:mse\s+)?rank`),
+  // `Date of Enquiry` / `Enquiry date` rows list lenders' past enquiries, one per row: never the report date.
   rule('financialProfile.personalCreditReportDate', 'date',
-    String.raw`(?:report|enquiry|inquiry)\s+date|date\s+of\s+(?:report|issue|enquiry)|report\s+generated\s+on|generated\s+on`),
+    String.raw`report\s+date|date\s+of\s+(?:report|issue)|report\s+generated\s+on|generated\s+on`),
   rule('financialProfile.existingMonthlyEmi', 'amount',
     String.raw`total\s+(?:existing\s+)?(?:monthly\s+)?emis?\b|existing\s+(?:monthly\s+)?emis?\b|total\s+monthly\s+obligations?|emi\s+obligations?`,
     { exclude: /\b(?:proposed|new\s+loan|after)\b/i }),
@@ -162,11 +171,12 @@ const RULES: readonly FieldRule[] = [
     { only: ['financial_statement'] }),
   rule('financialProfile.currentAssets', 'amount', String.raw`(?:total\s+)?current\s+assets`, { exclude: NOT_TOTAL_OF_PARTS }),
   rule('financialProfile.currentLiabilities', 'amount', String.raw`(?:total\s+)?current\s+liabilities`, { exclude: NOT_TOTAL_OF_PARTS }),
-  rule('financialProfile.totalOutsideLiabilities', 'amount', String.raw`total\s+outside\s+liabilities|\btol\b`),
+  rule('financialProfile.totalOutsideLiabilities', 'amount', String.raw`total\s+outside\s+liabilities|\btol\b`,
+    { exclude: LEVERAGE_RATIO }),
   rule('financialProfile.totalAssets', 'amount', String.raw`total\s+assets`, { exclude: NOT_TOTAL_OF_PARTS }),
   rule('financialProfile.totalLiabilities', 'amount', String.raw`total\s+liabilities(?!\s+and)`,
     { exclude: /\b(?:equity\s+and|and\s+equity|current|outside)\b/i }),
-  rule('financialProfile.tangibleNetWorth', 'amount', String.raw`tangible\s+net\s*worth|\btnw\b`),
+  rule('financialProfile.tangibleNetWorth', 'amount', String.raw`tangible\s+net\s*worth|\btnw\b`, { exclude: LEVERAGE_RATIO }),
   rule('financialProfile.shareholdersEquity', 'amount',
     String.raw`(?:total\s+)?shareholders['’]?\s+(?:equity|funds)|total\s+equity(?!\s+and)`),
   rule('financialProfile.annualRevenue', 'amount',
@@ -484,13 +494,19 @@ function extractFromText(
   documentType: DocumentType,
   pages: ReadonlyArray<readonly string[]>,
   confidence: number,
-  complete = true
+  complete = true,
+  ocrPages: ReadonlySet<number> = new Set()
 ): Emitted[] {
   const out: Emitted[] = [];
   const lines = pages.flatMap((page, pageIndex) => page.map((text) => ({ text: clean(text), page: pageIndex + 1 })));
   // A figure with no period column of its own takes the document's period only when the document
   // states exactly one; otherwise its period is left unknown (period_unknown, never auto-applied).
-  const documentPeriod = complete ? soleStatedPeriod(lines.map((line) => line.text)) : null;
+  // With some pages read by OCR, the text pages must state that same one period themselves.
+  let documentPeriod = complete ? soleStatedPeriod(lines.map((line) => line.text)) : null;
+  if (documentPeriod !== null && ocrPages.size > 0) {
+    const textOnly = soleStatedPeriod(lines.filter((line) => !ocrPages.has(line.page)).map((line) => line.text));
+    if (textOnly !== documentPeriod) documentPeriod = null;
+  }
 
   // Unit and period headings hold for their own page and section only: never carried to the next.
   let columns: string[] | null = null;
@@ -859,12 +875,12 @@ function bankMonthsFromSheets(fileKind: 'xlsx' | 'csv', sheets: readonly ParsedS
 
 /** Labelled values from the document's own text. Returns nothing for a field it cannot read for certain. */
 export function extractLocally(input: LocalExtractionInput): LocalExtraction {
-  const { documentType, content, fromOcr, complete = true } = input;
+  const { documentType, content, fromOcr, complete = true, ocrPages } = input;
   if (documentType === 'other') return { fields: [], bankMonthlyTotals: [] };
   const confidence = fromOcr ? LOCAL_OCR_CONFIDENCE : LOCAL_TEXT_CONFIDENCE;
   const emitted =
     content.kind === 'text'
-      ? extractFromText(documentType, content.pages, confidence, complete)
+      ? extractFromText(documentType, content.pages, confidence, complete, ocrPages)
       : extractFromSheets(documentType, content.fileKind, content.sheets, confidence);
 
   // A GSTR-3B is read by its own fixed layout: its legal name and its Table 3.1 period.

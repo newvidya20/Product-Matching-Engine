@@ -97,7 +97,7 @@ describe('rules', () => {
     assert.ok(seededAtBoot);
     const r = await call('GET', '/rules');
     assert.equal(r.status, 200);
-    assert.equal(r.json.rules.rulesVersion, '2026-11-03.1');
+    assert.equal(r.json.rules.rulesVersion, '2026-11-04.1');
     assert.match(r.json.rulesHash, /^[0-9a-f]{64}$/);
     assert.equal(r.json.definitions.dscr.kind, 'number_min');
   });
@@ -418,11 +418,11 @@ describe('continue re-evaluates against the current rules (stored result is not 
   });
 
   it('INCOMPLETE under the current rules (a criterion newly made mandatory) is refused', async () => {
-    const rec = await create({ input: passingInput({ currentAssets: null }) });
+    const rec = await create({ input: passingInput({ totalOutsideLiabilities: null }) });
     assert.equal(rec.result.outcome, 'CONDITIONALLY_ELIGIBLE');
     writeRules((rules) => {
       rules.rulesVersion = '2026-11-03.3-test';
-      rules.criteria.current_ratio.mandatory = true;
+      rules.criteria.tol_tnw.mandatory = true;
     });
     const res = await call('POST', `/records/${rec.id}/continue`, {});
     assert.equal(res.status, 409);
@@ -469,7 +469,7 @@ describe('continue conditions list every reason for CONDITIONALLY_ELIGIBLE', () 
 
   it('includes conditional rows and non-mandatory failed and missing rows', async () => {
     const rec = await create({
-      input: passingInput({ businessVintageYears: 2.5, gstComplianceStatus: 'not_compliant', currentAssets: null }),
+      input: passingInput({ businessVintageYears: 2.5, totalOutsideLiabilities: 20_000_000, commercialCmrRank: null }),
     });
     assert.equal(rec.result.outcome, 'CONDITIONALLY_ELIGIBLE');
     const res = await call('POST', `/records/${rec.id}/continue`, {});
@@ -478,19 +478,19 @@ describe('continue conditions list every reason for CONDITIONALLY_ELIGIBLE', () 
       res.json.conditions.map((c: { criterionId: string; status: string }) => [c.criterionId, c.status])
     );
     assert.equal(byId.get('business_vintage'), 'conditional'); // mandatory, conditional band
-    assert.equal(byId.get('gst_compliance'), 'failed'); // non-mandatory failed
-    assert.equal(byId.get('current_ratio'), 'missing'); // non-mandatory missing
+    assert.equal(byId.get('tol_tnw'), 'failed'); // non-mandatory failed (5.00 > 4.00)
+    assert.equal(byId.get('commercial_cmr'), 'missing'); // non-mandatory missing
     assert.equal(byId.size, 3);
   });
 
   it('a non-mandatory failure alone is listed', async () => {
-    const rec = await create({ input: passingInput({ gstComplianceStatus: 'not_compliant' }) });
+    const rec = await create({ input: passingInput({ totalOutsideLiabilities: 20_000_000 }) });
     assert.equal(rec.result.outcome, 'CONDITIONALLY_ELIGIBLE');
     const res = await call('POST', `/records/${rec.id}/continue`, {});
     assert.equal(res.status, 200);
     assert.deepEqual(
       res.json.conditions.map((c: { criterionId: string }) => c.criterionId),
-      ['gst_compliance']
+      ['tol_tnw']
     );
   });
 });

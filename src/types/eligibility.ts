@@ -98,6 +98,8 @@ export interface EligibilityInput {
   // Obligations
   annualScheduledPrincipalRepayments: number | null;
   existingMonthlyEmi: number | null;
+  /** Annual operating cash flow (signed). DSCR numerator (section 4.1). */
+  operatingCashFlow: number | null;
 
   // Banking and GST
   averageMonthlyBankingCredits: number | null;
@@ -135,6 +137,7 @@ export const ELIGIBILITY_INPUT_FIELDS = [
   'tangibleNetWorth',
   'annualScheduledPrincipalRepayments',
   'existingMonthlyEmi',
+  'operatingCashFlow',
   'averageMonthlyBankingCredits',
   'gstAnnualTurnover',
   'gstComplianceStatus',
@@ -180,6 +183,8 @@ interface CriterionRuleBase {
  * number_min: value >= passAt passes; conditionalTo <= value < passAt is conditional; lower fails.
  * number_max: value <= passAt passes; passAt < value <= conditionalTo is conditional; higher fails.
  * conditionalTo null: no band, so anything not passing fails.
+ * strict true: the pass bound is exclusive (number_min: value > passAt; number_max: value < passAt) and
+ * conditionalTo must be null. E.g. DSCR strictly above 1.00, CMR rank below 7.
  * Comparison is on the value rounded to 2 decimal places, the value shown. Units 'score' and 'rank' are
  * compared and shown exactly, never rounded (contracts section 4).
  */
@@ -188,6 +193,8 @@ export interface NumericCriterionRule extends CriterionRuleBase {
   unit: Exclude<CriterionUnit, 'enum'>;
   passAt: number;
   conditionalTo: number | null;
+  /** Exclusive pass bound; absent or false means inclusive. Requires conditionalTo null. */
+  strict?: boolean;
 }
 
 /** Every allowed value except 'not_provided' appears in exactly one list (or skipWhen). */
@@ -233,8 +240,8 @@ export const CRITERION_DEFINITIONS: Readonly<Record<EligibilityCriterionId, Crit
     id: 'dscr',
     kind: 'number_min',
     unit: 'ratio',
-    requiredInputs: ['netProfitAfterTax', 'depreciation', 'interestExpense', 'annualScheduledPrincipalRepayments'],
-    optionalInputs: ['amortization', 'dscrStated'],
+    requiredInputs: ['operatingCashFlow', 'annualScheduledPrincipalRepayments', 'existingMonthlyEmi'],
+    optionalInputs: ['dscrStated'],
   },
   banking_credits_vs_requested: {
     id: 'banking_credits_vs_requested',
@@ -277,7 +284,7 @@ export interface CriterionResult {
   actual: number | string | null;
   /** E.g. '1.42', '₹ 48,00,000', 'No debt service', 'Not provided'. */
   actualDisplay: string;
-  /** Plain-language threshold, e.g. 'At least 1.25 (1.10 to 1.24 is conditional)'. */
+  /** Plain-language threshold, e.g. 'Above 1.00' or 'At least 750 (700 to 749 is conditional)'. */
   expected: string;
   mandatory: boolean;
   severity: CriterionSeverity;
@@ -297,6 +304,7 @@ export interface SkippedCriterion {
 
 /** Each metric is null when any required input is null. Never computed from assumptions. */
 export interface EligibilityDerivedMetrics {
+  /** operatingCashFlow / (annualScheduledPrincipalRepayments + existingMonthlyEmi * 12), or the stated DSCR. */
   dscr: number | null;
   dscrBasis: 'computed' | 'stated' | null;
   /** requestedAmount / averageMonthlyBankingCredits. */
@@ -485,6 +493,7 @@ export interface NewAssessmentPrefill {
     tangibleNetWorth: number;
     annualScheduledPrincipalRepayments: number;
     existingMonthlyEmi: number;
+    operatingCashFlow: number;
     averageMonthlyBankingCredits: number;
     gstAnnualTurnover: number;
     gstComplianceStatus: GstComplianceStatus;

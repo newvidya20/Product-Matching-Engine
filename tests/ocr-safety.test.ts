@@ -30,11 +30,13 @@ import {
   OcrError,
   ocrImages,
   ocrPoolForTests,
+  ocrStatsForTests,
   runObserved,
   shutdownOcr,
   type ExtractionObserver,
 } from '../server/documentAi/ocr.ts';
-import { MAX_RENDER_PIXELS, renderPdfPages, renderScaleFor } from '../server/documentAi/textDocuments.ts';
+import { MAX_RENDER_PIXELS, renderPdfPages, renderScaleFor, renderStatsForTests } from '../server/documentAi/textDocuments.ts';
+import { extractLocally } from '../server/documentAi/localExtractors.ts';
 import {
   FILE_GATE_OPTIONS,
   FileGate,
@@ -773,5 +775,177 @@ describe('memory: large files and the heap (Render free plan)', () => {
     assert.equal(pagesCleaned, pagesOpened, 'every page is cleaned up');
     assert.ok(destroyed >= 1, 'the document is destroyed');
     assert.ok(text.source.kind === 'pdf' && text.source.pages?.length === PDF_MAX_TEXT_PAGES);
+  });
+});
+
+// ------------------------------------------------------------------ Per-page OCR
+
+/**
+ * A fictional PDF built in code: each page is either text (a real text layer) or a scan (a JPEG of
+ * the lines, no text layer), so one file can mix both.
+ */
+async function buildPdf(pages: Array<{ kind: 'text' | 'scan'; lines: string[] }>): Promise<Buffer> {
+  const { createCanvas } = await import('@napi-rs/canvas');
+  const esc = (t: string) => t.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
+  const objects: Buffer[] = [];
+  const add = (body: Buffer | string) => {
+    objects.push(Buffer.isBuffer(body) ? body : Buffer.from(body, 'latin1'));
+    return objects.length;
+  };
+  const stream = (dict: string, data: Buffer) =>
+    Buffer.concat([Buffer.from(`<< ${dict} /Length ${data.length} >>\nstream\n`, 'latin1'), data, Buffer.from('\nendstream', 'latin1')]);
+  add('<< /Type /Catalog /Pages 2 0 R >>');
+  add('<< >>'); // the page tree, filled in once the pages exist
+  const font = add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
+  const kids: number[] = [];
+  for (const page of pages) {
+    if (page.kind === 'text') {
+      const ops = ['BT', '/F1 11 Tf', '14 TL', '50 760 Td', ...page.lines.map((l, i) => `${i ? 'T* ' : ''}(${esc(l)}) Tj`), 'ET'];
+      const content = add(stream('', Buffer.from(ops.join('\n'), 'latin1')));
+      kids.push(add(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 ${font} 0 R >> >> /Contents ${content} 0 R >>`));
+    } else {
+      const canvas = createCanvas(1240, 1754);
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, 1240, 1754);
+      ctx.fillStyle = '#111111';
+      ctx.font = '34px sans-serif';
+      page.lines.forEach((line, i) => ctx.fillText(line, 80, 140 + i * 64));
+      const jpeg = canvas.toBuffer('image/jpeg');
+      const image = add(stream('/Type /XObject /Subtype /Image /Width 1240 /Height 1754 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode', jpeg));
+      const content = add(stream('', Buffer.from('q 595 0 0 842 0 0 cm /Im0 Do Q', 'latin1')));
+      kids.push(add(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /XObject << /Im0 ${image} 0 R >> >> /Contents ${content} 0 R >>`));
+    }
+  }
+  objects[1] = Buffer.from(`<< /Type /Pages /Kids [${kids.map((k) => `${k} 0 R`).join(' ')}] /Count ${kids.length} >>`, 'latin1');
+  const parts: Buffer[] = [Buffer.from('%PDF-1.4\n', 'latin1')];
+  const offsets: number[] = [];
+  let length = parts[0].length;
+  objects.forEach((body, i) => {
+    offsets.push(length);
+    const chunk = Buffer.concat([Buffer.from(`${i + 1} 0 obj\n`, 'latin1'), body, Buffer.from('\nendobj\n', 'latin1')]);
+    parts.push(chunk);
+    length += chunk.length;
+  });
+  const trailer =
+    `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n` +
+    offsets.map((o) => `${String(o).padStart(10, '0')} 00000 n \n`).join('') +
+    `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${length}\n%%E` + 'OF\n';
+  parts.push(Buffer.from(trailer, 'latin1'));
+  return Buffer.concat(parts);
+}
+
+describe('PDFs: native text where there is a text layer, OCR only for pages without one', () => {
+  const TEXT_PAGE = [
+    'FICTIONAL SAMPLE - ILLUSTRATIVE DOCUMENT, NOT A REAL BALANCE SHEET',
+    'Balance Sheet of FICTIONAL SAMPLE TRADERS PRIVATE LIMITED',
+    'Financial year: FY 2024-25',
+    'Tangible net worth: Rs. 80,00,000',
+  ];
+  const SCAN_PAGE = [
+    'FICTIONAL SAMPLE - ILLUSTRATIVE SCAN',
+    'Financial year: FY 2024-25',
+    'Total outside liabilities: Rs. 45,00,000',
+  ];
+  const counts = () => ({ ocr: ocrStatsForTests.calls, ocrImages: ocrStatsForTests.images, render: renderStatsForTests.calls });
+
+  it('a digital PDF is read from its text layer: never rendered, never OCR', async () => {
+    const before = counts();
+    const result = await extract('gst.pdf', 'pdf', fixture('FICTIONAL-gst-return-fy2024-25.pdf'), 'gst_return');
+    assert.ok(result.ok, result.ok ? '' : result.errorCode);
+    assert.deepEqual(counts(), before);
+    assert.equal(result.model, 'local-rules');
+    const twoTextPages = await buildPdf([
+      { kind: 'text', lines: TEXT_PAGE },
+      { kind: 'text', lines: SCAN_PAGE },
+    ]);
+    const second = await extract('bs.pdf', 'pdf', twoTextPages, 'financial_statement');
+    assert.ok(second.ok);
+    assert.deepEqual(counts(), before, 'a two-page digital PDF is not rendered or OCR read either');
+    const tol = second.fields.find((f) => f.fieldId === 'financialProfile.totalOutsideLiabilities');
+    assert.equal(tol?.source.page, 2);
+    assert.equal(tol?.confidence, 0.9);
+  });
+
+  it('a fully scanned PDF is rendered and read by OCR', async () => {
+    const before = counts();
+    const result = await extract('scan.pdf', 'pdf', fixture('FICTIONAL-scanned-gst-return.pdf'), 'gst_return');
+    assert.ok(result.ok, result.ok ? '' : result.errorCode);
+    assert.equal(counts().ocr, before.ocr + 1);
+    assert.equal(counts().render, before.render + 1);
+    assert.deepEqual(renderStatsForTests.lastPageNumbers, [1]);
+    assert.ok(result.fields.every((f) => f.confidence <= OCR_CONFIDENCE_CAP));
+  });
+
+  it('a mixed PDF: OCR runs on the scanned page only, the text page keeps its native text', async () => {
+    const bytes = await buildPdf([
+      { kind: 'text', lines: TEXT_PAGE },
+      { kind: 'scan', lines: SCAN_PAGE },
+    ]);
+    const before = counts();
+    const result = await extract('mixed.pdf', 'pdf', bytes, 'financial_statement');
+    assert.ok(result.ok, result.ok ? '' : result.errorCode);
+    assert.equal(counts().ocr, before.ocr + 1, 'OCR is called once');
+    assert.equal(counts().ocrImages, before.ocrImages + 1, 'with one image');
+    assert.deepEqual(renderStatsForTests.lastPageNumbers, [2], 'only page 2 is rendered');
+    assert.ok(result.model.includes('+ocr'));
+    assert.ok(!result.model.includes('+partial'));
+
+    const tnw = result.fields.find((f) => f.fieldId === 'financialProfile.tangibleNetWorth');
+    assert.equal(tnw?.value, 8_000_000);
+    assert.equal(tnw?.source.page, 1, 'native text keeps its page');
+    assert.equal(tnw?.confidence, 0.9, 'a value from the text layer is not capped');
+    assert.equal(tnw?.sourceCheck, 'verified');
+
+    const tol = result.fields.find((f) => f.fieldId === 'financialProfile.totalOutsideLiabilities');
+    assert.equal(tol?.value, 4_500_000, 'the scanned page is read, not left empty');
+    assert.equal(tol?.source.page, 2, 'the OCR text keeps its own page number');
+    assert.ok((tol?.confidence ?? 1) <= OCR_CONFIDENCE_CAP, 'a value from an OCR page is capped');
+    assert.notEqual(tol?.status, 'auto_applied');
+  });
+
+  it('a mixed PDF with OCR switched off keeps its text pages and is marked partial', async () => {
+    const bytes = await buildPdf([
+      { kind: 'text', lines: TEXT_PAGE },
+      { kind: 'scan', lines: SCAN_PAGE },
+    ]);
+    process.env.DOCUMENT_AI_OCR = 'off';
+    try {
+      const before = counts();
+      const result = await extract('mixed.pdf', 'pdf', bytes, 'financial_statement');
+      assert.ok(result.ok);
+      assert.deepEqual(counts(), before);
+      assert.ok(result.model.includes('+partial'));
+      assert.ok(result.fields.some((f) => f.fieldId === 'financialProfile.tangibleNetWorth'));
+      assert.ok(!result.fields.some((f) => f.fieldId === 'financialProfile.totalOutsideLiabilities'));
+    } finally {
+      delete process.env.DOCUMENT_AI_OCR;
+    }
+  });
+
+  it('a text page never takes its period from OCR text alone', () => {
+    const pages = [['Tangible net worth: Rs. 80,00,000'], ['Financial year: FY 2023-24', 'Notes']];
+    const read = (ocrPages?: Set<number>) =>
+      extractLocally({ documentType: 'financial_statement', content: { kind: 'text', pages }, fromOcr: false, ocrPages }).fields.find(
+        (f) => f.fieldId === 'financialProfile.tangibleNetWorth'
+      )?.period;
+    assert.equal(read(), 'FY 2023-24', 'control: from a text layer the sole period applies');
+    assert.equal(read(new Set([2])), null, 'stated only on an OCR page: left unknown');
+  });
+
+  it('spreadsheets, Word and text files are read natively and never reach the renderer or OCR', async () => {
+    const before = counts();
+    const files: Array<[string, AcceptedFileKind, string, DocumentType]> = [
+      ['bs.xlsx', 'xlsx', 'FICTIONAL-balance-sheet-fy2024-25.xlsx', 'financial_statement'],
+      ['bank.csv', 'csv', 'FICTIONAL-bank-monthly-summary.csv', 'bank_statement'],
+      ['app.docx', 'docx', 'FICTIONAL-loan-application.docx', 'loan_application'],
+      ['itr.txt', 'txt', 'FICTIONAL-itr-acknowledgement.txt', 'itr'],
+    ];
+    for (const [name, kind, file, type] of files) {
+      const result = await extract(name, kind, fixture(file), type);
+      assert.ok(result.ok, `${name}: ${result.ok ? '' : result.errorCode}`);
+      assert.ok(!result.model.includes('+ocr'), name);
+    }
+    assert.deepEqual(counts(), before);
   });
 });

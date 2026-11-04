@@ -2,7 +2,7 @@
  * Deterministic eligibility engine (docs/eligibility-contracts.md sections 2 and 4). No AI, no I/O, no thresholds:
  * every number comes from the rules config passed in. A missing input is reported as missing, never defaulted.
  */
-import { CRITERION_DEFINITIONS, ELIGIBILITY_CRITERION_IDS } from '../../src/types/eligibility.ts';
+import { CRITERION_DEFINITIONS, ELIGIBILITY_CRITERION_IDS, ELIGIBILITY_INPUT_FIELDS } from '../../src/types/eligibility.ts';
 import type {
   CriterionInputUsed,
   CriterionResult,
@@ -48,30 +48,31 @@ interface DscrComputation {
   /** Rounded value, or null when missing or the denominator is 0. */
   value: number | null;
   noDebtService: boolean;
-  amortizationOmitted: boolean;
   missing: EligibilityInputField[];
 }
 
+/**
+ * The project formula (src/utils/financialMetrics.ts calculateFinancialRatios), section 4.1:
+ * operatingCashFlow / (annualScheduledPrincipalRepayments + existingMonthlyEmi * 12). Computed only when all three
+ * are non-null; 0 is a real value, null is missing and never treated as 0.
+ */
 function computeDscr(input: EligibilityInput): DscrComputation {
   const required = CRITERION_DEFINITIONS.dscr.requiredInputs;
   const missing = required.filter((f) => input[f] === null);
   if (missing.length === 0) {
-    const pat = input.netProfitAfterTax as number;
-    const dep = input.depreciation as number;
-    const interest = input.interestExpense as number;
+    const ocf = input.operatingCashFlow as number;
     const principal = input.annualScheduledPrincipalRepayments as number;
-    const amortizationOmitted = input.amortization === null;
-    const numerator = pat + dep + (input.amortization ?? 0) + interest; // null amortisation is left out, not zeroed
-    const denominator = interest + principal;
-    if (denominator === 0) {
-      return { basis: 'computed', value: null, noDebtService: true, amortizationOmitted, missing: [] };
+    const emi = input.existingMonthlyEmi as number;
+    const denominator = principal + emi * 12; // both validated >= 0, so 0 is the only non-positive case
+    if (denominator <= 0) {
+      return { basis: 'computed', value: null, noDebtService: true, missing: [] };
     }
-    return { basis: 'computed', value: round2(numerator / denominator), noDebtService: false, amortizationOmitted, missing: [] };
+    return { basis: 'computed', value: round2(ocf / denominator), noDebtService: false, missing: [] };
   }
   if (input.dscrStated !== null) {
-    return { basis: 'stated', value: round2(input.dscrStated), noDebtService: false, amortizationOmitted: false, missing: [] };
+    return { basis: 'stated', value: round2(input.dscrStated), noDebtService: false, missing: [] };
   }
-  return { basis: null, value: null, noDebtService: false, amortizationOmitted: false, missing };
+  return { basis: null, value: null, noDebtService: false, missing };
 }
 
 const valueOf = (r: Ratio): number | null => (r && 'value' in r ? r.value : null);
@@ -103,6 +104,11 @@ export function computeDerived(input: EligibilityInput): EligibilityDerivedMetri
 // ------------------------------------------------------------ classification
 
 function classifyNumeric(rule: NumericCriterionRule, v: number): Exclude<CriterionStatus, 'missing'> {
+  if (rule.strict) {
+    // Exclusive pass bound, no band (validated in rules.ts). Compared on the rounded value: DSCR 1.004 -> 1.00 fails.
+    const passes = rule.kind === 'number_min' ? v > rule.passAt : v < rule.passAt;
+    return passes ? 'passed' : 'failed';
+  }
   if (rule.kind === 'number_min') {
     if (v >= rule.passAt) return 'passed';
     if (rule.conditionalTo !== null && v >= rule.conditionalTo) return 'conditional';
@@ -125,6 +131,12 @@ function numericReason(label: string, rule: NumericCriterionRule, v: number, sta
   const f = (x: number) => formatValue(rule.unit, x);
   const shown = f(v);
   const min = rule.kind === 'number_min';
+  if (rule.strict) {
+    const word = min ? 'above' : 'below';
+    return status === 'passed'
+      ? `${label} ${shown} is ${word} ${f(rule.passAt)}, as required.`
+      : `${label} ${shown} is not ${word} ${f(rule.passAt)} (it must be ${min ? 'strictly above' : 'below'} ${f(rule.passAt)}).`;
+  }
   if (status === 'passed') return `${label} ${shown} meets the ${min ? 'minimum' : 'maximum'} of ${f(rule.passAt)}.`;
   if (status === 'conditional') {
     return min
@@ -241,13 +253,8 @@ function evaluateCriterion(base: RowBase, input: EligibilityInput, derived: Elig
     const d = computeDscr(input);
     if (d.basis === null) return missingRow(base, d.missing, input, def.requiredInputs);
     if (d.basis === 'computed') {
-      const inputs = used(input, [...def.requiredInputs, 'amortization']);
-      const note = d.amortizationOmitted ? ' Amortisation not provided, so it is left out of the numerator.' : '';
-      if (d.noDebtService) {
-        const r = zeroRow(base, 'passed', 'No existing debt service', input);
-        return { ...r, inputsUsed: inputs, reason: r.reason + note };
-      }
-      return numericRow(base, d.value as number, derivedSource, inputs, note);
+      if (d.noDebtService) return zeroRow(base, 'passed', 'No existing debt service', input);
+      return numericRow(base, d.value as number, derivedSource, used(input, def.requiredInputs));
     }
     // Stated: classified as usual, then capped at conditional (section 4.1).
     const r = numericRow(base, d.value as number, INPUT_FIELD_IDS.dscrStated, used(input, ['dscrStated']));
@@ -380,7 +387,12 @@ export interface EvaluateOptions {
   now?: Date;
 }
 
-export function evaluateEligibility(input: EligibilityInput, rules: EligibilityRuleConfig, opts: EvaluateOptions): EligibilityResult {
+export function evaluateEligibility(rawInput: EligibilityInput, rules: EligibilityRuleConfig, opts: EvaluateOptions): EligibilityResult {
+  // A key absent from a stored input (a record saved before the key existed, e.g. operatingCashFlow) is not
+  // provided: read as null so it is reported missing, never computed as undefined.
+  const input = Object.fromEntries(
+    ELIGIBILITY_INPUT_FIELDS.map((f) => [f, rawInput[f] === undefined ? null : rawInput[f]])
+  ) as unknown as EligibilityInput;
   const derived = computeDerived(input);
   const criteria: CriterionResult[] = [];
   const skipped: SkippedCriterion[] = [];

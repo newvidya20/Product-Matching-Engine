@@ -381,3 +381,58 @@ describe('a figure with no period of its own (audit E)', () => {
     assert.ok(revenue.every((f) => f.period === null));
   });
 });
+
+describe('the values behind TOL/TNW, CIBIL and CMR go to their own fields', () => {
+  it('a TOL/TNW ratio line is never read as total outside liabilities or tangible net worth', () => {
+    const result = text('financial_statement', [
+      'Financial year: FY 2024-25',
+      'TOL/TNW: 1.52',
+      'TOL to TNW ratio 2.10',
+      'Outside liabilities / Tangible net worth 1.75',
+      'Total outside liabilities: Rs. 45,00,000',
+      'Tangible net worth: Rs. 30,00,000',
+    ]);
+    assert.deepEqual(byField(result, 'financialProfile.totalOutsideLiabilities').map((f) => f.rawValue), ['Rs. 45,00,000']);
+    assert.deepEqual(byField(result, 'financialProfile.tangibleNetWorth').map((f) => f.rawValue), ['Rs. 30,00,000']);
+  });
+
+  it('net worth and shareholders funds are not tangible net worth; the previous-year column keeps its own period', () => {
+    const result = text('financial_statement', [
+      'Particulars  FY 2024-25  FY 2023-24',
+      'Net worth  60,00,000  55,00,000',
+      "Shareholders' funds  62,00,000  57,00,000",
+      'Tangible net worth  58,00,000  52,00,000',
+    ]);
+    const tnw = byField(result, 'financialProfile.tangibleNetWorth');
+    assert.deepEqual(tnw.map((f) => [f.rawValue, f.period]), [
+      ['58,00,000', 'FY 2024-25'],
+      ['52,00,000', 'FY 2023-24'],
+    ]);
+    assert.deepEqual(byField(result, 'financialProfile.shareholdersEquity').map((f) => f.rawValue), ['62,00,000', '57,00,000']);
+  });
+
+  it('a CMR rank is never a CIBIL score, and a CIBIL score is never a CMR rank', () => {
+    const result = text('credit_report', ['CIBIL MSME Rank (CMR): CMR-4', 'CIBIL Score: 765']);
+    assert.deepEqual(byField(result, 'financialProfile.commercialCmrRank').map((f) => f.rawValue), ['CMR-4']);
+    assert.deepEqual(byField(result, 'financialProfile.personalCibilScore').map((f) => f.rawValue), ['765']);
+  });
+});
+
+describe('credit report dates', () => {
+  it("a lender's past enquiry date is never read as the report date", () => {
+    const result = text('credit_report', [
+      'CIBIL Score: 765',
+      'Enquiries (FICTIONAL)',
+      'Date Of Enquiry 12/01/2025',
+      'Date Of Enquiry 03/06/2024',
+      'Enquiry date: 15/02/2023',
+    ]);
+    assert.equal(byField(result, 'financialProfile.personalCreditReportDate').length, 0);
+    assert.deepEqual(byField(result, 'financialProfile.personalCibilScore').map((f) => f.rawValue), ['765']);
+  });
+
+  it('control: a printed report date is still read', () => {
+    const result = text('credit_report', ['Report date: 10/09/2025', 'CIBIL Score: 765']);
+    assert.deepEqual(byField(result, 'financialProfile.personalCreditReportDate').map((f) => f.rawValue), ['10/09/2025']);
+  });
+});

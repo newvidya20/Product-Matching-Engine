@@ -436,6 +436,9 @@ export interface OcrPagesResult {
   pagesTimedOut: number;
 }
 
+/** Calls to ocrImages and images handed to it, so tests can prove a text file never reaches OCR. Counts only. */
+export const ocrStatsForTests = { calls: 0, images: 0 };
+
 /**
  * Reads each image (PNG, JPEG, WebP bytes) in order. The document budget starts once a worker is
  * ready for this document, never while it queues. A page that times out is skipped and the next
@@ -447,6 +450,8 @@ export async function ocrImages(
   signal: AbortSignal,
   options: { pageTimeoutMs?: number; budgetMs?: number; startTimeoutMs?: number } = {}
 ): Promise<OcrPagesResult> {
+  ocrStatsForTests.calls += 1;
+  ocrStatsForTests.images += images.length;
   if (!isOcrAvailable()) throw new OcrError('ocr_unavailable');
   const pageTimeoutMs = options.pageTimeoutMs ?? OCR_PAGE_TIMEOUT_MS;
   const startTimeoutMs = options.startTimeoutMs ?? OCR_WORKER_START_TIMEOUT_MS;

@@ -78,10 +78,14 @@ export function calculateFinancialRatios(
       ? ebit / interestExpense
       : null;
 
+  // DSCR only when all three inputs are stated: a blank principal or EMI is unknown, never 0 (0 is a real value).
+  // Zero or negative debt service gives null, never Infinity.
   const totalDebtService =
-    (annualScheduledPrincipalRepayments ?? 0) + (existingMonthlyEmi ? existingMonthlyEmi * 12 : 0);
+    annualScheduledPrincipalRepayments !== null && existingMonthlyEmi !== null
+      ? annualScheduledPrincipalRepayments + existingMonthlyEmi * 12
+      : null;
   const dscr =
-    totalDebtService > 0 && operatingCashFlow !== null
+    totalDebtService !== null && totalDebtService > 0 && operatingCashFlow !== null
       ? operatingCashFlow / totalDebtService
       : null;
 
@@ -90,8 +94,9 @@ export function calculateFinancialRatios(
       ? ((annualRevenue - previousAnnualRevenue) / previousAnnualRevenue) * 100
       : null;
 
+  // Revenue of 0 is the denominator: null, never Infinity.
   const bankingTurnoverRatio =
-    averageMonthlyBankingCredits && averageMonthlyBankingCredits !== 0 && annualRevenue !== null
+    averageMonthlyBankingCredits && averageMonthlyBankingCredits !== 0 && annualRevenue !== null && annualRevenue !== 0
       ? (averageMonthlyBankingCredits * 12 / annualRevenue) * 100
       : null;
 

@@ -35,6 +35,7 @@ export function passingInput(overrides: Partial<EligibilityInput> = {}): Eligibi
     tangibleNetWorth: 4_000_000,
     annualScheduledPrincipalRepayments: 600_000,
     existingMonthlyEmi: 100_000,
+    operatingCashFlow: 3_600_000, // DSCR 36 lakh / (6 lakh + 1 lakh x 12) = 2.00
     averageMonthlyBankingCredits: 1_500_000,
     gstAnnualTurnover: 18_000_000,
     gstComplianceStatus: 'compliant',

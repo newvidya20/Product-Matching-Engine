@@ -63,9 +63,11 @@ export const enumLabel = (value: string): string => ENUM_LABELS[value] || value;
 /** Units counted in whole steps (score 699, rank 7); the rest are compared at 2 dp. */
 const STEP: Partial<Record<CriterionUnit, number>> = { score: 1, rank: 1, ratio: 0.01, multiple: 0.01, percent: 0.01 };
 
-/** e.g. 'At least 1.25 (1.10 to 1.24 is conditional)', 'At most 6 (7 is conditional)', 'At least 3 years'. */
+/** e.g. 'At least 750 (700 to 749 is conditional)', 'At most 4.00', 'Above 1.00', 'At least 3 years'. */
 export function expectedNumeric(rule: NumericCriterionRule): string {
   const f = (v: number) => formatValue(rule.unit, v);
+  // strict: exclusive bound, never with a band (rules.ts), e.g. 'Above 1.00', 'Below 7'.
+  if (rule.strict) return `${rule.kind === 'number_min' ? 'Above' : 'Below'} ${f(rule.passAt)}`;
   const head = `${rule.kind === 'number_min' ? 'At least' : 'At most'} ${f(rule.passAt)}`;
   if (rule.conditionalTo === null || rule.conditionalTo === rule.passAt) return head;
   const step = STEP[rule.unit];

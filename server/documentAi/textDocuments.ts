@@ -187,6 +187,41 @@ export async function renderPdfPages(
   maxPages: number = MAX_RENDERED_PDF_PAGES,
   firstPage = 1
 ): Promise<Buffer[]> {
+  const start = Math.max(1, Math.floor(firstPage));
+  return renderPdfPageList(bytes, signal, (numPages) => {
+    const end = Math.min(numPages, start + Math.max(1, Math.floor(maxPages)) - 1);
+    return Array.from({ length: Math.max(0, end - start + 1) }, (_, i) => start + i);
+  });
+}
+
+/**
+ * Renders the listed pages only (1-based, at most MAX_RENDERED_PDF_PAGES), as PNG bytes: the scanned
+ * pages of a PDF whose other pages have a text layer. Image i is always pageNumbers[i]: rendering
+ * stops at the first page that fails or times out, exactly as renderPdfPages does.
+ */
+export async function renderPdfPageNumbers(
+  bytes: Uint8Array,
+  signal: AbortSignal,
+  pageNumbers: readonly number[]
+): Promise<Buffer[]> {
+  const wanted = pageNumbers.slice(0, MAX_RENDERED_PDF_PAGES);
+  if (wanted.length === 0) return [];
+  return renderPdfPageList(bytes, signal, (numPages) => wanted.filter((n) => Number.isInteger(n) && n >= 1 && n <= numPages));
+}
+
+/**
+ * Render calls, and the page numbers the last call rendered, so tests can prove a digital PDF is
+ * never rendered and a mixed one only on its scanned pages. Numbers only, never content; bounded.
+ */
+export const renderStatsForTests = { calls: 0, lastPageNumbers: [] as number[] };
+
+async function renderPdfPageList(
+  bytes: Uint8Array,
+  signal: AbortSignal,
+  choosePages: (numPages: number) => number[]
+): Promise<Buffer[]> {
+  renderStatsForTests.calls += 1;
+  renderStatsForTests.lastPageNumbers = [];
   const pdfjs = await loadPdfjs(); // shared with the text reader: imported once per process
   const task = pdfjs.getDocument({ data: new Uint8Array(bytes), disableFontFace: true, verbosity: 0 });
   const stop = () => void task.destroy().catch(() => undefined);
@@ -195,10 +230,8 @@ export async function renderPdfPages(
   try {
     const document = await withTimeout(task.promise, RENDER_PAGE_TIMEOUT_MS);
     const factory = (document as unknown as { canvasFactory: CanvasFactory }).canvasFactory;
-    const start = Math.max(1, Math.floor(firstPage));
-    const end = Math.min(document.numPages, start + Math.max(1, Math.floor(maxPages)) - 1);
     let deadline = Date.now() + RENDER_DOCUMENT_BUDGET_MS;
-    for (let pageNumber = start; pageNumber <= end; pageNumber += 1) {
+    for (const pageNumber of choosePages(document.numPages)) {
       if (signal.aborted) break;
       deadline += await acquireRenderer(signal); // time queued is not this document's work
       try {
@@ -207,6 +240,7 @@ export async function renderPdfPages(
         const image = await renderOnePage(document, pageNumber, factory, signal, timeoutMs);
         if (!image) break;
         images.push(image);
+        renderStatsForTests.lastPageNumbers.push(pageNumber);
       } finally {
         releaseRenderer();
       }

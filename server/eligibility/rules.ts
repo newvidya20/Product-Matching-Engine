@@ -105,6 +105,7 @@ export function validateRuleConfig(raw: unknown): string[] {
     }
     if (def.kind === 'enum') {
       if (c.unit !== 'enum') p('unit');
+      if (c.strict !== undefined) p('strict');
       if (!isStrArr(c.pass) || !isStrArr(c.conditional) || !isStrArr(c.fail)) {
         p('lists');
         continue;
@@ -125,6 +126,9 @@ export function validateRuleConfig(raw: unknown): string[] {
         if (def.kind === 'number_min' && c.conditionalTo > c.passAt) p('conditionalTo:above_passAt');
         if (def.kind === 'number_max' && c.conditionalTo < c.passAt) p('conditionalTo:below_passAt');
       }
+      // strict: exclusive pass bound (e.g. DSCR above 1.00, CMR below 7). No conditional band with it.
+      if (c.strict !== undefined && typeof c.strict !== 'boolean') p('strict');
+      if (c.strict === true && c.conditionalTo !== null) p('strict:conditionalTo_must_be_null');
     }
   }
   if (mandatoryEnabled === 0) problems.push('criteria:no_enabled_mandatory');

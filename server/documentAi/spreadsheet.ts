@@ -364,8 +364,23 @@ export function renderSpreadsheetText(parsed: ParsedSpreadsheet): SpreadsheetTex
 
 // ------------------------------------------------------------------ PDF text layer
 
-/** Below this, a PDF has no real text layer: a scanner's watermark, say. */
-const MIN_PDF_TEXT_CHARS = 50;
+/** Below this, a PDF has no real text layer: a scanner's watermark, say. Also the per-page bar. */
+export const MIN_PDF_TEXT_CHARS = 50;
+
+/** Characters other than whitespace on one page's lines. */
+export function pdfTextChars(lines: readonly string[]): number {
+  let characters = 0;
+  for (const line of lines) characters += line.replace(/\s/g, '').length;
+  return characters;
+}
+
+/**
+ * 1-based numbers of the pages read whose text layer has no meaningful text (under
+ * MIN_PDF_TEXT_CHARS): in a PDF that mixes text pages with scanned ones, these need OCR.
+ */
+export function pagesWithoutText(pages: ReadonlyArray<readonly string[]>): number[] {
+  return pages.flatMap((lines, index) => (pdfTextChars(lines) < MIN_PDF_TEXT_CHARS ? [index + 1] : []));
+}
 /**
  * Time one read of a PDF's text layer may take (DOCUMENT_AI_PDF_READ_TIMEOUT_MS, default 60 s). It
  * starts only once pdf.js has loaded: on a small instance the first import alone can take longer
@@ -581,8 +596,7 @@ export async function readPdfText(bytes: Uint8Array, signal: AbortSignal, option
     try {
       const { pages, totalPages } = await raceSignal(readPdfLines(bytes, stop, engine, maxPages), stop);
       const lines = pages.flat();
-      let characters = 0;
-      for (const line of lines) characters += line.replace(/\s/g, '').length;
+      const characters = pdfTextChars(lines);
       const source: DocumentSource = characters < MIN_PDF_TEXT_CHARS ? { kind: 'no_text' } : { kind: 'pdf', lines, pages };
       return { source, totalPages, pagesRead: pages.length };
     } catch (error) {

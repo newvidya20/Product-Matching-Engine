@@ -35,9 +35,21 @@ function crit(result: EligibilityResult, id: EligibilityCriterionId): CriterionR
 
 const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 
-/** DSCR = PAT / principal with every other DSCR input 0. */
-const dscrOf = (pat: number) =>
-  run({ netProfitAfterTax: pat, depreciation: 0, amortization: 0, interestExpense: 0, annualScheduledPrincipalRepayments: 100 });
+/** The five criteria disabled by the user's decision (kept in the file for later). */
+const DISABLED_IDS: EligibilityCriterionId[] = ['gst_turnover', 'gst_compliance', 'existing_emi_foir', 'current_ratio', 'interest_coverage'];
+
+/** The seed with every criterion enabled, to keep testing the engine logic of the disabled ones. */
+const ALL_ON = (() => {
+  const r = clone(RULES);
+  for (const id of DISABLED_IDS) r.criteria[id].enabled = true;
+  return r;
+})();
+
+/** Skips other than the disabled-by-default ones. */
+const nonDefaultSkips = (r: EligibilityResult) => r.skipped.filter((s) => !(s.reason === 'disabled' && DISABLED_IDS.includes(s.criterionId)));
+
+/** DSCR = operating cash flow / principal, with EMI 0. */
+const dscrOf = (ocf: number) => run({ operatingCashFlow: ocf, annualScheduledPrincipalRepayments: 100, existingMonthlyEmi: 0 });
 
 describe('seed rules file', () => {
   it('equals the JSON in contract section 5.2 exactly', () => {
@@ -57,7 +69,11 @@ describe('four outcomes', () => {
     const r = run();
     assert.equal(r.outcome, 'ELIGIBLE');
     assert.equal(r.counts.passed, r.criteria.length);
-    assert.equal(r.criteria.length, 14);
+    assert.equal(r.criteria.length, 9); // 14 defined, 5 disabled
+    assert.deepEqual(
+      r.skipped.map((s) => [s.criterionId, s.reason]),
+      DISABLED_IDS.map((id) => [id, 'disabled'])
+    );
     assert.deepEqual(r.missingMandatoryInputs, []);
     assert.deepEqual(r.missingOptionalInputs, []);
     assert.equal(r.rulesVersion, RULES.rulesVersion);
@@ -109,11 +125,11 @@ describe('outcome precedence', () => {
   });
 
   it('a missing non-mandatory input never gives ELIGIBLE', () => {
-    const r = run({ currentAssets: null });
-    assert.equal(crit(r, 'current_ratio').status, 'missing');
-    assert.equal(crit(r, 'current_ratio').severity, 'condition');
+    const r = run({ totalOutsideLiabilities: null });
+    assert.equal(crit(r, 'tol_tnw').status, 'missing');
+    assert.equal(crit(r, 'tol_tnw').severity, 'condition');
     assert.equal(r.outcome, 'CONDITIONALLY_ELIGIBLE');
-    assert.deepEqual(r.missingOptionalInputs, ['currentAssets']);
+    assert.deepEqual(r.missingOptionalInputs, ['totalOutsideLiabilities']);
     assert.deepEqual(r.missingMandatoryInputs, []);
   });
 
@@ -149,15 +165,15 @@ describe('applicability and skips', () => {
   it('an entity type not in the list skips the criterion', () => {
     const r = run({ entityType: 'proprietorship', commercialCmrRank: null });
     assert.ok(!r.criteria.some((c) => c.criterionId === 'commercial_cmr'));
-    assert.deepEqual(r.skipped, [{ criterionId: 'commercial_cmr', reason: 'entity_type_not_applicable' }]);
+    assert.deepEqual(nonDefaultSkips(r), [{ criterionId: 'commercial_cmr', reason: 'entity_type_not_applicable' }]);
     assert.equal(r.outcome, 'ELIGIBLE');
   });
 
   it('skipWhen skips on a matching value, and a null field does not match', () => {
     const r1 = run({ commercialCreditReportStatus: 'not_applicable', commercialCmrRank: null });
-    assert.deepEqual(r1.skipped, [{ criterionId: 'commercial_cmr', reason: 'skip_when_matched' }]);
+    assert.deepEqual(nonDefaultSkips(r1), [{ criterionId: 'commercial_cmr', reason: 'skip_when_matched' }]);
 
-    const r2 = run({ gstComplianceStatus: 'not_applicable', gstAnnualTurnover: null });
+    const r2 = run({ gstComplianceStatus: 'not_applicable', gstAnnualTurnover: null }, ALL_ON);
     assert.deepEqual(
       r2.skipped.map((s) => [s.criterionId, s.reason]),
       [
@@ -166,7 +182,7 @@ describe('applicability and skips', () => {
       ]
     );
 
-    const r3 = run({ gstComplianceStatus: null });
+    const r3 = run({ gstComplianceStatus: null }, ALL_ON);
     assert.equal(crit(r3, 'gst_compliance').status, 'missing');
     assert.equal(crit(r3, 'gst_turnover').status, 'passed');
 
@@ -179,60 +195,96 @@ describe('applicability and skips', () => {
     rules.criteria.business_vintage.enabled = false;
     const r = run({ businessVintageYears: null }, rules);
     assert.ok(!r.criteria.some((c) => c.criterionId === 'business_vintage'));
-    assert.deepEqual(r.skipped, [{ criterionId: 'business_vintage', reason: 'disabled' }]);
+    assert.deepEqual(nonDefaultSkips(r), [{ criterionId: 'business_vintage', reason: 'disabled' }]);
+    assert.equal(r.outcome, 'ELIGIBLE');
+  });
+
+  it('criteria disabled in the seed are skipped, and their null inputs are never asked for', () => {
+    const r = run({
+      gstAnnualTurnover: null,
+      gstComplianceStatus: null,
+      ebitda: null,
+      ebit: null,
+      currentAssets: null,
+      currentLiabilities: null,
+      interestExpense: null,
+    });
+    for (const id of DISABLED_IDS) {
+      assert.ok(!r.criteria.some((c) => c.criterionId === id), `${id} is not a result row`);
+      assert.ok(r.skipped.some((s) => s.criterionId === id && s.reason === 'disabled'), `${id} is skipped as disabled`);
+    }
+    assert.equal(r.outcome, 'ELIGIBLE');
+    assert.deepEqual(r.missingMandatoryInputs, []);
+    assert.deepEqual(r.missingOptionalInputs, []);
+    assert.equal(r.counts.missing, 0);
+    assert.doesNotMatch(r.outcomeReason, /GST|EBITDA|EBIT|Current|Interest/);
+  });
+
+  it('a disabled criterion whose value would fail never affects the outcome', () => {
+    const r = run({ gstComplianceStatus: 'not_compliant', currentAssets: 1, existingMonthlyEmi: 0, ebitda: -1 });
     assert.equal(r.outcome, 'ELIGIBLE');
   });
 });
 
 describe('DSCR (section 4.1)', () => {
-  it('computed from stated financials', () => {
+  it('computed with the project formula: operating cash flow / (principal + EMI x 12)', () => {
     const r = run();
     const d = crit(r, 'dscr');
-    // (15 + 4 + 1 + 5) / (5 + 6) lakh = 2.2727
-    assert.equal(d.actual, 2.27);
-    assert.equal(d.actualDisplay, '2.27');
+    // 36 lakh / (6 lakh + 1 lakh x 12) = 2.00
+    assert.equal(d.actual, 2);
+    assert.equal(d.actualDisplay, '2.00');
     assert.equal(d.sourceField, 'derived:dscr');
-    assert.equal(r.derived.dscr, 2.27);
+    assert.deepEqual(d.inputsUsed.map((u) => u.field), ['operatingCashFlow', 'annualScheduledPrincipalRepayments', 'existingMonthlyEmi']);
+    assert.equal(r.derived.dscr, 2);
     assert.equal(r.derived.dscrBasis, 'computed');
   });
 
-  it('null amortisation is left out of the numerator, and the reason says so', () => {
-    const r = run({ amortization: null });
-    const d = crit(r, 'dscr');
-    assert.equal(d.actual, 2.18); // 24 / 11
-    assert.match(d.reason, /Amortisation not provided/);
+  it('profit, depreciation, amortisation and interest do not feed DSCR', () => {
+    const d = crit(run({ netProfitAfterTax: null, depreciation: null, amortization: null, interestExpense: null }), 'dscr');
     assert.equal(d.status, 'passed');
-    assert.ok(!d.missingInputs.length);
+    assert.equal(d.actual, 2);
   });
 
-  it('existing monthly EMI is not used', () => {
-    assert.equal(crit(run({ existingMonthlyEmi: 900_000 }), 'dscr').actual, 2.27);
-    assert.equal(crit(run({ existingMonthlyEmi: null }), 'dscr').actual, 2.27);
+  it('existing monthly EMI is in the denominator (x 12)', () => {
+    assert.equal(crit(run({ existingMonthlyEmi: 0 }), 'dscr').actual, 6); // 36 / 6
+    assert.equal(crit(run({ existingMonthlyEmi: 250_000 }), 'dscr').actual, 1); // 36 / (6 + 30)
   });
 
   it('missing when a required input is null and no stated DSCR; dscrStated is not listed', () => {
-    const r = run({ netProfitAfterTax: null });
+    const r = run({ operatingCashFlow: null });
     const d = crit(r, 'dscr');
     assert.equal(d.status, 'missing');
-    assert.deepEqual(d.missingInputs, ['netProfitAfterTax']);
+    assert.deepEqual(d.missingInputs, ['operatingCashFlow']);
     assert.equal(r.derived.dscr, null);
     assert.equal(r.derived.dscrBasis, null);
     assert.equal(r.outcome, 'INCOMPLETE_DOCUMENTS');
+    assert.match(r.outcomeReason, /Operating cash flow is not provided \(mandatory\)/);
   });
 
   it('lists every null required input', () => {
-    const d = crit(run({ depreciation: null, annualScheduledPrincipalRepayments: null, amortization: null }), 'dscr');
-    assert.deepEqual(d.missingInputs, ['depreciation', 'annualScheduledPrincipalRepayments']);
+    const d = crit(run({ operatingCashFlow: null, annualScheduledPrincipalRepayments: null, existingMonthlyEmi: null }), 'dscr');
+    assert.deepEqual(d.missingInputs, ['operatingCashFlow', 'annualScheduledPrincipalRepayments', 'existingMonthlyEmi']);
   });
 
-  it('principal repayments null is missing, never treated as 0', () => {
-    const d = crit(run({ annualScheduledPrincipalRepayments: null }), 'dscr');
-    assert.equal(d.status, 'missing');
-    assert.deepEqual(d.missingInputs, ['annualScheduledPrincipalRepayments']);
+  it('principal repayments or EMI null is missing, never treated as 0', () => {
+    for (const key of ['annualScheduledPrincipalRepayments', 'existingMonthlyEmi'] as const) {
+      const d = crit(run({ [key]: null }), 'dscr');
+      assert.equal(d.status, 'missing');
+      assert.deepEqual(d.missingInputs, [key]);
+    }
+  });
+
+  it('a key absent from a stored input is read as missing, never computed as undefined', () => {
+    const legacy = passingInput() as unknown as Record<string, unknown>;
+    delete legacy.operatingCashFlow;
+    const r = evaluateEligibility(legacy as unknown as EligibilityInput, RULES, { rulesHash: HASH });
+    assert.equal(crit(r, 'dscr').status, 'missing');
+    assert.deepEqual(crit(r, 'dscr').missingInputs, ['operatingCashFlow']);
+    assert.equal(r.outcome, 'INCOMPLETE_DOCUMENTS');
   });
 
   it('stated DSCR is used only when not computable, and is capped at conditional', () => {
-    const r = run({ netProfitAfterTax: null, dscrStated: 1.5 });
+    const r = run({ operatingCashFlow: null, dscrStated: 1.5 });
     const d = crit(r, 'dscr');
     assert.equal(d.status, 'conditional');
     assert.equal(d.severity, 'condition');
@@ -242,18 +294,20 @@ describe('DSCR (section 4.1)', () => {
     assert.equal(r.outcome, 'CONDITIONALLY_ELIGIBLE');
 
     const computedWins = run({ dscrStated: 0.5 });
-    assert.equal(crit(computedWins, 'dscr').actual, 2.27);
+    assert.equal(crit(computedWins, 'dscr').actual, 2);
     assert.equal(computedWins.derived.dscrBasis, 'computed');
   });
 
-  it('stated DSCR below the band still fails', () => {
-    const r = run({ interestExpense: null, dscrStated: 0.9 });
-    assert.equal(crit(r, 'dscr').status, 'failed');
-    assert.equal(r.outcome, 'NOT_ELIGIBLE');
+  it('stated DSCR of 1.00 or below fails', () => {
+    for (const stated of [1, 0.9]) {
+      const r = run({ existingMonthlyEmi: null, dscrStated: stated });
+      assert.equal(crit(r, 'dscr').status, 'failed');
+      assert.equal(r.outcome, 'NOT_ELIGIBLE');
+    }
   });
 
-  it('denominator 0 passes with no number', () => {
-    const r = run({ interestExpense: 0, annualScheduledPrincipalRepayments: 0 });
+  it('denominator 0 (principal 0 and EMI 0) passes with no number', () => {
+    const r = run({ annualScheduledPrincipalRepayments: 0, existingMonthlyEmi: 0 });
     const d = crit(r, 'dscr');
     assert.equal(d.status, 'passed');
     assert.equal(d.actual, null);
@@ -261,22 +315,21 @@ describe('DSCR (section 4.1)', () => {
     assert.equal(r.derived.dscr, null);
   });
 
-  it('boundaries at passAt and conditionalTo, rounded half away from zero before comparison', () => {
-    assert.equal(crit(dscrOf(125), 'dscr').status, 'passed'); // 1.25
-    assert.equal(crit(dscrOf(124.5), 'dscr').status, 'passed'); // 1.245 -> 1.25
-    assert.equal(crit(dscrOf(124.5), 'dscr').actual, 1.25);
-    assert.equal(crit(dscrOf(124.4), 'dscr').status, 'conditional'); // 1.244 -> 1.24
-    assert.equal(crit(dscrOf(110), 'dscr').status, 'conditional'); // 1.10
-    assert.equal(crit(dscrOf(109.5), 'dscr').status, 'conditional'); // 1.095 -> 1.10
-    assert.equal(crit(dscrOf(109.4), 'dscr').status, 'failed'); // 1.094 -> 1.09
+  it('strictly above 1.00, compared on the value rounded half away from zero', () => {
+    assert.equal(crit(dscrOf(101), 'dscr').status, 'passed'); // 1.01
+    assert.equal(crit(dscrOf(100), 'dscr').status, 'failed'); // 1.00
+    assert.equal(crit(dscrOf(100.4), 'dscr').status, 'failed'); // 1.004 -> 1.00
+    assert.equal(crit(dscrOf(100.4), 'dscr').actual, 1);
+    assert.equal(crit(dscrOf(100.5), 'dscr').status, 'passed'); // 1.005 -> 1.01
+    assert.equal(crit(dscrOf(100.5), 'dscr').actual, 1.01);
     assert.equal(crit(dscrOf(-50), 'dscr').status, 'failed');
   });
 
   it('expected text and outcome reason', () => {
-    assert.equal(crit(run(), 'dscr').expected, 'At least 1.25 (1.10 to 1.24 is conditional)');
+    assert.equal(crit(run(), 'dscr').expected, 'Above 1.00');
     const r = dscrOf(92);
     assert.equal(r.outcome, 'NOT_ELIGIBLE');
-    assert.match(r.outcomeReason, /0\.92 is below the minimum of 1\.10 \(mandatory\)\.$/);
+    assert.match(r.outcomeReason, /0\.92 is not above 1\.00 \(it must be strictly above 1\.00\) \(mandatory\)\.$/);
   });
 });
 
@@ -311,13 +364,13 @@ describe('zero and negative denominators (section 4)', () => {
 
   it('FOIR: EMI 0 passes as 0% whatever EBITDA is; EBITDA <= 0 with EMI fails', () => {
     for (const ebitda of [-500_000, 0, 3_000_000]) {
-      const c = crit(run({ existingMonthlyEmi: 0, ebitda }), 'existing_emi_foir');
+      const c = crit(run({ existingMonthlyEmi: 0, ebitda }, ALL_ON), 'existing_emi_foir');
       assert.equal(c.status, 'passed');
       assert.equal(c.actual, 0);
       assert.equal(c.actualDisplay, '0%');
     }
     for (const ebitda of [0, -1]) {
-      const r = run({ existingMonthlyEmi: 10_000, ebitda });
+      const r = run({ existingMonthlyEmi: 10_000, ebitda }, ALL_ON);
       assert.equal(crit(r, 'existing_emi_foir').status, 'failed');
       assert.equal(crit(r, 'existing_emi_foir').actualDisplay, 'EBITDA does not cover any EMI');
       assert.equal(r.derived.foirPercent, null);
@@ -325,10 +378,10 @@ describe('zero and negative denominators (section 4)', () => {
   });
 
   it('current liabilities 0 and interest 0 pass', () => {
-    const c = crit(run({ currentLiabilities: 0 }), 'current_ratio');
+    const c = crit(run({ currentLiabilities: 0 }, ALL_ON), 'current_ratio');
     assert.equal(c.status, 'passed');
     assert.equal(c.actualDisplay, 'No current liabilities');
-    const i = crit(run({ interestExpense: 0 }), 'interest_coverage');
+    const i = crit(run({ interestExpense: 0 }, ALL_ON), 'interest_coverage');
     assert.equal(i.status, 'passed');
     assert.equal(i.actualDisplay, 'No interest expense');
   });
@@ -345,27 +398,31 @@ describe('threshold boundaries', () => {
     assert.equal(status(400.5), 'failed'); // 4.005 -> 4.01
   });
 
-  it('CIBIL score band', () => {
+  it('CIBIL score band (user core rule: 750+ eligible, 700 to 749 conditional, below 700 fails)', () => {
     const status = (s: number) => crit(run({ personalCibilScore: s }), 'personal_cibil').status;
-    assert.equal(status(700), 'passed');
-    assert.equal(status(699), 'conditional');
-    assert.equal(status(650), 'conditional');
-    assert.equal(status(649), 'failed');
+    assert.equal(status(750), 'passed');
+    assert.equal(status(749), 'conditional');
+    assert.equal(status(700), 'conditional');
+    assert.equal(status(699), 'failed');
+    assert.equal(crit(run(), 'personal_cibil').expected, 'At least 750 (700 to 749 is conditional)');
   });
 
-  it('CMR rank band and text', () => {
+  it('CMR rank below 7 (strict, no band) and text', () => {
     const status = (n: number) => crit(run({ commercialCmrRank: n }), 'commercial_cmr').status;
+    assert.equal(status(1), 'passed');
     assert.equal(status(6), 'passed');
-    assert.equal(status(7), 'conditional');
-    assert.equal(status(8), 'failed');
-    assert.equal(crit(run(), 'commercial_cmr').expected, 'At most 6 (7 is conditional)');
+    assert.equal(status(7), 'failed');
+    assert.equal(status(10), 'failed');
+    assert.equal(crit(run({ commercialCmrRank: 6.5 }), 'commercial_cmr').status, 'passed'); // no validation: still below 7
+    assert.equal(crit(run(), 'commercial_cmr').expected, 'Below 7');
+    assert.equal(crit(run({ commercialCmrRank: 7 }), 'commercial_cmr').reason, 'Commercial CMR rank 7 is not below 7 (it must be below 7).');
   });
 
   it('enum classification', () => {
     assert.equal(crit(run({ profitabilityStatus: 'profitable_1_year' }), 'profitability').status, 'conditional');
     assert.equal(crit(run({ profitabilityStatus: 'breakeven_or_early' }), 'profitability').status, 'conditional');
     assert.equal(run({ profitabilityStatus: 'loss_making' }).outcome, 'NOT_ELIGIBLE');
-    assert.equal(crit(run({ gstComplianceStatus: 'not_compliant' }), 'gst_compliance').status, 'failed');
+    assert.equal(crit(run({ gstComplianceStatus: 'not_compliant' }, ALL_ON), 'gst_compliance').status, 'failed');
   });
 
   it('annual turnover in rupees with Indian grouping', () => {
@@ -408,7 +465,8 @@ describe('nothing mandatory evaluated (rule 2a)', () => {
   it('also when a non-mandatory row is conditional or failed', () => {
     const rules = clone(RULES);
     for (const id of mandatoryIds(rules)) rules.criteria[id].appliesToEntityTypes = ['llp'];
-    assert.equal(run({ gstComplianceStatus: 'not_compliant' }, rules).outcome, 'INCOMPLETE_DOCUMENTS');
+    assert.equal(run({ totalOutsideLiabilities: 20_000_000 }, rules).outcome, 'INCOMPLETE_DOCUMENTS'); // tol_tnw failed
+    assert.equal(run({ businessVintageYears: 2.5, totalOutsideLiabilities: null }, rules).outcome, 'INCOMPLETE_DOCUMENTS');
   });
 
   it('every mandatory criterion skipped by skipWhen gives INCOMPLETE_DOCUMENTS', () => {
@@ -439,9 +497,10 @@ describe('nothing mandatory evaluated (rule 2a)', () => {
 });
 
 describe('bureau score (section 4.2)', () => {
-  it('is compared exactly, never rounded: 699.995 is not 700', () => {
+  it('is compared exactly, never rounded: 699.995 is not 700, 749.995 is not 750', () => {
     const c = crit(run({ personalCibilScore: 699.995 }), 'personal_cibil'); // engine called without validation
-    assert.equal(c.status, 'conditional');
+    assert.equal(c.status, 'failed');
+    assert.equal(crit(run({ personalCibilScore: 749.995 }), 'personal_cibil').status, 'conditional');
     assert.equal(c.actual, 699.995);
     assert.equal(c.actualDisplay, '699.995');
     assert.equal(crit(run({ personalCibilScore: null, promoterCibilScore: 649.999 }), 'personal_cibil').status, 'failed');
@@ -457,14 +516,14 @@ describe('bureau score (section 4.2)', () => {
   });
 
   it('uses the lower of personal and promoter scores and names it', () => {
-    const c = crit(run({ personalCibilScore: 760, promoterCibilScore: 680 }), 'personal_cibil');
-    assert.equal(c.actual, 680);
+    const c = crit(run({ personalCibilScore: 760, promoterCibilScore: 720 }), 'personal_cibil');
+    assert.equal(c.actual, 720);
     assert.equal(c.status, 'conditional');
     assert.equal(c.sourceField, 'financialProfile.promoterCibilScore');
   });
 
   it('uses the promoter score alone when personal is null', () => {
-    const c = crit(run({ personalCibilScore: null, promoterCibilScore: 720 }), 'personal_cibil');
+    const c = crit(run({ personalCibilScore: null, promoterCibilScore: 780 }), 'personal_cibil');
     assert.equal(c.status, 'passed');
     assert.equal(c.sourceField, 'financialProfile.promoterCibilScore');
   });
@@ -511,6 +570,14 @@ describe('rules validation (section 5.3)', () => {
     assert.ok(invalidWith((r) => (r.criteria.dscr.conditionalTo = 1.5)));
     assert.ok(invalidWith((r) => (r.criteria.tol_tnw.conditionalTo = 2)));
     assert.ok(!invalidWith((r) => (r.criteria.dscr.conditionalTo = null)));
+  });
+
+  it('validates the strict (exclusive) bound', () => {
+    assert.ok(invalidWith((r) => (r.criteria.dscr.strict = 'yes')));
+    assert.ok(invalidWith((r) => (r.criteria.dscr.conditionalTo = 0.9))); // strict needs no band
+    assert.ok(invalidWith((r) => (r.criteria.profitability.strict = true)));
+    assert.ok(!invalidWith((r) => (r.criteria.tol_tnw.strict = false)));
+    assert.ok(!invalidWith((r) => delete r.criteria.dscr.strict));
   });
 
   it('requires every enum value in exactly one list or skipWhen', () => {

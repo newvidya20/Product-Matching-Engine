@@ -47,11 +47,19 @@ import {
   type RawBankMonth,
   type RawField,
 } from './prompt.ts';
-import { buildSpreadsheetPreview, parseSpreadsheet, readPdfText, renderSpreadsheetText } from './spreadsheet.ts';
-import { MAX_RENDERED_PDF_PAGES, readDocxLines, readPlainTextLines, renderPdfPages } from './textDocuments.ts';
+import { buildSpreadsheetPreview, pagesWithoutText, parseSpreadsheet, readPdfText, renderSpreadsheetText } from './spreadsheet.ts';
+import { MAX_RENDERED_PDF_PAGES, readDocxLines, readPlainTextLines, renderPdfPageNumbers, renderPdfPages } from './textDocuments.ts';
 import { classifyLocally } from './localClassifier.ts';
 import { extractLocally, LOCAL_OCR_CONFIDENCE, type LocalContent, type LocalExtraction } from './localExtractors.ts';
-import { currentExtractionObserver, inModelPhase, isOcrAvailable, MAX_OCR_PAGES, OcrError, ocrImages } from './ocr.ts';
+import {
+  currentExtractionObserver,
+  inModelPhase,
+  isOcrAvailable,
+  MAX_OCR_PAGES,
+  OcrError,
+  ocrImages,
+  type OcrPagesResult,
+} from './ocr.ts';
 import type { DocumentSource } from './validators.ts';
 
 const asParts = (part: Part | Part[]): Part[] => (Array.isArray(part) ? part : [part]);
@@ -163,7 +171,13 @@ function noteLlmFailure(code: ExtractionErrorCode, jobId?: string): void {
 interface PreparedDocument {
   /** What the local extractors read. Null when the server could read no text at all. */
   content: LocalContent | null;
+  /** Every page's text came from OCR. */
   fromOcr: boolean;
+  /**
+   * A PDF with a text layer on some pages and scans on others: the 1-based pages whose text came
+   * from OCR. Empty or absent when no page was OCR'd, or when the whole file was (`fromOcr`).
+   */
+  ocrPages?: ReadonlySet<number>;
   /** Text for the local classifier: titles sit at the start. */
   classificationText: string;
   /**
@@ -235,16 +249,60 @@ function modelTakesText(): boolean {
   return activeLlmProvider() === 'openrouter' && openRouterSendsPdfAsText();
 }
 
+/** Local OCR of the images, at most MAX_OCR_PAGES. Null when OCR is unavailable. */
+async function ocrResult(images: readonly Uint8Array[], signal: AbortSignal): Promise<OcrPagesResult | null> {
+  try {
+    return await ocrImages(images.slice(0, MAX_OCR_PAGES), signal);
+  } catch (error) {
+    if (error instanceof OcrError) return null;
+    throw error; // an abort
+  }
+}
+
 /** Lines per page from local OCR. Empty when OCR is unavailable or read nothing. */
 async function ocr(images: readonly Uint8Array[], signal: AbortSignal): Promise<string[][]> {
   if (images.length === 0) return [];
-  try {
-    const { pages } = await ocrImages(images.slice(0, MAX_OCR_PAGES), signal);
-    return hasText(pages) ? pages : [];
-  } catch (error) {
-    if (error instanceof OcrError) return [];
-    throw error; // an abort
-  }
+  const pages = (await ocrResult(images, signal))?.pages ?? [];
+  return hasText(pages) ? pages : [];
+}
+
+interface FilledPages {
+  pages: string[][];
+  /** Pages whose text came from OCR. */
+  ocrPages: Set<number>;
+  /** A page with no text layer could not be read by OCR (cap, render or OCR failure, OCR off). */
+  unread: boolean;
+}
+
+/**
+ * A PDF whose text layer is good overall can still hold scanned pages: those pages have no
+ * meaningful text of their own (pagesWithoutText). Only they are rendered and read by OCR, within
+ * the OCR page cap; every other page keeps its text layer, and every page keeps its own number.
+ * A page's OCR lines follow whatever text layer it had, so nothing native is ever dropped.
+ */
+async function ocrPagesWithoutText(
+  bytes: Uint8Array,
+  signal: AbortSignal,
+  textPages: ReadonlyArray<readonly string[]>
+): Promise<FilledPages> {
+  const pages = textPages.map((lines) => [...lines]);
+  const empty = pagesWithoutText(textPages);
+  if (empty.length === 0) return { pages, ocrPages: new Set(), unread: false };
+  if (!isOcrAvailable()) return { pages, ocrPages: new Set(), unread: true };
+  const wanted = empty.slice(0, OCR_RENDER_PAGES);
+  const images = await renderPdfPageNumbers(bytes, signal, wanted);
+  if (signal.aborted) throw abortError();
+  const result = images.length > 0 ? await ocrResult(images, signal) : null;
+  const ocrPages = new Set<number>();
+  result?.pages.forEach((lines, index) => {
+    if (lines.length === 0) return;
+    const pageNumber = wanted[index]; // image i is always wanted[i]
+    const own = new Set(pages[pageNumber - 1]);
+    pages[pageNumber - 1].push(...lines.filter((line) => !own.has(line)));
+    ocrPages.add(pageNumber);
+  });
+  const read = result ? result.pages.length - result.pagesTimedOut : 0;
+  return { pages, ocrPages, unread: empty.length > read };
 }
 
 /** Nothing the server could read: only a model can look at the file. */
@@ -278,7 +336,15 @@ async function preparePdf(bytes: Uint8Array, signal: AbortSignal, jobId?: string
   // as if it had no text.
   if (source.kind === 'unreadable' && source.reason === 'pdf_read_timeout') throw new ExtractionError('unreadable_document');
   if (source.kind === 'pdf') {
-    const prepared = { ...prepareText(source.pages ?? [source.lines], source), partial: pagesRead < totalPages };
+    const filled = await ocrPagesWithoutText(bytes, signal, source.pages ?? [source.lines]);
+    // OCR text joins the text the values are checked against, on its own page.
+    const checkedAgainst: DocumentSource =
+      filled.ocrPages.size > 0 ? { kind: 'pdf', lines: filled.pages.flat(), pages: filled.pages } : source;
+    const prepared = {
+      ...prepareText(filled.pages, checkedAgainst),
+      ocrPages: filled.ocrPages,
+      partial: pagesRead < totalPages || filled.unread,
+    };
     return modelTakesText() ? prepared : { ...prepared, classificationPart: filePart, extractionPart: filePart };
   }
 
@@ -518,7 +584,13 @@ async function runExtraction(input: ExtractDocumentInput): Promise<DocumentExtra
 
   // Local extraction first.
   const local: LocalExtraction = prepared.content
-    ? extractLocally({ documentType, content: prepared.content, fromOcr: prepared.fromOcr, complete: !prepared.partial })
+    ? extractLocally({
+        documentType,
+        content: prepared.content,
+        fromOcr: prepared.fromOcr,
+        complete: !prepared.partial,
+        ocrPages: prepared.ocrPages,
+      })
     : { fields: [], bankMonthlyTotals: [] };
   const context = {
     documentId,
@@ -575,9 +647,19 @@ async function runExtraction(input: ExtractDocumentInput): Promise<DocumentExtra
 
   const checkContext = { ...context, injectionSuspected };
   // Text read by OCR: every value, local or the model's, goes to review (see OCR_CONFIDENCE_CAP).
-  const capped = <T extends { confidence: number }>(rows: T[]): T[] =>
-    prepared.fromOcr ? rows.map((row) => ({ ...row, confidence: Math.min(row.confidence, OCR_CONFIDENCE_CAP) })) : rows;
-  const { fields, droppedLowConfidence } = buildCandidates(capped([...local.fields, ...modelFields]), checkContext);
+  // In a PDF with only some pages OCR'd, a local field keeps its confidence only when it was read
+  // on a text-layer page. The model's fields, bank months and GST periods are capped: their page is
+  // not checked against the value, or they combine lines that may come from an OCR'd page.
+  const ocrPages = prepared.ocrPages ?? new Set<number>();
+  const anyOcr = prepared.fromOcr || ocrPages.size > 0;
+  const cap = <T extends { confidence: number }>(row: T): T => ({ ...row, confidence: Math.min(row.confidence, OCR_CONFIDENCE_CAP) });
+  const capped = <T extends { confidence: number }>(rows: T[]): T[] => (anyOcr ? rows.map(cap) : rows);
+  const cappedLocal = (rows: RawField[]): RawField[] => {
+    if (prepared.fromOcr) return rows.map(cap);
+    if (ocrPages.size === 0) return rows;
+    return rows.map((row) => (row.page === null || ocrPages.has(row.page) ? cap(row) : row));
+  };
+  const { fields, droppedLowConfidence } = buildCandidates([...cappedLocal(local.fields), ...capped(modelFields)], checkContext);
 
   return {
     ok: true,
@@ -590,7 +672,7 @@ async function runExtraction(input: ExtractDocumentInput): Promise<DocumentExtra
     injectionSuspected,
     droppedLowConfidence,
     // The audit name also records a partial read, so a reviewer can tell why a field may be missing.
-    model: `${usedModel ? `${activeModelName()}+${LOCAL_MODEL}` : prepared.fromOcr ? `${LOCAL_MODEL}+ocr` : LOCAL_MODEL}${prepared.partial ? '+partial' : ''}`,
+    model: `${usedModel ? `${activeModelName()}+${LOCAL_MODEL}` : anyOcr ? `${LOCAL_MODEL}+ocr` : LOCAL_MODEL}${prepared.partial ? '+partial' : ''}`,
   };
 }
 

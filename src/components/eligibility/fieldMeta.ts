@@ -114,6 +114,7 @@ export const FIELD_GROUPS: FieldGroup[] = [
     title: 'Existing obligations',
     description: 'Zero is a real answer ("no debt"). Blank means not known.',
     fields: [
+      { field: 'operatingCashFlow', label: 'Operating cash flow (₹)', kind: 'currency', hint: 'May be negative. DSCR = operating cash flow / (annual principal repayments + monthly EMI x 12).', supplier: 'Audited financials (cash flow statement)' },
       { field: 'annualScheduledPrincipalRepayments', label: 'Annual scheduled principal repayments (₹)', kind: 'currency', supplier: 'Loan statements, repayment schedule or CMA data' },
       { field: 'existingMonthlyEmi', label: 'Existing monthly EMI (₹)', kind: 'currency', supplier: 'Loan statements or bureau report' },
     ],
@@ -159,7 +160,7 @@ export interface ParsedForm {
 }
 
 /** Fields that may legitimately be negative (matches the server's number rules). */
-const SIGNED_FIELDS = new Set<string>(['netProfitAfterTax', 'ebitda', 'ebit', 'tangibleNetWorth', 'dscrStated']);
+const SIGNED_FIELDS = new Set<string>(['netProfitAfterTax', 'ebitda', 'ebit', 'tangibleNetWorth', 'dscrStated', 'operatingCashFlow']);
 
 const DECIMAL = /^\d+(\.\d+)?$/;
 const WESTERN_GROUPED = /^\d{1,3}(,\d{3})+(\.\d+)?$/;
@@ -274,7 +275,7 @@ export function describeRule(rule: CriterionRule): string {
     const join = (xs: string[]) => (xs.length ? xs.map((x) => x.replace(/_/g, ' ')).join(', ') : 'none');
     return `Passes: ${join(rule.pass)}. Conditional: ${join(rule.conditional)}. Fails: ${join(rule.fail)}.`;
   }
-  const dir = rule.kind === 'number_min' ? 'At least' : 'At most';
+  const dir = rule.strict ? (rule.kind === 'number_min' ? 'Above' : 'Below') : rule.kind === 'number_min' ? 'At least' : 'At most';
   const base = `${dir} ${fmtNumber(rule.passAt, rule.unit)} passes`;
   if (rule.conditionalTo === null) return `${base}; anything else fails.`;
   const bound = rule.kind === 'number_min' ? 'down to' : 'up to';

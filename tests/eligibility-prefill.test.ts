@@ -216,6 +216,26 @@ describe('prefill from a saved assessment', () => {
     assert.equal(out.input.ebitda, null);
     assert.equal(out.input.dscrStated, null);
   });
+
+  it('operating cash flow (DSCR numerator) maps from the assessment and from an auto_applied document value; 0 is real', () => {
+    const fromAssessment = buildPrefill({
+      assessment: assessment({ financialProfile: { operatingCashFlow: 0 } }),
+      documentSessionId: null,
+      sessionFields: null,
+    });
+    assert.equal(fromAssessment.input.operatingCashFlow, 0);
+    assert.equal((fromAssessment.inputSources.operatingCashFlow as { path: string }).path, 'financialProfile.operatingCashFlow');
+
+    const fromSession = buildPrefill({
+      assessment: null,
+      documentSessionId: SESSION,
+      sessionFields: fields(field('financialProfile.operatingCashFlow', 'auto_applied', -250_000)),
+    });
+    assert.equal(fromSession.input.operatingCashFlow, -250_000);
+
+    const absent = buildPrefill({ assessment: assessment(), documentSessionId: null, sessionFields: null });
+    assert.equal(absent.input.operatingCashFlow, null);
+  });
 });
 
 describe('continue prefill (section 7.3)', () => {
@@ -233,6 +253,7 @@ describe('continue prefill (section 7.3)', () => {
     assert.equal(p.financialProfile.personalCibilScore, 750);
     assert.equal(p.assessment.existingEmiObligations, 100_000);
     assert.equal(p.financialProfile.existingMonthlyEmi, 100_000);
+    assert.equal(p.financialProfile.operatingCashFlow, 3_600_000);
     assert.equal(p.assessment.annualTurnoverOrIncome, 20_000_000);
     assert.equal(p.financialProfile.annualRevenue, 20_000_000);
     assert.equal(p.assessment.gstTaxCompliant, 'no');
