@@ -5,6 +5,7 @@
  * model, or, with no model available, is treated as 'other' (nothing is extracted from it).
  */
 import type { DocumentType } from '../../src/types/documentAi.ts';
+import { isCreditAnalysisReportTitle } from './creditAnalysisReport.ts';
 
 const RULES: Array<{ type: DocumentType; test: (text: string) => boolean }> = [
   {
@@ -57,9 +58,68 @@ const RULES: Array<{ type: DocumentType; test: (text: string) => boolean }> = [
   },
 ];
 
+/**
+ * Asked only when no rule above matched, so a file those rules already recognise keeps its type.
+ * A statement printed as separate pages (a balance sheet alone, a P&L alone, an auditor's report on
+ * the financial statements), the borrower's own schedule of existing loans, or an agency rating.
+ */
+const SECOND_RULES: Array<{ type: DocumentType; test: (text: string) => boolean }> = [
+  {
+    type: 'financial_statement',
+    test: (t) =>
+      /\bbalance\s+sheet\s+as\s+(?:at|on)\b/i.test(t) ||
+      /\bstatement\s+of\s+profit\s+(?:and|&)\s+loss\b/i.test(t) ||
+      /\bprofit\s*(?:and|&)\s*loss\s+(?:account|a\/c|statement)\b/i.test(t) ||
+      /\bprovisional\s+(?:balance\s+sheet|p\s*&\s*l\b|profit\s*(?:and|&)\s*loss)/i.test(t) ||
+      /\bstatement\s+of\s+assets\s+(?:and|&)\s+liabilities\b/i.test(t) ||
+      (/\bindependent\s+auditor['’]?s['’]?\s+report\b/i.test(t) && /\bfinancial\s+statements\b/i.test(t)),
+  },
+  {
+    type: 'credit_rating_report',
+    test: (t) =>
+      /\b(?:crisil|icra|care\s*(?:ratings|edge)|india\s+ratings|acuit[eé]|brickwork|infomerics)\b/i.test(t) &&
+      /\b(?:rating\s+rationale|credit\s+rating|rating\s+action|rating\s+letter|ratings?\s+(?:assigned|reaffirmed))\b/i.test(t),
+  },
+  {
+    type: 'debt_profile',
+    test: (t) =>
+      (/\b(?:loan|debt)\s+obligations?\b|\bobligation\s+(?:loan\s+)?sheet\b|\bdebt\s+profile\b/i.test(t) ||
+        /\b(?:details|schedule|statement)\s+of\s+(?:existing\s+)?(?:loans|borrowings|debts?)\b/i.test(t) ||
+        /\bexisting\s+(?:loans|borrowings|debts?)\s+(?:details|profile|schedule|sheet)\b/i.test(t)) &&
+      /\b(?:emi|outstanding|instal+ments?)\b/i.test(t),
+  },
+];
+
+/** The weakest signals: asked only when no rule above matched at all. */
+const WEAK_RULES: Array<{ type: DocumentType; test: (text: string) => boolean }> = [
+  {
+    type: 'sales_purchase_ledger',
+    test: (t) =>
+      /\b(?:sales|purchases?)\s+(?:register|ledger|report|book|summary)\b|\bmonth[\s-]*wise\s+(?:sales|purchases?)\b/i.test(t),
+  },
+  {
+    type: 'company_profile',
+    test: (t) =>
+      /\b(?:company|corporate|business|brief)\s+profile\b|\bcorporate\s+presentation\b|\bpitch\s+deck\b|\binvestor\s+presentation\b/i.test(t),
+  },
+];
+
+/** The one type whose rule matches; null when two match; 'none' when none does. */
+function onlyMatch(rules: typeof RULES, sample: string): DocumentType | null | 'none' {
+  const matches = rules.filter((rule) => rule.test(sample)).map((rule) => rule.type);
+  if (matches.length === 0) return 'none';
+  return matches.length === 1 ? matches[0] : null;
+}
+
 /** Looks at the start of the text (where titles are) plus the file name. */
 export function classifyLocally(text: string, fileName: string): DocumentType | null {
   const sample = `${fileName.replace(/[_.-]+/g, ' ')}\n${text.slice(0, 6000)}`;
-  const matches = RULES.filter((rule) => rule.test(sample)).map((rule) => rule.type);
-  return matches.length === 1 ? matches[0] : null;
+  // A credit analysis report names CIBIL, GST and bank statements throughout: its own title on the
+  // first page decides, before any rule that would read one of those words as the document's type.
+  if (isCreditAnalysisReportTitle(text.slice(0, 1500))) return 'credit_analysis_report';
+  for (const rules of [RULES, SECOND_RULES, WEAK_RULES]) {
+    const found = onlyMatch(rules, sample);
+    if (found !== 'none') return found; // one type, or null when two types match equally
+  }
+  return null;
 }

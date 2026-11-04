@@ -75,6 +75,20 @@ export const DOCUMENT_TYPES = [
   'cma_projection',
   'collateral_valuation',
   'quotation_invoice',
+  /** The borrower's own schedule of existing loans: lender, EMI, outstanding (a loan obligation sheet). */
+  'debt_profile',
+  /** A CRISIL, CARE, ICRA (or similar agency) rating rationale or letter. Recognised; it feeds no field. */
+  'credit_rating_report',
+  /** Company profile, corporate presentation or pitch deck. */
+  'company_profile',
+  /** A sales or purchase register, ledger or month-wise report. Recognised; it feeds no field. */
+  'sales_purchase_ledger',
+  /**
+   * A credit analysis report from another tool (`Business Credit Triangulation Report`): it restates
+   * the borrower's financials, bureau, banking and debt figures. Read by its fixed layout; its
+   * restated figures are always reviewed.
+   */
+  'credit_analysis_report',
   'other',
 ] as const;
 export type DocumentType = (typeof DOCUMENT_TYPES)[number];

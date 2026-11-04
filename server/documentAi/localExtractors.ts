@@ -18,6 +18,7 @@ import type { DocumentType } from '../../src/types/documentAi.ts';
 import type { RawBankMonth, RawField } from './prompt.ts';
 import type { ParsedSheet } from './spreadsheet.ts';
 import { readGstr3b, type RawGstReturnPeriod } from './gstr3b.ts';
+import { readCreditAnalysisReport } from './creditAnalysisReport.ts';
 import { normalizeFinancialYear, normalizePeriod, parseDate, type AmountUnit } from './validators.ts';
 
 /** Text read from a text layer: at or above the default auto-apply threshold, so it can apply when every check passes. */
@@ -111,7 +112,7 @@ interface FieldRule {
   only?: readonly DocumentType[];
 }
 
-const PREFIX = String.raw`^[\s|>*•·\-–]*(?:(?:\d{1,2}|[ivx]{1,4}|[a-h])[.)]\s+|\((?:\d{1,2}|[ivx]{1,4}|[a-h])\)\s*)?(?:your\s+)?`;
+const PREFIX = String.raw`^[\s|>*•·\-–]*(?:(?:\d{1,2}|[ivx]{1,4}|[a-h])[.)]\s+|\((?:\d{1,2}|[ivx]{1,4}|[a-h])\)\s*)?(?:your\s+)?(?:(?:to|by)\s+(?=[a-z]))?`;
 const rule = (fieldId: string, kind: ValueKind, label: string, extra: Partial<FieldRule> = {}): FieldRule => ({
   fieldId,
   kind,
@@ -148,7 +149,7 @@ const RULES: readonly FieldRule[] = [
     String.raw`cibil(?:\s+transunion)?\s+score|transunion\s+cibil\s+score|credit\s+score|bureau\s+score|cibil\s+is|score\s+is`,
     { exclude: /\b(?:cmr|commercial|promoter)\b/i }),
   rule('financialProfile.commercialCmrRank', 'rank',
-    String.raw`(?:cibil\s+)?msme\s+rank(?:\s*\(cmr\))?|cmr(?:\s+rank)?|commercial\s+(?:mse\s+)?rank`),
+    String.raw`(?:cibil\s+)?msme\s+rank(?:\s*\(cmr\))?|cmr(?:\s+rank)?|cibil\s+rank|commercial\s+(?:mse\s+)?rank`),
   // `Date of Enquiry` / `Enquiry date` rows list lenders' past enquiries, one per row: never the report date.
   rule('financialProfile.personalCreditReportDate', 'date',
     String.raw`report\s+date|date\s+of\s+(?:report|issue)|report\s+generated\s+on|generated\s+on`),
@@ -178,13 +179,18 @@ const RULES: readonly FieldRule[] = [
     { exclude: /\b(?:equity\s+and|and\s+equity|current|outside)\b/i }),
   rule('financialProfile.tangibleNetWorth', 'amount', String.raw`tangible\s+net\s*worth|\btnw\b`, { exclude: LEVERAGE_RATIO }),
   rule('financialProfile.shareholdersEquity', 'amount',
-    String.raw`(?:total\s+)?shareholders['’]?\s+(?:equity|funds)|total\s+equity(?!\s+and)`),
+    String.raw`(?:total\s+)?shareholders['’]?\s+(?:equity|funds?)|total\s+equity(?!\s+and)`),
+  // A proprietorship's or firm's balance sheet heads its equity as the owners' capital account.
+  rule('financialProfile.shareholdersEquity', 'amount',
+    String.raw`(?:proprietor['’]?s?|partners['’]?)\s+capital(?:\s+(?:a\/c|account))?(?=\s*(?:[:₹(]|\d|rs\b))|capital\s+(?:a\/c|account)(?=\s*(?:[:₹(]|\d|rs\b))`),
   rule('financialProfile.annualRevenue', 'amount',
-    String.raw`(?:total\s+)?revenue\s+from\s+operations|(?:net|gross|total)\s+sales|sales\s+turnover|gross\s+turnover|gross\s+receipts|turnover(?=\s*[:\d(₹]|\s+rs)`,
+    String.raw`(?:total\s+)?revenue\s+from\s+operations|(?:net|gross|total)\s+sales|sales\s+turnover|gross\s+turnover|gross\s+receipts|turnover(?=\s*[:\d(₹]|\s+rs)|sales(?:\s+accounts?)?(?=\s*(?:[:₹]|\d|rs\b))`,
     { exclude: /\b(?:other\s+income|growth|%|previous\s+year|gst)\b/i, only: ['financial_statement', 'itr'] }),
   rule('financialProfile.netProfitAfterTax', 'amount',
     String.raw`(?:net\s+)?profit\s*(?:\/\s*\(\s*loss\s*\)\s*)?(?:after\s+tax(?:ation)?|for\s+the\s+(?:year|period))|\bpat\b`,
     { exclude: /\bbefore\b/i }),
+  rule('financialProfile.netProfitAfterTax', 'amount', String.raw`net\s+profit(?=\s*(?:[:₹(]|\d|rs\b))`,
+    { exclude: /\bbefore\b|turnover|ratio|margin|%/i }),
   rule('financialProfile.ebitda', 'amount', String.raw`ebitda\b`, { exclude: /\bmargin\b|%/i }),
   rule('financialProfile.ebit', 'amount', String.raw`ebit\b(?!da)`, { exclude: /\bmargin\b|%/i }),
   rule('financialProfile.depreciation', 'amount', String.raw`depreciation(?:\s+expenses?)?(?!\s*(?:and|&)\s*amorti)`,
@@ -195,7 +201,7 @@ const RULES: readonly FieldRule[] = [
     String.raw`interest\s+(?:expenses?|paid|cost|on\s+borrowings)|finance\s+costs?`,
     { exclude: /\bincome\b|\breceived\b|coverage/i }),
   rule('financialProfile.operatingCashFlow', 'amount',
-    String.raw`net\s+cash\s+(?:flow\s+)?(?:generated\s+)?(?:from|used\s+in|(?:from\s+)?\/?\s*\(used\s+in\))\s+operating\s+activities|cash\s+flow\s+from\s+operations`),
+    String.raw`net\s+cash\s+(?:flows?\s+)?(?:generated\s+)?(?:from|used\s+in|(?:from\s+)?\/?\s*\(used\s+in\))\s+operating\s+activities|cash\s+flow\s+from\s+operations`),
 ];
 
 // ------------------------------------------------------------------ Text helpers
@@ -275,7 +281,7 @@ function hasFigure(text: string): boolean {
  * columns are its own, so earlier ones stop applying. A line with a figure is a row, not a heading.
  */
 const SECTION_HEADING =
-  /^(?:(?:standalone|consolidated|audited|unaudited|provisional|abridged)\s+)*(?:balance\s+sheet|statement\s+of\s+(?:profit|income|cash\s+flows?|changes\s+in\s+equity|assets)|profit\s+(?:and|&)\s+loss\s+(?:account|statement)|cash\s+flow\s+statement|trading\s+account|income\s+statement|schedules?\s+[\w.-]+|notes?\s+(?:to|forming\s+part\s+of)\b)/i;
+  /^(?:(?:standalone|consolidated|audited|unaudited|provisi?onal|abridged)\s+)*(?:balance\s+sheet|statement\s+of\s+(?:profit|income|cash\s+flows?|changes\s+in\s+equity|assets)|profit\s*(?:and|&)\s*loss\b|p\s*&\s*l\b|cash\s+flow\s+statement|trading\s+(?:account|(?:and|&)\s+profit)|income\s+statement|schedules?\s+[\w.-]+|notes?\s+(?:to|forming\s+part\s+of)\b)/i;
 
 function isSectionHeading(text: string): boolean {
   const line = clean(text).replace(/^[\s|>*•·\-–]+/, '');
@@ -442,6 +448,58 @@ function readValue(kind: ValueKind, rest: string, next: string | undefined, labe
   }
 }
 
+// ------------------------------------------------------------------ Statement headings and layout
+
+const AUDITOR_REPORT_TITLE = /^independent\s+auditor['’]?s['’]?\s+report\b/i;
+
+/**
+ * What a statement's own heading prints about itself: `Provisional Balance Sheet as on 31st March
+ * 2026` gives dataSource `provisional` and the FY label; `Audited ...` (never `Un-audited`) gives
+ * `audited`. Only the printed word decides; a heading without one gives no dataSource.
+ */
+function statementHeadingFields(text: string, page: number, confidence: number, period: string | null): Emitted[] {
+  const out: Emitted[] = [];
+  const base = { page, sheetName: null, cellRef: null, snippet: snip(text), confidence, subjectRef: null, statedUnit: null, unitText: null };
+  const provisional = /\bprovisional\b/i.test(text);
+  const audited = AUDITOR_REPORT_TITLE.test(text) || (/\baudited\b/i.test(text) && !/\bun[\s-]*audited\b/i.test(text));
+  if (provisional !== audited) {
+    const option = provisional ? 'provisional' : 'audited';
+    out.push({
+      key: `financialProfile.dataSource|${option}|${period ?? ''}`,
+      raw: { ...base, fieldId: 'financialProfile.dataSource', rawValue: option, enumValue: option, period },
+    });
+  }
+  const phrase = text.match(
+    new RegExp(`(?:for\\s+the\\s+)?(?:(?:financial\\s+)?year\\s+end(?:ed|ing)|as\\s+(?:at|on))\\s*(?:on\\s*)?:?\\s*${DATE_TEXT}`, 'i')
+  )?.[0];
+  if (phrase && normalizeFinancialYear(phrase).ok) {
+    out.push({
+      key: `financialProfile.financialYearLabel|${phrase.trim()}`,
+      raw: { ...base, fieldId: 'financialProfile.financialYearLabel', rawValue: phrase.trim(), enumValue: null, period: null },
+    });
+  }
+  return out;
+}
+
+/**
+ * The two sides of a horizontal account on one printed line, `Capital Account 1 5,90,49,972.83
+ * Fixed Assets 5 24,36,954.01`: split after a figure that is followed by a new label and then a
+ * figure of its own. A row whose figures follow one another (period columns) is never split.
+ */
+export function splitSides(text: string): string[] {
+  const blank = blankOut(text, STAMP);
+  if (!/^[^\d]*[A-Za-z]{2}/.test(blank)) return [text];
+  for (const match of blank.matchAll(AMOUNT)) {
+    const figure = match[0].trim();
+    if (!/\d/.test(figure) || BARE_SMALL_INTEGER.test(figure.replace(/[()\s]/g, ''))) continue;
+    const end = (match.index ?? 0) + match[0].length;
+    const after = blank.slice(end);
+    if (!/^\s+[A-Za-z]{2}/.test(after) || !/\d/.test(after)) continue;
+    return [text.slice(0, end).trim(), ...splitSides(text.slice(end).trim())];
+  }
+  return [text];
+}
+
 // ------------------------------------------------------------------ Field extraction (text)
 
 interface Emitted {
@@ -477,6 +535,14 @@ function pairAmounts(
   if (columns && figures.length === columns.length + 1 && BARE_SMALL_INTEGER.test(figures[0])) {
     figures = figures.slice(1); // a Schedule III note number
   }
+  if (
+    (!columns || columns.length === 1) &&
+    figures.length === 2 &&
+    BARE_SMALL_INTEGER.test(figures[0]) &&
+    !BARE_SMALL_INTEGER.test(figures[1].replace(/[()\s]/g, ''))
+  ) {
+    figures = figures.slice(1); // `Share capital 1 ₹ 3,00,00,000.00`: a note number, then the figure
+  }
   if (figures.length === 0) return null;
   if (columns && columns.length > 1) {
     return figures.length === columns.length ? figures.map((rawValue, i) => ({ rawValue, period: columns[i] })) : null;
@@ -511,22 +577,60 @@ function extractFromText(
   // Unit and period headings hold for their own page and section only: never carried to the next.
   let columns: string[] | null = null;
   let unit: { unit: AmountUnit; unitText: string } | null = null;
+  // The full year a statement's own heading names (`Balance Sheet as on 31st March 2025`,
+  // `Profit & Loss for the year ending 31st March 2025`): its single-figure rows are that year's.
+  let sectionPeriod: string | null = null;
   let statePage = 0;
   lines.forEach(({ text, page }, index) => {
-    if (page !== statePage || isSectionHeading(text)) {
+    const heading = isSectionHeading(text);
+    if (page !== statePage || heading) {
       unit = null;
       columns = null;
+      sectionPeriod = null;
       statePage = page;
+    }
+    if (heading && documentType === 'financial_statement') {
+      sectionPeriod = documentPeriodIn(text);
+      out.push(...statementHeadingFields(text, page, confidence, sectionPeriod ?? documentPeriod));
+    } else if (documentType === 'financial_statement' && AUDITOR_REPORT_TITLE.test(text) && !hasFigure(text)) {
+      out.push(...statementHeadingFields(text, page, confidence, documentPeriod));
+    }
+    // The report's own title: positive evidence that a commercial (company) credit report is available.
+    if (
+      /^(?:company|commercial)\s+credit\s+report\b/i.test(text) &&
+      text.length <= 60 &&
+      fieldAllowed('financialProfile.commercialCreditReportStatus', documentType)
+    ) {
+      out.push({
+        key: 'financialProfile.commercialCreditReportStatus|available',
+        raw: {
+          fieldId: 'financialProfile.commercialCreditReportStatus', page, sheetName: null, cellRef: null, snippet: snip(text),
+          confidence, subjectRef: null, rawValue: 'available', enumValue: 'available', statedUnit: null, unitText: null, period: null,
+        },
+      });
     }
     // A bracketed unit on a row of figures, `Revenue (in lakhs)  1,250.00`, is that row's alone.
     const lineUnit = unitHeaderIn(text);
     if (lineUnit && !hasFigure(text)) unit = lineUnit;
     const rowUnit: { unit: AmountUnit; unitText: string } | null = lineUnit ?? unit;
-    const heading = columnPeriodsIn(text);
-    if (heading) {
-      columns = heading;
+    const periodHeading = columnPeriodsIn(text);
+    if (periodHeading) {
+      columns = periodHeading;
       return;
     }
+    const next = lines[index + 1]?.page === page ? lines[index + 1].text : undefined;
+    // A horizontal (T-form) account prints two sides on one line: each side is read on its own.
+    const sides = documentType === 'financial_statement' ? splitSides(text) : [text];
+    for (const side of sides) readSegment(side, sides.length === 1 ? next : undefined, page, rowUnit);
+  });
+  return out;
+
+  function readSegment(
+    text: string,
+    next: string | undefined,
+    page: number,
+    rowUnit: { unit: AmountUnit; unitText: string } | null
+  ): void {
     const matched = matchRule(text, documentType);
     if (!matched) return;
     const { rule: found, labelEnd, labelText } = matched;
@@ -545,7 +649,7 @@ function extractFromText(
       const definition = getFieldDefinition(found.fieldId);
       const beforeFigure = blankOut(rest, STAMP).split(/\d/)[0] ?? '';
       if (beforeFigure.length > 60) return; // the figure is not beside its label
-      const pairs = pairAmounts(amountsIn(rest), columns, documentPeriod);
+      const pairs = pairAmounts(amountsIn(rest), columns, sectionPeriod ?? documentPeriod);
       if (!pairs) return;
       for (const pair of pairs) {
         if (!plausibleAmount(pair.rawValue)) continue;
@@ -567,7 +671,6 @@ function extractFromText(
       return;
     }
 
-    const next = lines[index + 1]?.page === page ? lines[index + 1].text : undefined;
     const value = readValue(found.kind, rest, next, labelText);
     if (!value) return;
     const usedNext = found.kind === 'pan' && next !== undefined && !rest.match(PAN_TOKEN);
@@ -598,8 +701,7 @@ function extractFromText(
         },
       });
     }
-  });
-  return out;
+  }
 }
 
 // ------------------------------------------------------------------ Field extraction (sheets)
@@ -696,6 +798,71 @@ function extractFromSheets(
   }
   return out;
 }
+
+// ------------------------------------------------------------------ Debt profile (loan obligation sheet)
+
+/**
+ * A loan obligation sheet's own printed total, by column: the EMI column's figure on a row
+ * labelled `Total` gives existingMonthlyEmi, the outstanding column's gives totalOutstandingBorrowings.
+ * The column comes from the sheet's heading cell, never from the order of figures. Rows are never
+ * added up here. A borrower's schedule can print a total that leaves out a row, and some print
+ * subtotals (two `Total` rows, which then conflict), so these values are always reviewed.
+ */
+export const DEBT_PROFILE_CONFIDENCE = LOCAL_OCR_CONFIDENCE;
+const EMI_HEADING = /\bemis?\b/i;
+const EMI_NOT = /\b(?:start|date|no\.?\s*of|count|paid|pending|overdue|remaining)\b/i;
+const OUTSTANDING_HEADING = /\boutstanding\b|\bo\/s\b|\bpos\b|\bprincipal\s+outstanding\b/i;
+const OUTSTANDING_NOT = /\b(?:overdue|interest|tenure|months?)\b/i;
+const TOTAL_LABEL = /^(?:grand\s+)?total\b[\s:.-]*$/i;
+
+function debtProfileFromSheets(fileKind: 'xlsx' | 'csv', sheets: readonly ParsedSheet[]): RawField[] {
+  const out: RawField[] = [];
+  for (const sheet of sheets) {
+    let emi: SheetCellLike | null = null;
+    let outstanding: SheetCellLike | null = null;
+    let unit: { unit: AmountUnit; unitText: string } | null = null;
+    for (const row of sheet.rows) {
+      for (const cell of row.cells) unit = unitHeaderIn(cell.text) ?? unit;
+      const emiHead = row.cells.filter((c) => EMI_HEADING.test(c.text) && !EMI_NOT.test(c.text) && !NUMERIC_CELL.test(c.text.trim()));
+      const osHead = row.cells.filter(
+        (c) => OUTSTANDING_HEADING.test(c.text) && !OUTSTANDING_NOT.test(c.text) && !NUMERIC_CELL.test(c.text.trim())
+      );
+      if (emiHead.length + osHead.length > 0 && !row.cells.some((c) => NUMERIC_CELL.test(c.text.trim()))) {
+        // A heading row: one EMI and one outstanding column at most, or that column is unclear.
+        emi = emiHead.length === 1 ? emiHead[0] : null;
+        outstanding = osHead.length === 1 ? osHead[0] : null;
+        continue;
+      }
+      const label = row.cells.find((c) => TOTAL_LABEL.test(c.text.trim()));
+      if (!label) continue;
+      for (const [heading, fieldId] of [
+        [emi, 'financialProfile.existingMonthlyEmi'],
+        [outstanding, 'financialProfile.totalOutstandingBorrowings'],
+      ] as const) {
+        if (!heading || heading.column <= label.column) continue;
+        const cell = row.cells.find((c) => c.column === heading.column);
+        if (!cell || !NUMERIC_CELL.test(cell.text.trim())) continue;
+        out.push({
+          fieldId,
+          rawValue: cell.text.trim(),
+          enumValue: null,
+          page: null,
+          sheetName: fileKind === 'xlsx' ? sheet.name : null,
+          cellRef: cell.ref,
+          snippet: snip(`${label.text} | ${heading.text} | ${cell.text}`),
+          confidence: DEBT_PROFILE_CONFIDENCE,
+          statedUnit: unit?.unit ?? null,
+          unitText: unit?.unitText ?? null,
+          period: null,
+          subjectRef: null,
+        });
+      }
+    }
+  }
+  return out;
+}
+
+type SheetCellLike = ParsedSheet['rows'][number]['cells'][number];
 
 // ------------------------------------------------------------------ Bank statement months
 
@@ -877,6 +1044,20 @@ function bankMonthsFromSheets(fileKind: 'xlsx' | 'csv', sheets: readonly ParsedS
 export function extractLocally(input: LocalExtractionInput): LocalExtraction {
   const { documentType, content, fromOcr, complete = true, ocrPages } = input;
   if (documentType === 'other') return { fields: [], bankMonthlyTotals: [] };
+  if (documentType === 'credit_analysis_report') {
+    // Read by its own fixed layout only: loose label rules would take policy thresholds and
+    // per-facility rows for values.
+    if (content.kind !== 'text') return { fields: [], bankMonthlyTotals: [] };
+    const report = readCreditAnalysisReport(content.pages);
+    const cap = <T extends { confidence: number }>(row: T): T => (fromOcr ? { ...row, confidence: Math.min(row.confidence, LOCAL_OCR_CONFIDENCE) } : row);
+    return {
+      fields: report.fields.filter((field) => fieldAllowed(field.fieldId, documentType)).map(cap),
+      bankMonthlyTotals: report.bankMonthlyTotals.map(cap),
+    };
+  }
+  if (documentType === 'debt_profile' && content.kind === 'sheets') {
+    return { fields: debtProfileFromSheets(content.fileKind, content.sheets), bankMonthlyTotals: [] };
+  }
   const confidence = fromOcr ? LOCAL_OCR_CONFIDENCE : LOCAL_TEXT_CONFIDENCE;
   const emitted =
     content.kind === 'text'

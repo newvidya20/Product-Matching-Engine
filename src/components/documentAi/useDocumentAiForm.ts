@@ -33,6 +33,13 @@ import { applyFieldResults, dynamicFieldIdsForPurpose } from './applyFieldResult
 import { dropSeededMarksForApplied, type AppliedComparison } from './seedMarks';
 import type { DocAiFieldContextValue } from './FieldShell';
 import {
+  clearDraft,
+  readDraft,
+  writeDraft,
+  type AssessmentDraft,
+  type DraftExtras,
+} from './draftStore';
+import {
   assessmentToForm,
   isFormBacked,
   readField,
@@ -150,23 +157,50 @@ export function useDocumentAiForm({
   sessionOverride,
 }: UseDocumentAiFormOptions) {
   const isEditing = Boolean(editingAssessment);
-  const [form, setForm] = useState<FormState>(() =>
-    editingAssessment ? assessmentToForm(editingAssessment, defaultCurrency) : createBlank()
-  );
+  // A new, plain form comes back from this browser's draft before any network call. A reopened saved
+  // assessment or an Eligibility prefill starts from its own content instead.
+  const restoredRef = useRef<AssessmentDraft | null | undefined>(undefined);
+  if (restoredRef.current === undefined) {
+    restoredRef.current =
+      !editingAssessment && !protectInitialValues && !sessionOverride ? readDraft() : null;
+  }
+  const restored = restoredRef.current;
+  const [form, setForm] = useState<FormState>(() => {
+    if (editingAssessment) return assessmentToForm(editingAssessment, defaultCurrency);
+    const blank = createBlank();
+    if (!restored) return blank;
+    return {
+      ...blank,
+      ...restored.form,
+      financialProfile: { ...blank.financialProfile, ...restored.form.financialProfile },
+      dynamicPurposeAnswers: { ...(restored.form.dynamicPurposeAnswers ?? {}) },
+      customAttributes: Array.isArray(restored.form.customAttributes) ? restored.form.customAttributes : [],
+    };
+  });
   const formRef = useRef<FormState>(form);
-  const editedRef = useRef<Record<string, EditedFieldEntry>>({});
-  const appliedRef = useRef<Record<string, AppliedFieldEntry>>({});
-  const docStateRef = useRef<DocumentSessionState | null>(null);
+  const editedRef = useRef<Record<string, EditedFieldEntry>>(restored?.edited ?? {});
+  const appliedRef = useRef<Record<string, AppliedFieldEntry>>(restored?.applied ?? {});
+  const docStateRef = useRef<DocumentSessionState | null>(restored?.docState ?? null);
+  const draftExtrasRef = useRef<DraftExtras>(restored?.extras ?? {});
+  const draftTimer = useRef<number | null>(null);
+  const lastBlankRef = useRef<FormState | null>(null);
+  const createBlankRef = useRef(createBlank);
+  createBlankRef.current = createBlank;
+  const draftDegradedRef = useRef(false);
   const sessionIdRef = useRef<string>('');
   if (!sessionIdRef.current) {
     if (isEditing) sessionIdRef.current = newSessionId();
+    else if (restored) {
+      sessionIdRef.current = restored.sessionId;
+      writeStoredSession(restored.sessionId);
+    }
     else if (sessionOverride) sessionIdRef.current = sessionOverride.sessionId?.trim() || newSessionId();
     else {
       sessionIdRef.current = readStoredSession() || newSessionId();
       writeStoredSession(sessionIdRef.current);
     }
   }
-  const protectInitialRef = useRef(protectInitialValues);
+  const protectInitialRef = useRef(protectInitialValues || Boolean(restored?.protectInitial));
   const sessionExistsRef = useRef(false);
   // Bumped whenever the session is swapped, so late results from the old one can be dropped.
   const generationRef = useRef(0);
@@ -176,7 +210,7 @@ export function useDocumentAiForm({
   const loadFailuresRef = useRef(0);
   const loadTimer = useRef<number | null>(null);
   // Fields this page applied itself: the only ones apply logic may later revert.
-  const localAppliedRef = useRef<Set<string>>(new Set());
+  const localAppliedRef = useRef<Set<string>>(new Set(restored?.localApplied ?? []));
   const seededRef = useRef(false);
   // The draft as saved, kept to compare its values with what a document applied.
   const savedFormRef = useRef<FormState | null>(null);
@@ -205,15 +239,21 @@ export function useDocumentAiForm({
   const mountedRef = useRef(true);
   const skipApplyRef = useRef(false);
 
-  const [, setRevision] = useState(0);
+  const [revision, setRevision] = useState(0);
   const bump = useCallback(() => setRevision((n) => n + 1), []);
-  const [docState, setDocState] = useState<DocumentSessionState | null>(null);
+  const [docState, setDocState] = useState<DocumentSessionState | null>(restored?.docState ?? null);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [job, setJob] = useState<ExtractionJob | null>(null);
   const [pollTimedOut, setPollTimedOut] = useState(false);
-  const [dismissed, setDismissed] = useState<Record<string, string>>({});
+  const [dismissed, setDismissed] = useState<Record<string, string>>(restored?.dismissed ?? {});
+  // The server no longer has this session (for example after a restart) but the browser kept what was read.
+  const [serverLost, setServerLost] = useState(false);
+  const [draftDegraded, setDraftDegraded] = useState(false);
+  const serverLostRef = useRef(false);
+  const dismissedRef = useRef(dismissed);
+  dismissedRef.current = dismissed;
   const [notice, setNotice] = useState<string | null>(null);
-  const [loadingSession, setLoadingSession] = useState(true);
+  const [loadingSession, setLoadingSession] = useState(!restored?.docState);
   const [sessionId, setSessionIdState] = useState(sessionIdRef.current);
 
   // ------------------------------------------------------------ Form commit
@@ -370,6 +410,8 @@ export function useDocumentAiForm({
       if (state.session.sessionId !== sessionIdRef.current) return;
       docStateRef.current = state;
       sessionExistsRef.current = true;
+      serverLostRef.current = false;
+      if (mountedRef.current) setServerLost(false);
       // Server copy first, then anything not yet flushed on top of it.
       const pending = pendingRef.current;
       // A reopen-time guess never overwrites what the server already knows about the field.
@@ -532,7 +574,13 @@ export function useDocumentAiForm({
       if (stale()) return false;
       loadedRef.current = true;
       loadFailuresRef.current = 0;
-      if (state && !editingRef.current && state.session.assessmentId) {
+      if (
+        state &&
+        !editingRef.current &&
+        state.session.assessmentId &&
+        // A restored draft that was saved keeps its own linked session.
+        state.session.assessmentId !== restoredRef.current?.extras.saved?.id
+      ) {
         // A new form never resumes a session that already belongs to a saved assessment.
         // Keep marks on values typed while the lookup ran: they belong to this form, not the old session.
         discardSessionRef.current({ keepEdits: true });
@@ -552,6 +600,11 @@ export function useDocumentAiForm({
           setJob(state.activeJob);
           beginPolling(state.activeJob.jobId);
         }
+      }
+      if (!state && docStateRef.current && docStateRef.current.documents.length > 0) {
+        // The server forgot the session (restart). Keep showing what the browser kept, and say so.
+        serverLostRef.current = true;
+        setServerLost(true);
       }
       // Marks recorded from the assessment before the session was known can go to the server now.
       scheduleFlush();
@@ -589,6 +642,76 @@ export function useDocumentAiForm({
     if (loadTimer.current !== null) window.clearTimeout(loadTimer.current);
     return loadSession();
   }, [loadSession]);
+
+  // ------------------------------------------------------------ Draft in the browser
+
+  const persistDraft = useCallback(() => {
+    if (draftTimer.current !== null) {
+      window.clearTimeout(draftTimer.current);
+      draftTimer.current = null;
+    }
+    // A reopened saved assessment is stored on the server; only a new form keeps a browser draft.
+    if (editingRef.current) return;
+    const current = formRef.current;
+    const hasEdits = Object.keys(editedRef.current).length > 0 || Object.keys(appliedRef.current).length > 0;
+    const pristine =
+      !docStateRef.current &&
+      !hasEdits &&
+      !draftExtrasRef.current.saved &&
+      (JSON.stringify(current) === JSON.stringify(createBlankRef.current()) ||
+        (lastBlankRef.current !== null && JSON.stringify(current) === JSON.stringify(lastBlankRef.current)));
+    if (pristine) {
+      clearDraft();
+      return;
+    }
+    const result = writeDraft({
+      v: 1,
+      savedAt: new Date().toISOString(),
+      sessionId: sessionIdRef.current,
+      form: current,
+      edited: editedRef.current,
+      applied: appliedRef.current,
+      localApplied: [...localAppliedRef.current],
+      dismissed: dismissedRef.current,
+      docState: docStateRef.current,
+      protectInitial: protectInitialRef.current,
+      extras: draftExtrasRef.current,
+    });
+    const degraded = result !== 'full';
+    if (degraded !== draftDegradedRef.current) {
+      draftDegradedRef.current = degraded;
+      if (mountedRef.current) setDraftDegraded(degraded);
+    }
+  }, []);
+
+  const schedulePersist = useCallback(() => {
+    if (draftTimer.current !== null) window.clearTimeout(draftTimer.current);
+    draftTimer.current = window.setTimeout(persistDraft, 400);
+  }, [persistDraft]);
+
+  // Every state change that matters re-renders this hook, so one effect keeps the draft in sync (debounced).
+  useEffect(() => {
+    schedulePersist();
+  }, [form, docState, dismissed, revision, sessionId, schedulePersist]);
+
+  // Write at once when the page is hidden or this module unmounts (tab change), so nothing is lost to the debounce.
+  useEffect(() => {
+    const onHide = () => persistDraft();
+    window.addEventListener('pagehide', onHide);
+    return () => {
+      window.removeEventListener('pagehide', onHide);
+      persistDraft();
+    };
+  }, [persistDraft]);
+
+  /** Extra module state kept with the draft (saved assessment, Eligibility link, conditions). */
+  const setDraftExtras = useCallback(
+    (extras: DraftExtras) => {
+      draftExtrasRef.current = extras;
+      schedulePersist();
+    },
+    [schedulePersist]
+  );
 
   // ------------------------------------------------------------ Field edits
 
@@ -689,6 +812,8 @@ export function useDocumentAiForm({
     setNotice(null);
     setPollTimedOut(false);
     setLoadingSession(false);
+    serverLostRef.current = false;
+    setServerLost(false);
   }, [stopPolling]);
 
   discardSessionRef.current = resetSession;
@@ -715,6 +840,9 @@ export function useDocumentAiForm({
   const reset = useCallback(
     (blank: FormState) => {
       resetSession();
+      // Reset is the one thing that clears the browser draft.
+      lastBlankRef.current = blank;
+      clearDraft();
       commitForm(() => blank);
       bump();
     },
@@ -833,6 +961,12 @@ export function useDocumentAiForm({
           const response = await documentAiClient.uploadFile(sid, file);
           if (!same()) return;
           sessionExistsRef.current = true;
+          if (serverLostRef.current) {
+            // The server has a fresh session under this id: send it the marks the browser kept.
+            const pending = pendingRef.current;
+            for (const entry of Object.values(editedRef.current)) pending.setEdited[entry.fieldId] = entry;
+            for (const entry of Object.values(appliedRef.current)) pending.setApplied[entry.fieldId] = entry;
+          }
           if (response.skipped?.length) {
             const skippedItems = response.skipped.map((item, index) => ({
               key: `${key}-skipped-${index}`,
@@ -980,6 +1114,10 @@ export function useDocumentAiForm({
     notice,
     setNotice,
     loadingSession,
+    serverLost,
+    draftDegraded,
+    restoredExtras: restored?.extras ?? null,
+    setDraftExtras,
     isEditing,
     fieldContext,
     edited: editedRef.current,

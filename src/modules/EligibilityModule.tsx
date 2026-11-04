@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowRight, ClipboardCheck, FilePlus2, Loader2, Play, RefreshCw, Save, Wand2 } from 'lucide-react';
+import { ArrowRight, Beaker, ClipboardCheck, FilePlus2, Loader2, Play, RefreshCw, Save, Wand2 } from 'lucide-react';
 import { useAppState } from '../context/AppStateContext';
 import { PageHeader } from '../components/ui/Primitives';
 import { DocumentAccessGate } from '../components/documentAi/DocumentAccessGate';
@@ -22,6 +22,13 @@ import { EligibilityInputForm, PendingSummary } from '../components/eligibility/
 import { EligibilityResultsView, ResultComparison } from '../components/eligibility/EligibilityResultsView';
 import { EligibilityRulesPanel, UnconfirmedRulesBanner } from '../components/eligibility/EligibilityRulesPanel';
 import { EligibilityRecordsList } from '../components/eligibility/EligibilityRecordsList';
+import { DEMO_APPLICANT_LABEL, demoEligibilityValues } from '../components/eligibility/demoData';
+import {
+  clearEligibilityDraft,
+  readEligibilityDraft,
+  writeEligibilityDraft,
+  type EligibilityDraft,
+} from '../components/documentAi/draftStore';
 
 export interface EligibilityModuleProps {
   documentSessionId?: string;
@@ -61,14 +68,22 @@ export function EligibilityModule(props: EligibilityModuleProps = {}) {
   const [records, setRecords] = useState<EligibilityRecordSummary[] | null>(null);
   const [recordsLoading, setRecordsLoading] = useState(false);
 
-  const [values, setValues] = useState<FormValues>(blankValues);
-  const [sources, setSources] = useState<EligibilityInputSources>({});
-  const [applicantLabel, setApplicantLabel] = useState('');
+  // The form comes back from this browser until "New check" is pressed. Opening from an assessment or a
+  // document session prefills from that source instead.
+  const draftRef = useRef<EligibilityDraft | null | undefined>(undefined);
+  if (draftRef.current === undefined) draftRef.current = assessmentProp || sessionProp ? null : readEligibilityDraft();
+  const draft = draftRef.current;
+
+  const [values, setValues] = useState<FormValues>(() => ({ ...blankValues(), ...(draft?.values ?? {}) }));
+  const [sources, setSources] = useState<EligibilityInputSources>(
+    () => (draft?.sources ?? {}) as EligibilityInputSources
+  );
+  const [applicantLabel, setApplicantLabel] = useState(draft?.applicantLabel ?? '');
   const [pending, setPending] = useState<PendingVerificationInput[]>([]);
   const [fieldErrors, setFieldErrors] = useState<Partial<Record<EligibilityInputField, string>>>({});
 
-  const [assessmentId, setAssessmentId] = useState(assessmentProp ?? '');
-  const [sessionId, setSessionId] = useState(sessionProp ?? '');
+  const [assessmentId, setAssessmentId] = useState(assessmentProp ?? draft?.assessmentId ?? '');
+  const [sessionId, setSessionId] = useState(sessionProp ?? draft?.sessionId ?? '');
 
   const [record, setRecord] = useState<EligibilityAssessmentRecord | null>(null);
   const [preview, setPreview] = useState<EligibilityResult | null>(null);
@@ -100,6 +115,35 @@ export function EligibilityModule(props: EligibilityModuleProps = {}) {
   }, [refreshRecords]);
 
   const parsed = useMemo(() => formToInput(values), [values]);
+
+  // Reattach the saved record the draft was editing (the typed values stay as they are).
+  useEffect(() => {
+    if (!draft?.recordId) return;
+    eligibilityClient
+      .getRecord(draft.recordId)
+      .then((res) => setRecord(res.record))
+      .catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Keep the draft in this browser until "New check". Blank means nothing to keep.
+  useEffect(() => {
+    const blank = Object.values(values).every((v) => v.trim() === '') && !applicantLabel.trim() && !assessmentId && !sessionId.trim();
+    if (blank && !record) {
+      clearEligibilityDraft();
+      return;
+    }
+    writeEligibilityDraft({
+      v: 1,
+      savedAt: new Date().toISOString(),
+      values,
+      sources,
+      applicantLabel,
+      assessmentId,
+      sessionId,
+      recordId: record?.id ?? null,
+    });
+  }, [values, sources, applicantLabel, assessmentId, sessionId, record]);
 
   const dirty = useMemo(() => {
     if (!record) return true;
@@ -315,7 +359,28 @@ export function EligibilityModule(props: EligibilityModuleProps = {}) {
       else setNotice('Continue is not connected to New Assessment in this view.');
     });
 
+  /** Replaces the form with the shared fictional borrower. Every source is marked as typed demo data. */
+  const populateDemo = () => {
+    if (!confirmReplace('The fictional demo')) return;
+    const demo = demoEligibilityValues();
+    const demoSources: EligibilityInputSources = {};
+    for (const f of ELIGIBILITY_INPUT_FIELDS) if (demo[f]) demoSources[f] = { kind: 'manual' };
+    setRecord(null);
+    setValues({ ...blankValues(), ...demo });
+    setSources(demoSources);
+    setApplicantLabel(DEMO_APPLICANT_LABEL);
+    setAssessmentId('');
+    setSessionId('');
+    setPending([]);
+    setPreview(null);
+    setFieldErrors({});
+    setError(null);
+    setConfirmFinal(false);
+    setNotice('Fictional demo values loaded. Every value is invented (typed demo data), not a real borrower. Run the check to see the result.');
+  };
+
   const newCheck = () => {
+    clearEligibilityDraft();
     setRecord(null);
     setValues(blankValues());
     setSources({});
@@ -366,13 +431,22 @@ export function EligibilityModule(props: EligibilityModuleProps = {}) {
           rules ? `Rules ${rules.rules.rulesVersion}` : 'Loading rules',
         ]}
         actions={
-          <button type="button" onClick={newCheck} disabled={working} className={BTN_SECONDARY}>
-            <FilePlus2 className="w-3.5 h-3.5" aria-hidden="true" />
-            New check
-          </button>
+          <>
+            <button type="button" onClick={populateDemo} disabled={working} className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-amber-900 bg-amber-50 border border-amber-300 hover:bg-amber-100/80 rounded-lg disabled:opacity-50 cursor-pointer">
+              <Beaker className="w-3.5 h-3.5 text-amber-700" aria-hidden="true" />
+              Populate Fictional Demo
+            </button>
+            <button type="button" onClick={newCheck} disabled={working} className={BTN_SECONDARY}>
+              <FilePlus2 className="w-3.5 h-3.5" aria-hidden="true" />
+              New check
+            </button>
+          </>
         }
       />
 
+      <p className="text-[11px] text-stone-500">
+        Your entries are kept in this browser until you press New check.
+      </p>
       <UnconfirmedRulesBanner rules={rules} />
       {rulesError && (
         <div role="alert" className="px-4 py-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-800">

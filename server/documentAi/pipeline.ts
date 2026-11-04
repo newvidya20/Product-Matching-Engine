@@ -481,9 +481,15 @@ async function classifyWithModel(prepared: PreparedDocument, signal: AbortSignal
   };
 }
 
-async function extractWithModel(prepared: PreparedDocument, documentType: DocumentType, signal: AbortSignal) {
+async function extractWithModel(
+  prepared: PreparedDocument,
+  documentType: DocumentType,
+  signal: AbortSignal,
+  alreadyRead: ReadonlySet<string> = new Set()
+) {
   const response = await generateJson({
-    systemInstruction: buildExtractionInstruction(documentType),
+    // Only the fields the server did not read itself are asked for.
+    systemInstruction: buildExtractionInstruction(documentType, alreadyRead),
     parts: [...asParts(prepared.extractionPart()), { text: EXTRACTION_REQUEST }],
     responseSchema: EXTRACTION_SCHEMA,
     signal,
@@ -516,6 +522,11 @@ const KEY_FIELDS: Partial<Record<DocumentType, ReadonlyArray<readonly string[]>>
   registration_certificate: [['identity.dateOfEstablishment']],
   loan_application: [['requestedAmount']],
   bank_statement: [],
+  debt_profile: [['financialProfile.existingMonthlyEmi']],
+  // Its layout is read in full locally; the model is asked only if nothing at all was read.
+  credit_analysis_report: [
+    ['financialProfile.annualRevenue', 'financialProfile.personalCibilScore', 'financialProfile.promoterCibilScore'],
+  ],
 };
 
 /**
@@ -614,7 +625,8 @@ async function runExtraction(input: ExtractDocumentInput): Promise<DocumentExtra
     fieldsToRequest(documentType).length > 0 && keyFieldsMissing(documentType, local, gstReturnPeriods.length);
   if (wantsModel && !llmUsable(jobId) && jobModelPaused(jobId)) breakerSkipped = true;
   if (wantsModel && llmUsable(jobId)) {
-    const extracted = await tryModel(signal, (s) => extractWithModel(prepared, documentType, s), jobId);
+    const readLocally = new Set(local.fields.map((field) => field.fieldId));
+    const extracted = await tryModel(signal, (s) => extractWithModel(prepared, documentType, s, readLocally), jobId);
     if (extracted.ok) {
       usedModel = true;
       const { value } = extracted;

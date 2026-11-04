@@ -26,6 +26,11 @@ const DOCUMENT_TYPE_GUIDE: Record<DocumentType, string> = {
   cma_projection: 'CMA data or financial projections',
   collateral_valuation: 'property or asset valuation report',
   quotation_invoice: 'vendor quotation or proforma invoice',
+  debt_profile: "the borrower's own schedule of existing loans and borrowings (loan obligation sheet): lenders, EMIs, outstanding",
+  credit_rating_report: 'credit rating rationale or letter from an agency such as CRISIL, CARE, ICRA or India Ratings',
+  company_profile: 'company profile, corporate presentation or pitch deck',
+  sales_purchase_ledger: 'sales or purchase register, ledger or month-wise sales or purchase report',
+  credit_analysis_report: 'a credit analysis or triangulation report that summarises financials, GST, banking and bureau data',
   other: 'anything else',
 };
 
@@ -70,8 +75,14 @@ function describeField(definition: FieldDefinition): string {
   return parts.join('; ');
 }
 
-export function buildExtractionInstruction(documentType: DocumentType): string {
-  const fields = fieldsToRequest(documentType);
+/**
+ * `alreadyRead`: fields the server read from the file itself. They are left out of the request, so
+ * the model is asked only for what is still missing (its answers for them would be dropped anyway).
+ */
+export function buildExtractionInstruction(documentType: DocumentType, alreadyRead: ReadonlySet<string> = new Set()): string {
+  const all = fieldsToRequest(documentType);
+  const missing = all.filter((definition) => !alreadyRead.has(definition.fieldId));
+  const fields = missing.length > 0 ? missing : all;
   return [
     'You read values out of one Indian borrower document for a loan assessment.',
     ...DATA_NOT_INSTRUCTIONS,

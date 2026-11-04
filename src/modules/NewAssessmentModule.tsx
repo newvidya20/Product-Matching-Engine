@@ -32,6 +32,7 @@ import { ReviewPanel } from '../components/documentAi/ReviewPanel';
 import { prefillToForm } from '../components/eligibility/prefillToForm';
 import { eligibilityClient } from '../api/eligibilityClient';
 import type { NewAssessmentPrefill } from '../types/eligibility';
+import { demoBorrowerForm } from '../components/eligibility/demoData';
 
 const INPUT =
   'w-full px-3.5 py-2 text-sm bg-white border border-stone-300 rounded-lg focus:outline-none focus:border-orange-600';
@@ -137,18 +138,27 @@ function AssessmentForm({
 
   const [validationError, setValidationError] = useState<string | null>(null);
   const [unresolvedWarning, setUnresolvedWarning] = useState<number | null>(null);
+  const restoredExtras = editingAssessment || prefill ? null : ai.restoredExtras;
   const [saved, setSaved] = useState<{ id: string; referenceCode: string } | null>(
-    editingAssessment ? { id: editingAssessment.id, referenceCode: editingAssessment.referenceCode } : null
+    editingAssessment
+      ? { id: editingAssessment.id, referenceCode: editingAssessment.referenceCode }
+      : restoredExtras?.saved ?? null
   );
-  const savedIdRef = useRef<string | null>(editingAssessment?.id ?? null);
+  const savedIdRef = useRef<string | null>(editingAssessment?.id ?? restoredExtras?.saved?.id ?? null);
   // The eligibility record this form came from. Cleared on detach so a different borrower's save never links to it.
-  const eligibilityRecordRef = useRef<string | null>(prefill?.eligibilityRecordId ?? null);
-  const [conditions, setConditions] = useState(prefill?.conditions ?? []);
+  const eligibilityRecordRef = useRef<string | null>(prefill?.eligibilityRecordId ?? restoredExtras?.eligibilityRecordId ?? null);
+  const [conditions, setConditions] = useState(prefill?.conditions ?? restoredExtras?.conditions ?? []);
   // Bumped on every detach (Reset, Populate Demo) so a save started earlier never binds the form to its record.
   const detachGenRef = useRef(0);
   const [moreOpen, setMoreOpen] = useState(false);
   const [previewDoc, setPreviewDoc] = useState<StoredDocument | null>(null);
   const [deleteDoc, setDeleteDoc] = useState<StoredDocument | null>(null);
+
+  // Kept with the browser draft so a restored form still knows which assessment it was saved as.
+  const { setDraftExtras } = ai;
+  useEffect(() => {
+    setDraftExtras({ saved, eligibilityRecordId: eligibilityRecordRef.current, conditions });
+  }, [saved, conditions, setDraftExtras]);
 
   const dynamicFields = dynamicFieldsForPurpose(form.fundingPurpose);
 
@@ -202,36 +212,7 @@ function AssessmentForm({
     detachFromSaved();
     const blank = createBlankForm(defaultCurrency, officerDefault);
     ai.loadDemo(
-      {
-      ...blank,
-      applicantLabel: '[FICTIONAL DEMO] Deccan Precision Engineering LLP',
-      entityType: 'llp',
-      industrySector: 'Industrial Machinery & Precision Components',
-      businessVintageYears: '8',
-      gstTaxCompliant: 'yes',
-      fundingPurpose: 'machinery_equipment',
-      dynamicPurposeAnswers: {
-        equipmentCondition: 'New Domestic Equipment',
-        supplierQuotationReady: 'Yes',
-        borrowerMarginPercent: '20%',
-      },
-      assignedOfficer: officerDefault || 'M. Joshi (Demo Desk)',
-      branchOrDesk: 'West Zone — Pune Desk',
-      requestedAmount: '12500000',
-      requestedTenureMonths: '60',
-      annualTurnoverOrIncome: '54000000',
-      creditScore: '760',
-      existingEmiObligations: '185000',
-      profitabilityStatus: 'profitable_2plus_years',
-      collateralAvailable: 'yes',
-      collateralType: 'Industrial Shed & Equipment',
-      collateralValue: '21000000',
-      collateralDescription:
-        'Fictional sample industrial shed & machinery collateral record for workflow testing.',
-      statedPurpose: 'Fictional sample intake: automated CNC assembly line acquisition.',
-      advisorNotes: 'Populate the borrower profile to test product fit analysis against the approved catalogue.',
-      isFictionalDemo: true,
-      },
+      demoBorrowerForm(blank, officerDefault),
       // Always a fresh session, so one that was just linked by an in-flight save is not reused.
       { detach: true }
     );
@@ -298,7 +279,13 @@ function AssessmentForm({
       ...link,
     };
 
-    const existingId = savedIdRef.current;
+    let existingId = savedIdRef.current;
+    // A restored draft may point at an assessment the server no longer has (restart): save as a new one.
+    if (existingId && !editingAssessment && !state.assessments.some((a) => a.id === existingId)) {
+      savedIdRef.current = null;
+      existingId = null;
+      setSaved(null);
+    }
     if (existingId) {
       const updated = await updateAssessment(existingId, payload);
       if (!updated) return;
@@ -482,6 +469,18 @@ function AssessmentForm({
           }
         />
 
+        {ai.serverLost && (
+          <div role="status" data-testid="server-restarted-banner" className="px-4 py-3 bg-sky-50 border border-sky-200 rounded-xl text-xs text-sky-900">
+            The server restarted, so the files themselves are gone, but the values already read are kept here.
+            Re-upload only if you need to re-read or preview a file.
+          </div>
+        )}
+        {ai.draftDegraded && (
+          <div role="status" className="px-4 py-3 bg-stone-100 border border-stone-200 rounded-xl text-xs text-stone-800">
+            This browser has no room to keep every read result, so some may not survive a reload.
+          </div>
+        )}
+
         {conditions.length > 0 && (
           <div role="status" className="px-4 py-3 bg-amber-50 border border-amber-300 rounded-xl text-xs text-amber-900 space-y-1.5">
             <p className="font-semibold">Conditionally eligible. These conditions still apply:</p>
@@ -502,6 +501,11 @@ function AssessmentForm({
         )}
 
         {/* Document AI: upload, file list, review */}
+        {!editingAssessment && (
+          <p className="text-[11px] text-stone-500" data-testid="draft-note">
+            Your entries, uploaded file list and read results are kept in this browser until you press Reset.
+          </p>
+        )}
         <div className="bg-white border border-stone-200 rounded-xl divide-y divide-stone-200">
           <DocumentUploadCard
             documents={ai.documents}
