@@ -299,23 +299,6 @@ export function DocumentUploadCard(props: Props) {
               </div>
 
               <div className="pl-7 flex flex-wrap items-center gap-x-3 gap-y-1.5">
-                {doc.status !== 'uploaded' && doc.status !== 'queued' && doc.status !== 'extracting' && (
-                  <label className="inline-flex items-center gap-1.5 text-[11px] text-stone-600">
-                    Type
-                    <select
-                      value={doc.documentType ?? 'other'}
-                      disabled={running || Boolean(doc.fileDeletedAt)}
-                      onChange={(e) => props.onChangeType(doc.documentId, e.target.value as DocumentType)}
-                      className="px-2 py-1 text-[11px] bg-white border border-stone-300 rounded-md focus:outline-none focus:border-orange-600 disabled:opacity-50"
-                    >
-                      {DOCUMENT_TYPES.map((type) => (
-                        <option key={type} value={type}>
-                          {humanize(type)}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                )}
                 {doc.status === 'failed' && (
                   <>
                     <span className="text-[11px] text-red-700">

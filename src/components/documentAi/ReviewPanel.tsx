@@ -149,11 +149,6 @@ function ItemShell({
   );
 }
 
-const primaryButton =
-  'inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold text-white bg-orange-600 hover:bg-orange-700 rounded cursor-pointer';
-const quietButton =
-  'inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-stone-700 bg-white border border-stone-300 hover:bg-stone-50 rounded cursor-pointer';
-
 export function ReviewPanel(props: ReviewPanelProps) {
   const { form, fields, warnings, edited, applied, isDismissed, acceptCandidate, dismiss, hasDocuments, busy } = props;
   const [showApplied, setShowApplied] = useState(false);
@@ -286,19 +281,9 @@ export function ReviewPanel(props: ReviewPanelProps) {
                             </p>
                             <ConfidenceBadge value={candidate.confidence} />
                             <SourceText field={candidate} defaultOpen />
-                            <button
-                              type="button"
-                              onClick={() => acceptCandidate(result.fieldId, candidate.candidateId, 'resolved_conflict')}
-                              className={primaryButton}
-                            >
-                              <Check className="w-3 h-3" aria-hidden="true" /> Use this
-                            </button>
                           </div>
                         ))}
                     </div>
-                    <button type="button" onClick={() => dismiss(result.fieldId)} className={quietButton}>
-                      <X className="w-3 h-3" aria-hidden="true" /> Dismiss
-                    </button>
                   </ItemShell>
                 );
               }
@@ -330,22 +315,10 @@ export function ReviewPanel(props: ReviewPanelProps) {
                   })()}
                   <div className="flex flex-wrap gap-2">
                     {!invalid && writable && !wrongPurpose && (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          acceptCandidate(
-                            result.fieldId,
-                            result.suggestedCandidateId ?? result.candidates[0]?.candidateId ?? ''
-                          )
-                        }
-                        className={primaryButton}
-                      >
-                        <Check className="w-3 h-3" aria-hidden="true" /> Accept
-                      </button>
+                      <span className="inline-flex items-center gap-1.5 rounded bg-emerald-50 px-2 py-1 text-[10px] font-semibold text-emerald-700 border border-emerald-200">
+                        <Check className="w-3 h-3" aria-hidden="true" /> Auto-filled when a valid value is read
+                      </span>
                     )}
-                    <button type="button" onClick={() => dismiss(result.fieldId)} className={quietButton}>
-                      <X className="w-3 h-3" aria-hidden="true" /> Dismiss
-                    </button>
                   </div>
                 </ItemShell>
               );
@@ -383,18 +356,9 @@ export function ReviewPanel(props: ReviewPanelProps) {
                     result.candidates[0];
                   return shown ? <SourceText field={shown} /> : null;
                 })()}
-                <button
-                  type="button"
-                  onClick={() =>
-                    acceptCandidate(
-                      result.fieldId,
-                      result.suggestedCandidateId ?? result.candidates[0]?.candidateId ?? ''
-                    )
-                  }
-                  className={quietButton}
-                >
-                  Use document value
-                </button>
+                <span className="inline-flex items-center gap-1.5 rounded bg-stone-100 px-2 py-1 text-[10px] font-medium text-stone-700 border border-stone-200">
+                  Form stays editable; document value is kept as a reference
+                </span>
               </ItemShell>
             ))}
           </ul>

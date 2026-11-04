@@ -290,7 +290,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </div>
       )}
 
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         <header className="h-20 px-4 sm:px-8 bg-white/80 border-b border-slate-200/80 backdrop-blur-sm flex items-center justify-between gap-4 sticky top-0 z-30">
           <div className="flex items-center gap-3 min-w-0">
             <button
@@ -372,7 +372,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
         )}
 
-        <main className="flex-1 px-4 sm:px-8 py-6 sm:py-8 w-full mx-auto max-w-[1360px] space-y-6">
+        <main className="flex-1 px-4 sm:px-8 py-6 sm:py-8 w-full mx-auto max-w-[1360px] space-y-6 overflow-y-auto">
           {children}
         </main>
       </div>

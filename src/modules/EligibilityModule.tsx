@@ -54,7 +54,7 @@ function errorMessage(err: unknown): string {
 
 export function EligibilityModule(props: EligibilityModuleProps = {}) {
   const { documentSessionId: sessionProp, assessmentId: assessmentProp, onContinueToAssessment } = props;
-  const { state } = useAppState();
+  const { state, navigateTo } = useAppState();
 
   const [rules, setRules] = useState<EligibilityRulesResponse | null>(null);
   const [rulesError, setRulesError] = useState<string | null>(null);
@@ -257,6 +257,10 @@ export function EligibilityModule(props: EligibilityModuleProps = {}) {
             createdBy: state.currentUser?.displayName || state.currentUser?.email || null,
           });
       loadRecord(res.record);
+      const outcome = res.record.result?.outcome;
+      if (status === 'final' && (outcome === 'ELIGIBLE' || outcome === 'CONDITIONALLY_ELIGIBLE')) {
+        navigateTo('matching-engine');
+      }
       setNotice(status === 'final' ? `Finalized ${res.record.referenceCode}.` : `Saved draft ${res.record.referenceCode}.`);
       await refreshRecords();
     });
