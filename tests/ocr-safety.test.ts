@@ -12,18 +12,41 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { extractDocument, OCR_CONFIDENCE_CAP } from '../server/documentAi/pipeline.ts';
+import {
+  extractDocument,
+  isEncryptedPdf,
+  LLM_BUDGET_MS,
+  MIN_MODEL_CALL_MS,
+  MODEL_WRAP_UP_MS,
+  modelCallBudgetMs,
+  OCR_CONFIDENCE_CAP,
+} from '../server/documentAi/pipeline.ts';
 import {
   inModelPhase,
+  liveOcrThreadCount,
   OCR_DOCUMENT_BUDGET_MS,
   OCR_PAGE_TIMEOUT_MS,
+  OCR_WORKER_START_TIMEOUT_MS,
+  OcrError,
   ocrImages,
+  ocrPoolForTests,
   runObserved,
   shutdownOcr,
   type ExtractionObserver,
 } from '../server/documentAi/ocr.ts';
 import { MAX_RENDER_PIXELS, renderPdfPages, renderScaleFor } from '../server/documentAi/textDocuments.ts';
-import { fileWorkBudgetMs, startFileTimer, timeoutCode } from '../server/documentAi/jobs.ts';
+import {
+  FILE_GATE_OPTIONS,
+  FileGate,
+  fileWorkBudgetMs,
+  JOB_CONCURRENCY,
+  MAX_QUEUE_WAIT_MS,
+  startFileTimer,
+  timeoutCode,
+  type FileGateOptions,
+  type MemoryReading,
+} from '../server/documentAi/jobs.ts';
+import { PDF_MAX_TEXT_PAGES, readPdfText, type PdfReadOptions } from '../server/documentAi/spreadsheet.ts';
 import { DOCUMENT_AI_THRESHOLDS, type AcceptedFileKind, type DocumentExtractionResult, type DocumentType } from '../src/types/documentAi.ts';
 
 const MODEL_ENV = ['OPENROUTER_API_KEY', 'GEMINI_API_KEY', 'LLM_PROVIDER', 'DOCUMENT_AI_LLM_FALLBACK', 'DOCUMENT_AI_OCR', 'OPENROUTER_PDF_INPUT'];
@@ -371,5 +394,384 @@ describe('per-file timer and timeout codes (M6, L11)', () => {
     for (const kind of ['pdf', 'png', 'jpeg', 'webp', 'txt', 'docx', 'xlsx', 'csv'] as const) {
       assert.ok(fileWorkBudgetMs(kind) <= 15 * 60_000);
     }
+  });
+});
+
+// ------------------------------------------------------------------ Render free plan (audit A-D, memory)
+
+/** Rejects instead of hanging when `promise` does not settle in time. */
+function within<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${what} did not settle within ${ms} ms`)), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+describe('OCR worker queue hands a free worker on (audit A)', () => {
+  it('a waiter aborted after being handed the worker passes it to the next waiter', async () => {
+    assert.equal(ocrPoolForTests.slotCount(), 1, 'one worker by default');
+    const holder = await ocrPoolForTests.acquire(new AbortController().signal);
+    const bController = new AbortController();
+    const b = ocrPoolForTests.acquire(bController.signal);
+    b.catch(() => undefined);
+    const c = ocrPoolForTests.acquire(new AbortController().signal);
+    await sleep(0);
+    assert.equal(ocrPoolForTests.waitingCount(), 2);
+    // The slot goes to B, still busy; B's file is aborted before B resumes.
+    ocrPoolForTests.release(holder);
+    bController.abort();
+    const cSlot = await within(c, 2_000, 'the next waiter');
+    await assert.rejects(b, (error: unknown) => error instanceof DOMException && error.name === 'AbortError');
+    assert.equal(ocrPoolForTests.freeSlotCount(), 0, 'C holds the worker');
+    ocrPoolForTests.release(cSlot);
+    assert.equal(ocrPoolForTests.freeSlotCount(), 1);
+    assert.equal(ocrPoolForTests.waitingCount(), 0);
+  });
+
+  it('a waiter aborted while queued leaves the queue; the worker is never taken in between', async () => {
+    const holder = await ocrPoolForTests.acquire(new AbortController().signal);
+    const controller = new AbortController();
+    const queued = ocrPoolForTests.acquire(controller.signal);
+    queued.catch(() => undefined);
+    await sleep(0);
+    controller.abort();
+    await assert.rejects(queued);
+    assert.equal(ocrPoolForTests.waitingCount(), 0);
+    ocrPoolForTests.release(holder);
+    assert.equal(ocrPoolForTests.freeSlotCount(), 1);
+  });
+});
+
+describe('a file never waits on the queue for long (audit B)', () => {
+  it('waits at most 5 minutes in total by default', () => {
+    if (process.env.DOCUMENT_AI_MAX_QUEUE_WAIT_MS === undefined) assert.equal(MAX_QUEUE_WAIT_MS, 5 * 60_000);
+  });
+
+  it('adds up every wait: several short waits past the bound stop the file', async () => {
+    let expiredCount = 0;
+    const timer = startFileTimer(10_000, () => (expiredCount += 1), 200);
+    try {
+      for (let i = 0; i < 3 && !timer.expired; i += 1) {
+        timer.observer.queueWaitStarted();
+        await sleep(90);
+        timer.observer.queueWaitEnded();
+        await sleep(10);
+      }
+      assert.equal(timer.expired, true, '270 ms waited against a 200 ms bound');
+      assert.equal(expiredCount, 1);
+    } finally {
+      timer.cancel();
+    }
+  });
+
+  it('running out of waiting time is reported as a reading timeout, never an AI one', async () => {
+    const timer = startFileTimer(10_000, () => undefined, 50);
+    try {
+      timer.observer.phase = 'model';
+      timer.observer.queueWaitStarted();
+      await sleep(150);
+      assert.equal(timer.expired, true);
+      assert.equal(timer.phaseAtExpiry, 'reading');
+      assert.equal(timeoutCode(timer.phaseAtExpiry ?? 'model'), 'unreadable_document');
+    } finally {
+      timer.cancel();
+    }
+  });
+
+  it('reports the work time left, paused while waiting', async () => {
+    const timer = startFileTimer(1_000, () => undefined, 10_000);
+    try {
+      await sleep(100);
+      const left = timer.observer.remainingMs?.() ?? -1;
+      assert.ok(left <= 920 && left >= 700, `left ${left}`);
+      timer.observer.queueWaitStarted();
+      await sleep(150);
+      const paused = timer.observer.remainingMs?.() ?? -1;
+      assert.ok(Math.abs(paused - left) < 60, `still about ${left} while queued, got ${paused}`);
+      timer.observer.queueWaitEnded();
+    } finally {
+      timer.cancel();
+    }
+  });
+});
+
+describe('an OCR worker that does not start is terminated (audit C)', () => {
+  const page = fixture('FICTIONAL-credit-report-scan.png');
+
+  it('bounds a start at 60 s by default', () => {
+    if (process.env.DOCUMENT_AI_OCR_START_TIMEOUT_MS === undefined) assert.equal(OCR_WORKER_START_TIMEOUT_MS, 60_000);
+  });
+
+  it('a start past its bound reports the engine unavailable and its thread is stopped', async () => {
+    await ocrImages([page], new AbortController().signal); // loads the library, so the next start spawns at once
+    await shutdownOcr();
+    await assert.rejects(
+      ocrImages([page], new AbortController().signal, { startTimeoutMs: 1 }),
+      (error: unknown) => error instanceof OcrError && error.code === 'ocr_unavailable'
+    );
+    const deadline = Date.now() + 10_000;
+    while (liveOcrThreadCount() > 0 && Date.now() < deadline) await sleep(50);
+    assert.equal(liveOcrThreadCount(), 0, 'no engine thread left running');
+    // A later file starts a fresh worker and reads normally.
+    const next = await ocrImages([page], new AbortController().signal);
+    assert.equal(liveOcrThreadCount(), 1, 'the spawned thread is tracked');
+    assert.ok(next.pages[0].some((line) => /CIBIL/i.test(line)));
+  });
+
+  it('with no model, an image whose OCR cannot start is unreadable_document, not a hang', async () => {
+    // Same path as a start that timed out: OCR gives nothing, and there is no model to ask.
+    process.env.DOCUMENT_AI_OCR = 'off';
+    try {
+      const result = await within(extract('scan.png', 'png', page, 'credit_report'), 10_000, 'the file');
+      assert.equal(result.ok, false);
+      assert.equal(result.ok ? '' : result.errorCode, 'unreadable_document');
+    } finally {
+      delete process.env.DOCUMENT_AI_OCR;
+    }
+  });
+});
+
+describe('a slow model never costs a file its local values (audit D)', () => {
+  // Revenue is read locally; the other key fields of a statement are missing, so the model is asked.
+  const STATEMENT = Buffer.from(
+    'Statement of Profit and Loss (FICTIONAL)\nFor the year ended 31 March 2025\nRevenue from operations  1,25,00,000\n'
+  );
+  let calls = 0;
+
+  before(() => {
+    process.env.LLM_PROVIDER = 'openrouter';
+    process.env.OPENROUTER_API_KEY = 'test-key-not-real';
+    // A model that never answers; it stops only when its signal aborts.
+    globalThis.fetch = ((_url: unknown, init?: RequestInit) => {
+      calls += 1;
+      return new Promise<Response>((_, reject) => {
+        const signal = init?.signal;
+        if (signal?.aborted) reject(new DOMException('aborted', 'AbortError'));
+        signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+      });
+    }) as typeof fetch;
+  });
+
+  after(() => {
+    delete process.env.LLM_PROVIDER;
+    delete process.env.OPENROUTER_API_KEY;
+    globalThis.fetch = noNetwork;
+  });
+
+  it('the model gets no more than the file has left, less a margin to finish', () => {
+    assert.equal(modelCallBudgetMs(undefined), LLM_BUDGET_MS);
+    assert.equal(modelCallBudgetMs(10 * LLM_BUDGET_MS), LLM_BUDGET_MS);
+    assert.equal(modelCallBudgetMs(60_000), 60_000 - MODEL_WRAP_UP_MS);
+    assert.ok(modelCallBudgetMs(MODEL_WRAP_UP_MS) < MIN_MODEL_CALL_MS);
+  });
+
+  it('a model that outlasts the file budget times out first, and the file completes with its local values', async () => {
+    const controller = new AbortController();
+    const workMs = MODEL_WRAP_UP_MS + 2_000;
+    const timer = startFileTimer(workMs, () => controller.abort());
+    const before = calls;
+    try {
+      const result = await within(
+        runObserved(timer.observer, () =>
+          extractDocument({
+            documentId: 'doc_test',
+            fileName: 'statement.txt',
+            kind: 'txt',
+            bytes: STATEMENT,
+            declaredDocumentType: 'financial_statement',
+            today: '2025-11-01',
+            signal: controller.signal,
+          })
+        ),
+        workMs + 5_000,
+        'the file'
+      );
+      assert.ok(calls > before, 'the model was asked');
+      assert.equal(timer.expired, false, 'the file timer never fired');
+      assert.ok(result.ok, result.ok ? '' : result.errorCode);
+      const revenue = result.fields.find((f) => f.fieldId === 'financialProfile.annualRevenue');
+      assert.equal(revenue?.value, 12_500_000);
+    } finally {
+      timer.cancel();
+    }
+  });
+
+  it('with too little time left the model is not called at all, and the file still completes', async () => {
+    const before = calls;
+    const observer: ExtractionObserver = {
+      phase: 'reading',
+      queueWaitStarted() {},
+      queueWaitEnded() {},
+      remainingMs: () => MODEL_WRAP_UP_MS,
+    };
+    const result = await runObserved(observer, () => extract('statement.txt', 'txt', STATEMENT, 'financial_statement'));
+    assert.equal(calls, before);
+    assert.ok(result.ok);
+    assert.ok(result.fields.some((f) => f.fieldId === 'financialProfile.annualRevenue'));
+  });
+});
+
+describe('memory: large files and the heap (Render free plan)', () => {
+  const low: MemoryReading = { heapUsed: 50, heapLimit: 1_000, rss: 100 };
+  const high: MemoryReading = { heapUsed: 900, heapLimit: 1_000, rss: 100 };
+  const gate = (overrides: Partial<FileGateOptions> = {}) =>
+    new FileGate({
+      concurrency: 2,
+      bytesBudget: 100,
+      largeFileBytes: 50,
+      heapHighRatio: 0.65,
+      rssHighBytes: 0,
+      memoryWaitMs: 150,
+      pollMs: 10,
+      readMemory: () => low,
+      ...overrides,
+    });
+  const settled = async (promise: Promise<unknown>) => {
+    let done = false;
+    void promise.then(() => (done = true));
+    await sleep(30);
+    return done;
+  };
+
+  it('defaults: 2 files at once, 40 MB in flight, 15 MB runs alone, 80% of the heap, 60 s wait', () => {
+    if (process.env.DOCUMENT_AI_CONCURRENCY === undefined) assert.equal(JOB_CONCURRENCY, 2);
+    assert.equal(FILE_GATE_OPTIONS.concurrency, JOB_CONCURRENCY);
+    if (process.env.DOCUMENT_AI_INFLIGHT_MB === undefined) assert.equal(FILE_GATE_OPTIONS.bytesBudget, 40 * 1024 * 1024);
+    if (process.env.DOCUMENT_AI_LARGE_FILE_MB === undefined) assert.equal(FILE_GATE_OPTIONS.largeFileBytes, 15 * 1024 * 1024);
+    if (process.env.DOCUMENT_AI_HEAP_HIGH_RATIO === undefined) assert.equal(FILE_GATE_OPTIONS.heapHighRatio, 0.8);
+    if (process.env.DOCUMENT_AI_MEMORY_WAIT_MS === undefined) assert.equal(FILE_GATE_OPTIONS.memoryWaitMs, 60_000);
+  });
+
+  it('runs no more than its concurrency at once, first come first served', async () => {
+    const g = gate();
+    const a = await g.admit(10);
+    const b = await g.admit(10);
+    const c = g.admit(10);
+    assert.equal(await settled(c), false);
+    assert.ok(a.ok && b.ok);
+    a.release();
+    const third = await within(c, 1_000, 'third file');
+    assert.ok(third.ok);
+    b.release();
+    third.release();
+    assert.equal(g.inFlight, 0);
+  });
+
+  it('holds the bytes in flight under its budget, and a large file runs with nothing else', async () => {
+    const g = gate();
+    const a = await g.admit(30);
+    const b = await g.admit(30);
+    const big = g.admit(60);
+    const small = g.admit(5);
+    assert.equal(await settled(big), false, 'a large file waits for the others');
+    assert.equal(await settled(small), false, 'nothing jumps the queue');
+    assert.ok(a.ok && b.ok);
+    a.release();
+    assert.equal(await settled(big), false);
+    b.release();
+    const bigAdmission = await within(big, 1_000, 'large file');
+    assert.ok(bigAdmission.ok);
+    assert.equal(await settled(small), false, 'nothing runs beside a large file');
+    bigAdmission.release();
+    const smallAdmission = await within(small, 1_000, 'small file');
+    assert.ok(smallAdmission.ok);
+    smallAdmission.release();
+  });
+
+  it('two files over the byte budget together run one after the other', async () => {
+    const g = gate({ largeFileBytes: 80 });
+    const a = await g.admit(45);
+    const b = g.admit(45);
+    assert.equal(await settled(b), true, '90 fits in 100');
+    const bAdmission = await b;
+    assert.ok(a.ok && bAdmission.ok);
+    a.release();
+    const c = g.admit(60);
+    assert.equal(await settled(c), false, '45 + 60 does not fit in 100');
+    bAdmission.release();
+    const cAdmission = await within(c, 1_000, 'third file');
+    assert.ok(cAdmission.ok);
+    cAdmission.release();
+  });
+
+  it('turns a file away when the heap stays high with nothing running, rather than risk a crash', async () => {
+    const g = gate({ readMemory: () => high });
+    const started = Date.now();
+    const admission = await within(g.admit(10), 2_000, 'admission');
+    assert.equal(admission.ok, false);
+    assert.ok(Date.now() - started >= 140, 'waited for memory first');
+    assert.equal(g.inFlight, 0);
+  });
+
+  it('starts the file once the heap falls within the wait', async () => {
+    let reading = high;
+    const g = gate({ readMemory: () => reading, memoryWaitMs: 5_000 });
+    const pending = g.admit(10);
+    assert.equal(await settled(pending), false);
+    reading = low;
+    const admission = await within(pending, 1_000, 'admission');
+    assert.ok(admission.ok);
+    admission.release();
+  });
+
+  it('with the heap high, runs one file at a time', async () => {
+    let reading = low;
+    const g = gate({ readMemory: () => reading, memoryWaitMs: 5_000 });
+    const first = await g.admit(10);
+    reading = high;
+    const second = g.admit(10);
+    assert.equal(await settled(second), false, 'nothing starts beside a running file while memory is high');
+    reading = low;
+    const admission = await within(second, 1_000, 'second file');
+    assert.ok(first.ok && admission.ok);
+    first.release();
+    admission.release();
+  });
+
+  it('also watches resident memory when a limit is set', async () => {
+    const g = gate({ rssHighBytes: 500, readMemory: () => ({ heapUsed: 1, heapLimit: 1_000, rss: 600 }), memoryWaitMs: 50 });
+    assert.equal(g.memoryHigh(), true);
+    assert.equal((await within(g.admit(1), 1_000, 'admission')).ok, false);
+  });
+
+  it('scans a large PDF for encryption a window at a time, catching a mark across a seam', () => {
+    const size = 3 * 1024 * 1024;
+    assert.equal(isEncryptedPdf(Buffer.alloc(size, 0x20)), false);
+    for (const at of [0, 1024 * 1024 - 5, 2 * 1024 * 1024 - 260, size - 16]) {
+      const bytes = Buffer.alloc(size, 0x20);
+      bytes.write('/Encrypt 12 0 R', at, 'latin1');
+      assert.equal(isEncryptedPdf(bytes), true, `mark at ${at}`);
+      assert.equal(isEncryptedPdf(new Uint8Array(bytes)), true, `mark at ${at}, plain Uint8Array`);
+    }
+  });
+
+  it('reads the text of the first pages only, and says how many it read', async () => {
+    const item = (str: string) => ({ str, transform: [1, 0, 0, 1, 0, 700], width: 100, height: 10 });
+    let pagesOpened = 0;
+    let pagesCleaned = 0;
+    const document = {
+      numPages: 400,
+      getPage: async (n: number) => {
+        pagesOpened += 1;
+        return {
+          getTextContent: async () => ({ items: [item(`Page ${n} of a long fictional annual report, text only`)] }),
+          cleanup: () => (pagesCleaned += 1),
+        };
+      },
+    };
+    let destroyed = 0;
+    const task = { promise: Promise.resolve(document), destroy: async () => void (destroyed += 1) };
+    const loadEngine = (async () => ({ getDocument: () => task })) as unknown as NonNullable<PdfReadOptions['loadEngine']>;
+    const text = await readPdfText(new Uint8Array(4), new AbortController().signal, { loadEngine });
+    if (process.env.DOCUMENT_AI_PDF_MAX_TEXT_PAGES === undefined) assert.equal(PDF_MAX_TEXT_PAGES, 150);
+    assert.equal(text.totalPages, 400);
+    assert.equal(text.pagesRead, PDF_MAX_TEXT_PAGES);
+    assert.equal(pagesOpened, PDF_MAX_TEXT_PAGES, 'pages past the cap are never loaded');
+    assert.equal(pagesCleaned, pagesOpened, 'every page is cleaned up');
+    assert.ok(destroyed >= 1, 'the document is destroyed');
+    assert.ok(text.source.kind === 'pdf' && text.source.pages?.length === PDF_MAX_TEXT_PAGES);
   });
 });

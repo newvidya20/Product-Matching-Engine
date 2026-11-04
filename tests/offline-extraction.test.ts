@@ -276,3 +276,25 @@ describe('AI as a fallback only (stubbed provider, no network)', () => {
     assert.equal(result.model, 'local-rules');
   });
 });
+
+describe('a figure whose period the document does not state is never given one (audit E)', () => {
+  it('the prior-year figure under an unrecognised heading is period_unknown and never auto-applied', async () => {
+    const statement = Buffer.from(
+      [
+        'Statement of Profit and Loss (FICTIONAL)',
+        'For the year ended 31 March 2025',
+        'Revenue from operations  1,25,00,000',
+        'Notes to accounts',
+        'Comparative figures (2023-24)',
+        'Revenue from operations  1,00,00,000',
+      ].join('\n')
+    );
+    const result = success(await extract('statement.txt', 'txt', { bytes: statement, declared: 'financial_statement' }));
+    const prior = result.fields.find((f) => f.fieldId === 'financialProfile.annualRevenue' && f.value === 10_000_000);
+    assert.ok(prior, 'the figure is still listed for review');
+    assert.equal(prior.period, null);
+    assert.ok(prior.reasons.includes('period_unknown'));
+    assert.notEqual(prior.status, 'auto_applied');
+    assert.equal(result.model, 'local-rules');
+  });
+});

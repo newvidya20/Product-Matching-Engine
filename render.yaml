@@ -12,6 +12,12 @@ services:
         value: production
       - key: PORT
         value: 10000
+      # Render free has 512 MB. Node's default heap limit there is about 252 MB and the server ran out of it
+      # while reading documents. This leaves room for the heap plus OCR and rendering outside it.
+      - key: NODE_OPTIONS
+        value: --max-old-space-size=360
+      - key: DOCUMENT_AI_CONCURRENCY
+        value: "1"
       - key: GEMINI_API_KEY
         sync: false
       - key: LLM_PROVIDER

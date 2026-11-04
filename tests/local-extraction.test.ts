@@ -269,3 +269,115 @@ describe('OCR text clean-up', () => {
     assert.deepEqual(ocrTextToLines('  CIBIL Score: 762  \n\n | \nCMR Rank:     CMR-4\n'), ['CIBIL Score: 762', 'CMR Rank:  CMR-4']);
   });
 });
+
+describe('a figure with no period of its own (audit E)', () => {
+  const twoPages = (pageTwoHeading: string) =>
+    extractLocally({
+      documentType: 'financial_statement',
+      fromOcr: false,
+      content: {
+        kind: 'text',
+        pages: [
+          ['Statement of Profit and Loss (FICTIONAL)', 'For the year ended 31 March 2025', 'Revenue from operations  1,25,00,000'],
+          [pageTwoHeading, 'Revenue from operations  1,00,00,000'],
+        ],
+      },
+    });
+
+  it('a two-year statement whose page 2 lists the prior year under an unrecognised heading: no period is guessed', () => {
+    const result = twoPages('Comparative figures (2023-24)');
+    const revenue = byField(result, 'financialProfile.annualRevenue');
+    assert.deepEqual(
+      revenue.map((f) => [f.rawValue, f.page, f.period]),
+      [
+        // Page 1's own heading states its period.
+        ['1,25,00,000', 1, 'FY 2024-25'],
+        // Page 2's figure never takes the first period found in the document: period_unknown.
+        ['1,00,00,000', 2, null],
+      ]
+    );
+  });
+
+  it('a prior-year heading with no year printed also counts as a second period', () => {
+    const result = twoPages('Previous year figures');
+    const pageTwo = byField(result, 'financialProfile.annualRevenue').find((f) => f.page === 2);
+    assert.ok(pageTwo);
+    assert.equal(pageTwo.period, null);
+  });
+
+  it('control: a document that states exactly one period gives it to a figure with no column', () => {
+    const result = text('financial_statement', [
+      'Statement of Profit and Loss (FICTIONAL)',
+      'For the year ended 31 March 2025',
+      'Revenue from operations  1,25,00,000',
+    ]);
+    assert.equal(byField(result, 'financialProfile.annualRevenue')[0].period, 'FY 2024-25');
+  });
+
+  it('the same year written two ways is one period: assessment year 2025-26 is FY 2024-25', () => {
+    const result = text('itr', [
+      'Assessment Year 2025-26',
+      'Financial Year 2024-25',
+      'Gross receipts  48,00,000',
+    ]);
+    assert.equal(byField(result, 'financialProfile.annualRevenue')[0]?.period, 'FY 2024-25');
+  });
+
+  it('a report or filing date is not a second period', () => {
+    const result = text('gst_return', [
+      'Financial year: FY 2024-25',
+      'Date of filing: 20.12.2025',
+      'Aggregate turnover: Rs. 1,25,00,000.00',
+    ]);
+    assert.equal(byField(result, 'financialProfile.gstAnnualTurnover')[0].period, 'FY 2024-25');
+  });
+
+  it('with pages left unread, no figure takes a document-wide period', () => {
+    const result = extractLocally({
+      documentType: 'financial_statement',
+      fromOcr: false,
+      complete: false,
+      content: { kind: 'text', pages: [['Financial year: FY 2024-25'], ['Revenue from operations  1,25,00,000']] },
+    });
+    assert.equal(byField(result, 'financialProfile.annualRevenue')[0].period, null);
+    const whole = extractLocally({
+      documentType: 'financial_statement',
+      fromOcr: false,
+      content: { kind: 'text', pages: [['Financial year: FY 2024-25'], ['Revenue from operations  1,25,00,000']] },
+    });
+    assert.equal(byField(whole, 'financialProfile.annualRevenue')[0].period, 'FY 2024-25', 'control: read in full');
+  });
+
+  it('a spreadsheet that states two periods gives no period to a figure without a heading', () => {
+    const cell = (ref: string, column: number, value: string) => ({ ref, column, text: value });
+    const result = extractLocally({
+      documentType: 'financial_statement',
+      fromOcr: false,
+      content: {
+        kind: 'sheets',
+        fileKind: 'xlsx',
+        sheets: [
+          {
+            name: 'Summary',
+            hidden: false,
+            rows: [
+              { rowNumber: 1, cells: [cell('A1', 0, 'For the year ended 31 March 2025')] },
+              { rowNumber: 2, cells: [cell('A2', 0, 'Revenue from operations'), cell('B2', 1, '12500000')] },
+            ],
+          },
+          {
+            name: 'Prior',
+            hidden: false,
+            rows: [
+              { rowNumber: 1, cells: [cell('A1', 0, 'Comparative figures 2023-24')] },
+              { rowNumber: 2, cells: [cell('A2', 0, 'Revenue from operations'), cell('B2', 1, '10000000')] },
+            ],
+          },
+        ],
+      },
+    });
+    const revenue = byField(result, 'financialProfile.annualRevenue');
+    assert.equal(revenue.length, 2);
+    assert.ok(revenue.every((f) => f.period === null));
+  });
+});

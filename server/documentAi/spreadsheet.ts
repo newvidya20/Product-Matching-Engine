@@ -367,6 +367,16 @@ export function renderSpreadsheetText(parsed: ParsedSpreadsheet): SpreadsheetTex
 /** Below this, a PDF has no real text layer: a scanner's watermark, say. */
 const MIN_PDF_TEXT_CHARS = 50;
 const PDF_READ_TIMEOUT_MS = 20_000;
+/**
+ * Pages of a PDF's text layer read for extraction (DOCUMENT_AI_PDF_MAX_TEXT_PAGES, default 150).
+ * Hundreds of pages of text objects would crowd a small server's heap; the figures a lender needs
+ * sit at the front. A value is only ever taken from a page that was read, and the caller marks the
+ * document partial when pages were left unread.
+ */
+export const PDF_MAX_TEXT_PAGES = (() => {
+  const value = Number(process.env.DOCUMENT_AI_PDF_MAX_TEXT_PAGES);
+  return Number.isFinite(value) && value >= 1 ? Math.min(2_000, Math.floor(value)) : 150;
+})();
 
 /** The errors pdf.js raises about a file. Anything else, a missing worker say, is the server's. */
 const PDF_DOCUMENT_ERRORS: ReadonlySet<string> = new Set([
@@ -381,6 +391,17 @@ type PdfEngine = Pick<typeof import('pdfjs-dist/legacy/build/pdf.mjs'), 'getDocu
 export interface PdfReadOptions {
   loadEngine?: () => Promise<PdfEngine>;
   timeoutMs?: number;
+  /** Pages read, from the first. Defaults to PDF_MAX_TEXT_PAGES. */
+  maxPages?: number;
+}
+
+/** A PDF's text layer, and how much of the document it covers. */
+export interface PdfText {
+  source: DocumentSource;
+  /** Pages in the document; 0 when it could not be opened. */
+  totalPages: number;
+  /** Pages whose text was read. */
+  pagesRead: number;
 }
 
 /** pdf.js itself would not load. Says nothing about the file being read. */
@@ -424,8 +445,9 @@ export function assemblePdfLines(runs: readonly PdfTextRun[]): string[] {
 async function readPdfLines(
   bytes: Uint8Array,
   signal: AbortSignal,
-  loadEngine: () => Promise<PdfEngine>
-): Promise<string[][]> {
+  loadEngine: () => Promise<PdfEngine>,
+  maxPages: number
+): Promise<{ pages: string[][]; totalPages: number }> {
   let engine: PdfEngine;
   try {
     engine = await loadEngine();
@@ -447,22 +469,26 @@ async function readPdfLines(
   try {
     const document = await task.promise;
     const pages: string[][] = [];
-    for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
+    const last = Math.min(document.numPages, Math.max(1, Math.floor(maxPages)));
+    for (let pageNumber = 1; pageNumber <= last; pageNumber += 1) {
       if (signal.aborted) throw new DOMException('Extraction was aborted.', 'AbortError');
       const page = await document.getPage(pageNumber);
-      const content = await page.getTextContent();
-      const runs = content.items.flatMap((item): PdfTextRun[] =>
-        'str' in item && item.str
-          ? [{ text: item.str, x: item.transform[4], y: item.transform[5], width: item.width, height: item.height }]
-          : []
-      );
-      pages.push(assemblePdfLines(runs));
-      page.cleanup();
+      try {
+        const content = await page.getTextContent();
+        const runs = content.items.flatMap((item): PdfTextRun[] =>
+          'str' in item && item.str
+            ? [{ text: item.str, x: item.transform[4], y: item.transform[5], width: item.width, height: item.height }]
+            : []
+        );
+        pages.push(assemblePdfLines(runs));
+      } finally {
+        page.cleanup(); // frees the page's parsed objects now, not when the document goes
+      }
     }
-    return pages;
+    return { pages, totalPages: document.numPages };
   } finally {
     signal.removeEventListener('abort', destroyOnStop);
-    await task.destroy();
+    await task.destroy().catch(() => undefined);
   }
 }
 
@@ -482,7 +508,16 @@ export async function readPdfSource(
   signal: AbortSignal,
   options: PdfReadOptions = {}
 ): Promise<DocumentSource> {
-  const { loadEngine = () => import('pdfjs-dist/legacy/build/pdf.mjs'), timeoutMs = PDF_READ_TIMEOUT_MS } = options;
+  return (await readPdfText(bytes, signal, options)).source;
+}
+
+/** readPdfSource, with how many pages were read out of how many. */
+export async function readPdfText(bytes: Uint8Array, signal: AbortSignal, options: PdfReadOptions = {}): Promise<PdfText> {
+  const {
+    loadEngine = () => import('pdfjs-dist/legacy/build/pdf.mjs'),
+    timeoutMs = PDF_READ_TIMEOUT_MS,
+    maxPages = PDF_MAX_TEXT_PAGES,
+  } = options;
   const timeout = AbortSignal.timeout(timeoutMs);
   const stop = AbortSignal.any([signal, timeout]);
   let onStop = () => {};
@@ -491,15 +526,17 @@ export async function readPdfSource(
     stop.addEventListener('abort', onStop, { once: true });
   });
   try {
-    const pages = await Promise.race([readPdfLines(bytes, stop, loadEngine), stopped]);
+    const { pages, totalPages } = await Promise.race([readPdfLines(bytes, stop, loadEngine, maxPages), stopped]);
     const lines = pages.flat();
-    const characters = lines.join('').replace(/\s/g, '').length;
-    return characters < MIN_PDF_TEXT_CHARS ? { kind: 'no_text' } : { kind: 'pdf', lines, pages };
+    let characters = 0;
+    for (const line of lines) characters += line.replace(/\s/g, '').length;
+    const source: DocumentSource = characters < MIN_PDF_TEXT_CHARS ? { kind: 'no_text' } : { kind: 'pdf', lines, pages };
+    return { source, totalPages, pagesRead: pages.length };
   } catch (error) {
     if (signal.aborted) throw new DOMException('Extraction was aborted.', 'AbortError');
     const reason = readFailure(error, timeout.aborted);
     console.warn(`[document-ai] ${reason}`);
-    return { kind: 'unreadable', reason };
+    return { source: { kind: 'unreadable', reason }, totalPages: 0, pagesRead: 0 };
   } finally {
     stop.removeEventListener('abort', onStop);
   }

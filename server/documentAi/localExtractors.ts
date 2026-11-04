@@ -32,6 +32,11 @@ export interface LocalExtractionInput {
   documentType: DocumentType;
   content: LocalContent;
   fromOcr: boolean;
+  /**
+   * False when pages were left unread. A figure with no period of its own then takes none: the
+   * unread pages may state another period, so "the document's one period" cannot be known.
+   */
+  complete?: boolean;
 }
 
 export interface LocalExtraction {
@@ -268,6 +273,38 @@ function columnPeriodsIn(line: string): string[] | null {
   return periods.every((p): p is string => p !== null) ? periods : null;
 }
 
+/** A bare year span, `2023-24` or `2023/2024`, with what precedes it. */
+const YEAR_SPAN = /(?<![\d./-])((?:19|20)\d{2}\s*[-/]\s*(?:\d{4}|\d{2}))(?![\d./-])/g;
+const ASSESSMENT_BEFORE = /(?:assessment\s+year|a\.?\s*y\.?)\s*[:\-]?\s*$/i;
+
+/**
+ * The one period a document states, or null when it states none or more than one. Counted: the
+ * periods it labels itself with (`For the year ended 31 March 2025`, `FY 2024-25`, a period
+ * range), period column headings, and any financial-year span written out (`2023-24`, read as an
+ * assessment year where it says so). A heading about a prior period with no figure on it
+ * (`Previous year`, `Preceding financial year`) also counts as a second period, even with no year
+ * printed. Point dates (a report or filing date) are not periods and are not counted.
+ */
+export function soleStatedPeriod(texts: Iterable<string>): string | null {
+  const periods = new Set<string>();
+  let priorPeriodHeading = false;
+  for (const raw of texts) {
+    const text = clean(raw);
+    if (!text) continue;
+    const own = documentPeriodIn(text);
+    if (own) periods.add(own);
+    for (const column of columnPeriodsIn(text) ?? []) periods.add(column);
+    for (const match of text.matchAll(YEAR_SPAN)) {
+      const before = text.slice(0, match.index ?? 0);
+      const label = normalizeFinancialYear(`${ASSESSMENT_BEFORE.test(before) ? 'AY' : 'FY'} ${match[1]}`);
+      if (label.ok) periods.add(label.value);
+    }
+    if (PRIOR_PERIOD.test(text) && !hasFigure(text)) priorPeriodHeading = true;
+    if (periods.size > 1) return null;
+  }
+  return periods.size === 1 && !priorPeriodHeading ? [...periods][0] : null;
+}
+
 // ------------------------------------------------------------------ Value readers
 
 const PAN_TOKEN = /\b([A-Z]{3}[ABCFGHJLPT][A-Z]\d{4}[A-Z])\b/;
@@ -402,15 +439,14 @@ function plausibleAmount(rawValue: string): boolean {
 function extractFromText(
   documentType: DocumentType,
   pages: ReadonlyArray<readonly string[]>,
-  confidence: number
+  confidence: number,
+  complete = true
 ): Emitted[] {
   const out: Emitted[] = [];
   const lines = pages.flatMap((page, pageIndex) => page.map((text) => ({ text: clean(text), page: pageIndex + 1 })));
-  let documentPeriod: string | null = null;
-  for (const { text } of lines) {
-    documentPeriod = documentPeriodIn(text);
-    if (documentPeriod) break;
-  }
+  // A figure with no period column of its own takes the document's period only when the document
+  // states exactly one; otherwise its period is left unknown (period_unknown, never auto-applied).
+  const documentPeriod = complete ? soleStatedPeriod(lines.map((line) => line.text)) : null;
 
   // Unit and period headings hold for their own page and section only: never carried to the next.
   let columns: string[] | null = null;
@@ -517,15 +553,8 @@ function extractFromSheets(
   confidence: number
 ): Emitted[] {
   const out: Emitted[] = [];
-  let documentPeriod: string | null = null;
-  outer: for (const sheet of sheets) {
-    for (const row of sheet.rows) {
-      for (const cell of row.cells) {
-        documentPeriod = documentPeriodIn(cell.text);
-        if (documentPeriod) break outer;
-      }
-    }
-  }
+  // As for text: the document's period only when it states exactly one.
+  const documentPeriod = soleStatedPeriod(sheets.flatMap((sheet) => sheet.rows.flatMap((row) => row.cells.map((cell) => cell.text))));
 
   for (const sheet of sheets) {
     const columnPeriod = new Map<number, string>();
@@ -786,12 +815,12 @@ function bankMonthsFromSheets(fileKind: 'xlsx' | 'csv', sheets: readonly ParsedS
 
 /** Labelled values from the document's own text. Returns nothing for a field it cannot read for certain. */
 export function extractLocally(input: LocalExtractionInput): LocalExtraction {
-  const { documentType, content, fromOcr } = input;
+  const { documentType, content, fromOcr, complete = true } = input;
   if (documentType === 'other') return { fields: [], bankMonthlyTotals: [] };
   const confidence = fromOcr ? LOCAL_OCR_CONFIDENCE : LOCAL_TEXT_CONFIDENCE;
   const emitted =
     content.kind === 'text'
-      ? extractFromText(documentType, content.pages, confidence)
+      ? extractFromText(documentType, content.pages, confidence, complete)
       : extractFromSheets(documentType, content.fileKind, content.sheets, confidence);
 
   const seen = new Set<string>();

@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "tsx server.ts",
     "build": "npm run index:study-material && vite build",
-    "start": "node --import tsx server.ts",
+    "start": "node --max-old-space-size=360 --import tsx server.ts",
     "prestart": "node scripts/ensure-study-material-index.mjs",
     "preview": "vite preview",
     "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true });\"",

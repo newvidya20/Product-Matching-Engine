@@ -47,14 +47,17 @@ import {
   type RawBankMonth,
   type RawField,
 } from './prompt.ts';
-import { buildSpreadsheetPreview, parseSpreadsheet, readPdfSource, renderSpreadsheetText } from './spreadsheet.ts';
+import { buildSpreadsheetPreview, parseSpreadsheet, readPdfText, renderSpreadsheetText } from './spreadsheet.ts';
 import { MAX_RENDERED_PDF_PAGES, readDocxLines, readPlainTextLines, renderPdfPages } from './textDocuments.ts';
 import { classifyLocally } from './localClassifier.ts';
 import { extractLocally, LOCAL_OCR_CONFIDENCE, type LocalContent, type LocalExtraction } from './localExtractors.ts';
-import { inModelPhase, isOcrAvailable, MAX_OCR_PAGES, OcrError, ocrImages } from './ocr.ts';
+import { currentExtractionObserver, inModelPhase, isOcrAvailable, MAX_OCR_PAGES, OcrError, ocrImages } from './ocr.ts';
 import type { DocumentSource } from './validators.ts';
 
 const asParts = (part: Part | Part[]): Part[] => (Array.isArray(part) ? part : [part]);
+/** Base64 of the bytes without first copying them into a second buffer. */
+const toBase64 = (bytes: Uint8Array): string =>
+  (Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)).toString('base64');
 
 /** Enough to tell a balance sheet from a bank statement, and much cheaper than the whole sheet. */
 const CLASSIFICATION_TEXT_CHARS = 20_000;
@@ -63,6 +66,10 @@ const CLASSIFICATION_TEXT_CHARS = 20_000;
  * need OCR); local reading needs the rest.
  */
 export const LLM_BUDGET_MS = 150_000;
+/** Time kept back from a model call to finish the file with its local values if the call times out. */
+export const MODEL_WRAP_UP_MS = 5_000;
+/** A model call with less time than this is not started: it could not finish. */
+export const MIN_MODEL_CALL_MS = 1_000;
 /**
  * Highest confidence any value from an OCR-read document may carry, whoever extracted it. OCR can
  * misread a digit (738 as 788), and the source check compares against that same OCR text, so it
@@ -80,9 +87,23 @@ const LOCAL_MODEL = 'local-rules';
 
 const abortError = () => new DOMException('Extraction was aborted.', 'AbortError');
 
-function isEncryptedPdf(bytes: Uint8Array): boolean {
-  // Linearised files can hold the trailer near the start, so the whole file is scanned.
-  return /\/Encrypt\s*(?:\d+\s+\d+\s+R|<<)/.test(Buffer.from(bytes).toString('latin1'));
+const ENCRYPT_MARK = /\/Encrypt\s*(?:\d+\s+\d+\s+R|<<)/;
+/** Window for the encryption scan; consecutive windows overlap, so a mark across a seam is seen. */
+const ENCRYPT_SCAN_WINDOW = 1024 * 1024;
+const ENCRYPT_SCAN_OVERLAP = 256;
+
+/**
+ * Linearised files can hold the trailer near the start, so the whole file is scanned, but one
+ * window at a time: never a whole-file string (a 50 MB PDF would be a 50 MB string per file).
+ */
+export function isEncryptedPdf(bytes: Uint8Array): boolean {
+  const view = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const step = ENCRYPT_SCAN_WINDOW - ENCRYPT_SCAN_OVERLAP;
+  for (let start = 0; start < view.length; start += step) {
+    if (ENCRYPT_MARK.test(view.toString('latin1', start, Math.min(view.length, start + ENCRYPT_SCAN_WINDOW)))) return true;
+    if (start + ENCRYPT_SCAN_WINDOW >= view.length) break;
+  }
+  return false;
 }
 
 // ------------------------------------------------------------------ Model availability
@@ -112,14 +133,22 @@ interface PreparedDocument {
   fromOcr: boolean;
   /** Text for the local classifier: titles sit at the start. */
   classificationText: string;
-  /** Usually one part; a rendered scan is one image part per page. Built only for the model. */
-  classificationPart: Part | Part[];
-  extractionPart: Part | Part[];
+  /**
+   * Usually one part; a rendered scan is one image part per page. Built only when the model is
+   * actually asked, so a file read locally never holds a base64 copy of itself.
+   */
+  classificationPart: () => Part | Part[];
+  extractionPart: () => Part | Part[];
   sheetNames: string[];
   /** What the server read itself, to check every value against. Held in memory only. */
   source: DocumentSource;
   /** Pattern scan hit on text the server read. */
   injectionInText: boolean;
+  /**
+   * Pages were left unread (a PDF past PDF_MAX_TEXT_PAGES, or a scan past the OCR page cap). Values
+   * still come only from pages that were read; nothing is inferred about the rest.
+   */
+  partial?: boolean;
 }
 
 function pagesText(pages: ReadonlyArray<readonly string[]>): string {
@@ -136,19 +165,36 @@ function prepareText(
   source: DocumentSource,
   fromOcr = false
 ): PreparedDocument {
-  const promptText = pagesText(pages);
   if (!hasText(pages)) throw new ExtractionError('unreadable_document');
   const delimiter = newDelimiter();
+  // The whole text is built only for the model (lazily) and for the one injection scan here, so
+  // it is not held for the life of the file. The classifier gets a copy of its first part only.
+  const injectionInText = containsInjectionPhrases(pagesText(pages));
   return {
     content: { kind: 'text', pages },
     fromOcr,
-    classificationText: promptText.slice(0, CLASSIFICATION_TEXT_CHARS),
-    classificationPart: { text: wrapDocumentText(promptText.slice(0, CLASSIFICATION_TEXT_CHARS), delimiter) },
-    extractionPart: { text: wrapDocumentText(promptText, delimiter) },
+    classificationText: headText(pages, CLASSIFICATION_TEXT_CHARS),
+    classificationPart: () => ({ text: wrapDocumentText(pagesText(pages).slice(0, CLASSIFICATION_TEXT_CHARS), delimiter) }),
+    extractionPart: () => ({ text: wrapDocumentText(pagesText(pages), delimiter) }),
     sheetNames: [],
     source,
-    injectionInText: containsInjectionPhrases(promptText),
+    injectionInText,
   };
+}
+
+/**
+ * The first `max` characters of pagesText(pages), built from the first pages only, so it is a
+ * string of its own and does not keep the whole document's text alive.
+ */
+function headText(pages: ReadonlyArray<readonly string[]>, max: number): string {
+  const head: string[][] = [];
+  let length = 0;
+  for (const lines of pages) {
+    if (length >= max) break;
+    head.push([...lines]);
+    length += lines.reduce((sum, line) => sum + line.length + 1, 20);
+  }
+  return pagesText(head).slice(0, max);
 }
 
 /** OpenRouter's free vision allowance is the scarce one: it gets text whenever the server has text. */
@@ -170,8 +216,8 @@ async function ocr(images: readonly Uint8Array[], signal: AbortSignal): Promise<
 
 /** Nothing the server could read: only a model can look at the file. */
 function forModelOnly(
-  classificationPart: Part | Part[],
-  extractionPart: Part | Part[],
+  classificationPart: () => Part | Part[],
+  extractionPart: () => Part | Part[],
   source: DocumentSource
 ): PreparedDocument {
   return {
@@ -192,10 +238,10 @@ function forModelOnly(
  * the parser rejected stays `unreadable` for the check (it fails closed), even when OCR reads it.
  */
 async function preparePdf(bytes: Uint8Array, signal: AbortSignal): Promise<PreparedDocument> {
-  const source = await readPdfSource(bytes, signal);
-  const filePart: Part = { inlineData: { mimeType: FILE_KIND_MIME.pdf, data: Buffer.from(bytes).toString('base64') } };
+  const { source, totalPages, pagesRead } = await readPdfText(bytes, signal);
+  const filePart = (): Part => ({ inlineData: { mimeType: FILE_KIND_MIME.pdf, data: toBase64(bytes) } });
   if (source.kind === 'pdf') {
-    const prepared = prepareText(source.pages ?? [source.lines], source);
+    const prepared = { ...prepareText(source.pages ?? [source.lines], source), partial: pagesRead < totalPages };
     return modelTakesText() ? prepared : { ...prepared, classificationPart: filePart, extractionPart: filePart };
   }
 
@@ -213,7 +259,10 @@ async function preparePdf(bytes: Uint8Array, signal: AbortSignal): Promise<Prepa
   if (pages.length > 0) {
     const checkedAgainst: DocumentSource =
       source.kind === 'no_text' ? { kind: 'pdf', lines: pages.flat(), pages } : source;
-    const prepared = prepareText(pages, checkedAgainst, true);
+    // OCR reads the first pages only. Where the page count is unknown (the parser rejected the
+    // file), as many images as were asked for means more may follow.
+    const partial = totalPages > 0 ? totalPages > pages.length : images.length >= wanted;
+    const prepared = { ...prepareText(pages, checkedAgainst, true), partial };
     return modelTakesText() ? prepared : { ...prepared, classificationPart: filePart, extractionPart: filePart };
   }
   if (!modelTakesText()) return forModelOnly(filePart, filePart, source);
@@ -225,12 +274,13 @@ async function preparePdf(bytes: Uint8Array, signal: AbortSignal): Promise<Prepa
   }
   if (images.length === 0) throw new ExtractionError('unreadable_document');
   const parts: Part[] = images.map((image) => ({ inlineData: { mimeType: 'image/png', data: image.toString('base64') } }));
-  return forModelOnly(parts.slice(0, 2), parts, source);
+  images = []; // the PNG buffers are no longer needed once encoded
+  return forModelOnly(() => parts.slice(0, 2), () => parts, source);
 }
 
 async function prepareImage(input: ExtractDocumentInput): Promise<PreparedDocument> {
   const { kind, bytes, signal } = input;
-  const imagePart: Part = { inlineData: { mimeType: FILE_KIND_MIME[kind], data: Buffer.from(bytes).toString('base64') } };
+  const imagePart = (): Part => ({ inlineData: { mimeType: FILE_KIND_MIME[kind], data: toBase64(bytes) } });
   const pages = await ocr([bytes], signal);
   if (pages.length === 0) return forModelOnly(imagePart, imagePart, { kind: 'no_text' });
   const prepared = prepareText(pages, { kind: 'pdf', lines: pages.flat(), pages }, true);
@@ -264,8 +314,8 @@ async function prepareDocument(input: ExtractDocumentInput): Promise<PreparedDoc
     content: { kind: 'sheets', fileKind: kind, sheets: text.visibleSheets },
     fromOcr: false,
     classificationText: text.promptText.slice(0, CLASSIFICATION_TEXT_CHARS),
-    classificationPart: { text: wrapDocumentText(text.promptText.slice(0, CLASSIFICATION_TEXT_CHARS), delimiter) },
-    extractionPart: { text: wrapDocumentText(text.promptText, delimiter) },
+    classificationPart: () => ({ text: wrapDocumentText(text.promptText.slice(0, CLASSIFICATION_TEXT_CHARS), delimiter) }),
+    extractionPart: () => ({ text: wrapDocumentText(text.promptText, delimiter) }),
     sheetNames: text.visibleSheetNames,
     source: { kind: 'cells', rows: text.sourceRows },
     injectionInText: containsInjectionPhrases(text.scanText),
@@ -274,18 +324,26 @@ async function prepareDocument(input: ExtractDocumentInput): Promise<PreparedDoc
 
 // ------------------------------------------------------------------ Model calls
 
-/** A signal for one model call: the file's own, cut short at the model's budget. */
-function llmSignal(signal: AbortSignal): AbortSignal {
-  return AbortSignal.any([signal, AbortSignal.timeout(LLM_BUDGET_MS)]);
+/**
+ * The model's time for one call: its own budget, but never more than the file has left, less a
+ * margin to finish the file with what was read locally. Without that, a slow model would run into
+ * the file's timer, and the whole file would fail as llm_timeout though local values were read.
+ */
+export function modelCallBudgetMs(fileRemainingMs: number | undefined): number {
+  if (fileRemainingMs === undefined || !Number.isFinite(fileRemainingMs)) return LLM_BUDGET_MS;
+  return Math.min(LLM_BUDGET_MS, Math.floor(fileRemainingMs - MODEL_WRAP_UP_MS));
 }
 
 /** Runs a model call. Returns its value, or the failure code; rejects only when the file's signal aborts. */
 async function tryModel<T>(signal: AbortSignal, run: (callSignal: AbortSignal) => Promise<T>): Promise<
   { ok: true; value: T } | { ok: false; code: ExtractionErrorCode }
 > {
+  const budgetMs = modelCallBudgetMs(currentExtractionObserver()?.remainingMs?.());
+  if (budgetMs < MIN_MODEL_CALL_MS) return { ok: false, code: 'llm_timeout' };
   try {
     // jobs.ts tells a model timeout apart from a reading (OCR or render) timeout by this phase.
-    return { ok: true, value: await inModelPhase(() => run(llmSignal(signal))) };
+    const callSignal = AbortSignal.any([signal, AbortSignal.timeout(budgetMs)]);
+    return { ok: true, value: await inModelPhase(() => run(callSignal)) };
   } catch (error) {
     if (signal.aborted) throw abortError();
     const code: ExtractionErrorCode =
@@ -298,7 +356,7 @@ async function tryModel<T>(signal: AbortSignal, run: (callSignal: AbortSignal) =
 async function classifyWithModel(prepared: PreparedDocument, signal: AbortSignal) {
   const response = await generateJson({
     systemInstruction: buildClassificationInstruction(),
-    parts: [...asParts(prepared.classificationPart), { text: CLASSIFICATION_REQUEST }],
+    parts: [...asParts(prepared.classificationPart()), { text: CLASSIFICATION_REQUEST }],
     responseSchema: CLASSIFICATION_SCHEMA,
     signal,
   });
@@ -316,7 +374,7 @@ async function classifyWithModel(prepared: PreparedDocument, signal: AbortSignal
 async function extractWithModel(prepared: PreparedDocument, documentType: DocumentType, signal: AbortSignal) {
   const response = await generateJson({
     systemInstruction: buildExtractionInstruction(documentType),
-    parts: [...asParts(prepared.extractionPart), { text: EXTRACTION_REQUEST }],
+    parts: [...asParts(prepared.extractionPart()), { text: EXTRACTION_REQUEST }],
     responseSchema: EXTRACTION_SCHEMA,
     signal,
   });
@@ -397,7 +455,7 @@ async function runExtraction(input: ExtractDocumentInput): Promise<DocumentExtra
 
   // Local extraction first.
   const local: LocalExtraction = prepared.content
-    ? extractLocally({ documentType, content: prepared.content, fromOcr: prepared.fromOcr })
+    ? extractLocally({ documentType, content: prepared.content, fromOcr: prepared.fromOcr, complete: !prepared.partial })
     : { fields: [], bankMonthlyTotals: [] };
   const localFound = local.fields.length > 0 || local.bankMonthlyTotals.length > 0;
 
@@ -458,7 +516,8 @@ async function runExtraction(input: ExtractDocumentInput): Promise<DocumentExtra
     bankMonthlyTotals: buildBankMonthlyTotals(capped([...local.bankMonthlyTotals, ...modelMonths]), context),
     injectionSuspected,
     droppedLowConfidence,
-    model: usedModel ? `${activeModelName()}+${LOCAL_MODEL}` : prepared.fromOcr ? `${LOCAL_MODEL}+ocr` : LOCAL_MODEL,
+    // The audit name also records a partial read, so a reviewer can tell why a field may be missing.
+    model: `${usedModel ? `${activeModelName()}+${LOCAL_MODEL}` : prepared.fromOcr ? `${LOCAL_MODEL}+ocr` : LOCAL_MODEL}${prepared.partial ? '+partial' : ''}`,
   };
 }
 

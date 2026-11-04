@@ -6,7 +6,10 @@
  *   Render free plan's read-only, ephemeral disk is never touched. If the data or the engine cannot
  *   load, OCR reports itself unavailable and the caller fails the file with unreadable_document.
  * - One worker by default (DOCUMENT_AI_OCR_WORKERS, 1-4): OCR is CPU and memory heavy, and the free
- *   plan has a fraction of one CPU. Callers queue for a worker; the queue honours their abort signal.
+ *   plan has a fraction of one CPU. Callers queue for a worker; the queue honours their abort signal,
+ *   and a freed worker is handed straight to the next caller, so it never sits idle while files wait.
+ * - A worker start is bounded (DOCUMENT_AI_OCR_START_TIMEOUT_MS, 60 s): past it the engine's thread
+ *   is terminated, and the file is read without OCR (unreadable_document when no model can help).
  * - Every page has a timeout, and every document a budget. The budget starts once this document has
  *   a worker, so time spent queued behind other files never eats into it. A page that times out is
  *   skipped (its worker is terminated and replaced, so a stuck page can never stall the rest) and the
@@ -44,7 +47,11 @@ export const OCR_DOCUMENT_BUDGET_MS = envInt(
 /** With less budget than this left, the next page is not started. */
 const MIN_PAGE_TIME_MS = 2_000;
 const OCR_WORKERS = envInt('DOCUMENT_AI_OCR_WORKERS', 1, 1, 4);
-const WORKER_START_TIMEOUT_MS = 45_000;
+/**
+ * A worker that has not started within this, from the moment it was asked for, is terminated and
+ * the file is read without OCR (with no model to fall back on, it fails as unreadable_document).
+ */
+export const OCR_WORKER_START_TIMEOUT_MS = envInt('DOCUMENT_AI_OCR_START_TIMEOUT_MS', 60_000, 1_000, 300_000);
 const IDLE_SHUTDOWN_MS = 120_000;
 /** Matches the data directory: best_int is the LSTM-only model. */
 const OEM_LSTM_ONLY = 1;
@@ -93,6 +100,11 @@ export interface ExtractionObserver {
   queueWaitEnded(): void;
   /** The step the file is in: reading it locally, or waiting on a model. */
   phase: 'reading' | 'model';
+  /**
+   * Work time the file has left before its timer stops it, in ms, if the file has a timer. A model
+   * call is cut short before this, so a slow model never costs a file the values it read locally.
+   */
+  remainingMs?(): number;
 }
 
 const observers = new AsyncLocalStorage<ExtractionObserver>();
@@ -121,19 +133,122 @@ export async function inModelPhase<T>(run: () => Promise<T>): Promise<T> {
 
 // ------------------------------------------------------------------ Worker pool
 
+/** The engine's thread, as far as this module needs it. */
+interface Terminable {
+  terminate(): unknown;
+  once?(event: 'exit', listener: () => void): unknown;
+}
+
+/** One worker being started, or started. */
+interface WorkerStart {
+  ready: Promise<Worker>;
+  startedAt: number;
+  /** The engine's thread, known from the moment it is spawned, so a start that hangs can be killed. */
+  thread: Terminable | null;
+  discarded: boolean;
+}
+
 interface Slot {
-  worker: Promise<Worker> | null;
+  start: WorkerStart | null;
   busy: boolean;
 }
 
-const slots: Slot[] = Array.from({ length: OCR_WORKERS }, () => ({ worker: null, busy: false }));
-const waiting: Array<() => void> = [];
+/** Takes the slot it is handed: release() passes a slot on still marked busy. */
+type Waiter = (slot: Slot) => void;
+
+const slots: Slot[] = Array.from({ length: OCR_WORKERS }, () => ({ start: null, busy: false }));
+const waiting: Waiter[] = [];
 let idleTimer: NodeJS.Timeout | null = null;
 
+/** Engine threads spawned and not yet exited, for tests and diagnostics. */
+const liveThreads = new Set<Terminable>();
+
+export function liveOcrThreadCount(): number {
+  return liveThreads.size;
+}
+
+function terminateThread(thread: Terminable | null): void {
+  if (!thread) return;
+  try {
+    void Promise.resolve(thread.terminate()).catch(() => undefined);
+  } catch {
+    // already gone
+  }
+}
+
+/**
+ * tesseract.js hands out a worker only once it has started, so a start that never settles would
+ * leave its thread running with no way to stop it. Its spawn function is wrapped (before the
+ * library is first loaded, which is when it is bound) to note each thread as it is created. If the
+ * wrapping is not possible, a start that settles late is still terminated then.
+ */
+let spawnHookTried = false;
+let lastSpawned: Terminable | null = null;
+
+function installSpawnHook(): void {
+  if (spawnHookTried) return;
+  spawnHookTried = true;
+  try {
+    const require = createRequire(import.meta.url);
+    const nodeWorker = require('tesseract.js/src/worker/node/index.js') as {
+      spawnWorker?: (options: unknown) => Terminable;
+    };
+    const original = nodeWorker.spawnWorker;
+    if (typeof original !== 'function') return;
+    nodeWorker.spawnWorker = (options: unknown) => {
+      const thread = original(options);
+      lastSpawned = thread;
+      liveThreads.add(thread);
+      thread.once?.('exit', () => liveThreads.delete(thread));
+      return thread;
+    };
+  } catch {
+    // Layout changed: fall back to terminating a late start once it settles.
+  }
+}
+
+function beginWorkerStart(): WorkerStart {
+  const start: WorkerStart = { ready: Promise.resolve(null as unknown as Worker), startedAt: Date.now(), thread: null, discarded: false };
+  start.ready = (async () => {
+    const langPath = ocrLanguageDataPath();
+    if (!langPath) throw new OcrError('ocr_unavailable');
+    installSpawnHook();
+    const { createWorker } = await import('tesseract.js');
+    if (start.discarded) throw new OcrError('ocr_unavailable');
+    lastSpawned = null;
+    const creating = createWorker('eng', OEM_LSTM_ONLY, {
+      langPath,
+      gzip: true,
+      cacheMethod: 'none',
+      // Without a handler tesseract.js throws inside its message listener, which would crash the server.
+      errorHandler: () => undefined,
+    });
+    // The thread is spawned synchronously inside createWorker, before its first await.
+    start.thread = lastSpawned;
+    lastSpawned = null;
+    creating.catch(() => undefined);
+    const worker = await creating;
+    if (start.discarded) {
+      void worker.terminate().catch(() => undefined);
+      throw new OcrError('ocr_unavailable');
+    }
+    // Keeps the gaps between table columns, so a row's figures stay apart.
+    await worker.setParameters({ preserve_interword_spaces: '1' });
+    return worker;
+  })();
+  start.ready.catch(() => undefined);
+  return start;
+}
+
+/** Stops a worker, started or still starting, and frees its slot for a new one. */
 function discardWorker(slot: Slot): void {
-  const pending = slot.worker;
-  slot.worker = null;
-  void pending?.then((worker) => worker.terminate()).catch(() => undefined);
+  const start = slot.start;
+  slot.start = null;
+  if (!start) return;
+  start.discarded = true;
+  terminateThread(start.thread);
+  start.thread = null;
+  void start.ready.then((worker) => worker.terminate()).catch(() => undefined);
 }
 
 /** Rejects with `onTimeout` after `ms`, or an AbortError when `signal` fires. */
@@ -150,7 +265,7 @@ function settleWithin<T>(work: Promise<T>, ms: number, signal: AbortSignal, onTi
     const timer = setTimeout(() => {
       signal.removeEventListener('abort', onAbort);
       reject(onTimeout());
-    }, ms);
+    }, Math.max(0, ms));
     signal.addEventListener('abort', onAbort, { once: true });
     work.then(
       (value) => {
@@ -167,83 +282,71 @@ function settleWithin<T>(work: Promise<T>, ms: number, signal: AbortSignal, onTi
   });
 }
 
-async function startWorker(): Promise<Worker> {
-  const langPath = ocrLanguageDataPath();
-  if (!langPath) throw new OcrError('ocr_unavailable');
-  const { createWorker } = await import('tesseract.js');
-  const worker = await createWorker('eng', OEM_LSTM_ONLY, {
-    langPath,
-    gzip: true,
-    cacheMethod: 'none',
-    // Without a handler tesseract.js throws inside its message listener, which would crash the server.
-    errorHandler: () => undefined,
+/**
+ * The slot's worker, starting one if needed. A start is bounded from the moment it began, however
+ * many files wait on it: past `startTimeoutMs` it is terminated (thread included) and never reused.
+ */
+function workerFor(slot: Slot, signal: AbortSignal, startTimeoutMs: number): Promise<Worker> {
+  if (!slot.start) slot.start = beginWorkerStart();
+  const start = slot.start;
+  const left = startTimeoutMs - (Date.now() - start.startedAt);
+  return settleWithin(start.ready, left, signal, () => new OcrError('ocr_unavailable')).catch((error: unknown) => {
+    // A worker that failed or hung while starting is terminated, never reused. An abort is this
+    // file's own: the start goes on for the next file, within the same bound.
+    if (slot.start === start && !(error instanceof DOMException)) discardWorker(slot);
+    throw error instanceof OcrError || error instanceof DOMException ? error : new OcrError('ocr_unavailable');
   });
-  // Keeps the gaps between table columns, so a row's figures stay apart.
-  await worker.setParameters({ preserve_interword_spaces: '1' });
-  return worker;
 }
 
-function workerFor(slot: Slot, signal: AbortSignal): Promise<Worker> {
-  if (!slot.worker) {
-    const starting = startWorker();
-    starting.catch(() => undefined);
-    slot.worker = starting;
-  }
-  const pending = slot.worker;
-  return settleWithin(pending, WORKER_START_TIMEOUT_MS, signal, () => new OcrError('ocr_unavailable')).catch(
-    (error: unknown) => {
-      // A worker that failed or hung while starting is never reused.
-      if (slot.worker === pending && !(error instanceof DOMException)) discardWorker(slot);
-      throw error instanceof OcrError || error instanceof DOMException ? error : new OcrError('ocr_unavailable');
-    }
-  );
-}
-
+/**
+ * Takes a free slot, or waits in turn for one. A slot is handed to the next waiter still marked
+ * busy, so nobody can take it in between; a waiter whose file was aborted after being handed one
+ * passes it straight on, so a free worker never sits idle while files queue.
+ */
 async function acquire(signal: AbortSignal): Promise<Slot> {
   if (idleTimer) {
     clearTimeout(idleTimer);
     idleTimer = null;
   }
+  if (signal.aborted) throw abortError();
+  const free = slots.find((slot) => !slot.busy);
+  if (free) {
+    free.busy = true;
+    return free;
+  }
   const observer = observers.getStore();
-  let queued = false;
+  observer?.queueWaitStarted();
   try {
-    for (;;) {
-      if (signal.aborted) throw abortError();
-      const free = slots.find((slot) => !slot.busy);
-      if (free) {
-        free.busy = true;
-        return free;
-      }
-      if (!queued) {
-        queued = true;
-        observer?.queueWaitStarted();
-      }
-      await new Promise<void>((resolve, reject) => {
-        const onAbort = () => {
-          const index = waiting.indexOf(wake);
-          if (index >= 0) waiting.splice(index, 1);
-          reject(abortError());
-        };
-        const wake = () => {
-          signal.removeEventListener('abort', onAbort);
-          resolve();
-        };
-        waiting.push(wake);
-        signal.addEventListener('abort', onAbort, { once: true });
-      });
+    const slot = await new Promise<Slot>((resolve, reject) => {
+      const onAbort = () => {
+        const index = waiting.indexOf(wake);
+        if (index >= 0) waiting.splice(index, 1);
+        reject(abortError());
+      };
+      const wake: Waiter = (handed) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(handed);
+      };
+      waiting.push(wake);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    if (signal.aborted) {
+      release(slot); // aborted between the hand-over and now: pass it on
+      throw abortError();
     }
+    return slot;
   } finally {
-    if (queued) observer?.queueWaitEnded();
+    observer?.queueWaitEnded();
   }
 }
 
 function release(slot: Slot): void {
-  slot.busy = false;
   const next = waiting.shift();
   if (next) {
-    next();
+    next(slot); // handed over still busy
     return;
   }
+  slot.busy = false;
   if (slots.every((s) => !s.busy) && !idleTimer) {
     idleTimer = setTimeout(() => {
       idleTimer = null;
@@ -253,17 +356,34 @@ function release(slot: Slot): void {
   }
 }
 
+/** The slot queue itself, for tests: no worker is started. */
+export const ocrPoolForTests = {
+  acquire,
+  release(slot: unknown): void {
+    release(slot as Slot);
+  },
+  waitingCount: (): number => waiting.length,
+  freeSlotCount: (): number => slots.filter((slot) => !slot.busy).length,
+  slotCount: (): number => slots.length,
+};
+
 /** Terminates every worker. For tests and shutdown; a later call starts new ones. */
 export async function shutdownOcr(): Promise<void> {
   if (idleTimer) {
     clearTimeout(idleTimer);
     idleTimer = null;
   }
-  const pending = slots.map((slot) => slot.worker).filter((worker): worker is Promise<Worker> => worker !== null);
-  slots.forEach((slot) => {
-    slot.worker = null;
-  });
-  await Promise.all(pending.map((worker) => worker.then((w) => w.terminate()).catch(() => undefined)));
+  const pending = slots.map((slot) => slot.start).filter((start): start is WorkerStart => start !== null);
+  slots.forEach((slot) => discardWorker(slot));
+  // A start that was cut off mid-way may never settle: wait for each only briefly.
+  await Promise.all(
+    pending.map((start) =>
+      Promise.race([
+        start.ready.then((worker) => worker.terminate()).catch(() => undefined),
+        new Promise<void>((resolve) => setTimeout(resolve, 2_000).unref()),
+      ])
+    )
+  );
 }
 
 // ------------------------------------------------------------------ Text clean-up
@@ -325,24 +445,25 @@ export interface OcrPagesResult {
 export async function ocrImages(
   images: readonly Uint8Array[],
   signal: AbortSignal,
-  options: { pageTimeoutMs?: number; budgetMs?: number } = {}
+  options: { pageTimeoutMs?: number; budgetMs?: number; startTimeoutMs?: number } = {}
 ): Promise<OcrPagesResult> {
   if (!isOcrAvailable()) throw new OcrError('ocr_unavailable');
   const pageTimeoutMs = options.pageTimeoutMs ?? OCR_PAGE_TIMEOUT_MS;
+  const startTimeoutMs = options.startTimeoutMs ?? OCR_WORKER_START_TIMEOUT_MS;
   const budgetMs = options.budgetMs ?? OCR_DOCUMENT_BUDGET_MS;
   const pages: string[][] = [];
   let pagesTimedOut = 0;
   const slot = await acquire(signal);
   try {
-    // The first worker start is bounded by WORKER_START_TIMEOUT_MS; the budget runs from here.
-    await workerFor(slot, signal);
+    // A worker start is bounded by OCR_WORKER_START_TIMEOUT_MS; the budget runs from here.
+    await workerFor(slot, signal, startTimeoutMs);
     const deadline = Date.now() + budgetMs;
     for (const image of images) {
       const remaining = Math.min(pageTimeoutMs, deadline - Date.now());
       if (remaining < Math.min(MIN_PAGE_TIME_MS, pageTimeoutMs)) break;
       let worker: Worker;
       try {
-        worker = await workerFor(slot, signal);
+        worker = await workerFor(slot, signal, startTimeoutMs);
       } catch (error) {
         // A replacement worker that cannot start ends the reading, keeping the pages already read.
         if (error instanceof OcrError && pages.length > 0) break;
@@ -350,7 +471,8 @@ export async function ocrImages(
       }
       try {
         const result = await settleWithin(
-          worker.recognize(Buffer.from(image)),
+          // A view, not a copy: memory is tight on a small instance.
+          worker.recognize(Buffer.isBuffer(image) ? image : Buffer.from(image.buffer, image.byteOffset, image.byteLength)),
           remaining,
           signal,
           () => new OcrError('ocr_timeout')
