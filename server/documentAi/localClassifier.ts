@@ -33,11 +33,23 @@ const RULES: Array<{ type: DocumentType; test: (text: string) => boolean }> = [
   },
   {
     type: 'credit_report',
-    test: (t) => /(credit information report|\bCIBIL\b|\bCRIF\b|equifax|experian|commercial credit report)/i.test(t),
+    test: (t) =>
+      /(credit information report|\bCIBIL\b|\bCMR\b|\bCRIF\b|equifax|experian|commercial credit report|credit rating report|CARE rating|ICRA rating|CRISIL rating)/i.test(t) ||
+      /(?:care|icra|crisil|cibil|cmr)\s+(?:credit|rating|report)/i.test(t),
   },
   {
     type: 'financial_statement',
-    test: (t) => /balance sheet/i.test(t) && /(profit (?:and|&) loss|statement of profit)/i.test(t),
+    test: (t) =>
+      /(?:audited|provisional|consolidated)?\s*(?:financial statements?|financial statement)/i.test(t) ||
+      /(balance sheet|profit and loss|profit & loss|statement of profit|p\s*&\s*l|p\s*and\s*l)/i.test(t) &&
+      /(balance sheet|cash flow|notes to accounts|statement of assets|liabilities)/i.test(t) ||
+      /balance sheet/i.test(t) && /(profit (?:and|&) loss|statement of profit|profit\/loss)/i.test(t),
+  },
+  {
+    type: 'existing_sanction_letter',
+    test: (t) =>
+      /(sanction letter|sanctioned facility|existing debt profile|repayment obligations|outstanding balance|loan summary|term loan|working capital limit|repayment schedule|security details)/i.test(t) ||
+      /(?:existing\s+)?debt\s+profile/i.test(t),
   },
   {
     type: 'registration_certificate',
@@ -53,7 +65,15 @@ const RULES: Array<{ type: DocumentType; test: (text: string) => boolean }> = [
   },
   {
     type: 'loan_application',
-    test: (t) => /loan application/i.test(t),
+    test: (t) =>
+      /loan application/i.test(t) ||
+      /(company profile|corporate presentation|pitch deck|investor presentation|business profile)/i.test(t),
+  },
+  {
+    type: 'other',
+    test: (t) =>
+      /(purchase ledger|sales ledger|ledger statement|purchase and sales ledger)/i.test(t) ||
+      /ledger/i.test(t) && /(purchase|sales|stock|debtors|creditors)/i.test(t),
   },
 ];
 
