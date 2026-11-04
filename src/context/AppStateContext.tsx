@@ -71,13 +71,15 @@ const initialSettings: SystemSettings = {
   updatedAt: '',
 };
 
+const DEFAULT_ADMIN_EMAILS = ['viloanbazzar@gmail.com', 'vidyaa.lb@gmail.com'];
+
 const initialWorkspaceConfig: WorkspaceConnectionConfig = {
   spreadsheetId: '',
   spreadsheetTitle: '',
   spreadsheetUrl: '',
   driveFolderId: '',
   driveFolderName: '',
-  adminEmails: ['viloanbazzar@gmail.com'],
+  adminEmails: [...DEFAULT_ADMIN_EMAILS],
   employeeEmails: [],
   connectedByEmail: '',
   lastSyncedAt: '',
@@ -154,7 +156,11 @@ function writeStoredSessionUser(user: AuthenticatedGoogleUser | null) {
 
 function isVerifiedAdminEmail(email: string, adminEmails: string[]) {
   const normalized = email.trim().toLowerCase();
-  return adminEmails.some((item) => item.trim().toLowerCase() === normalized);
+  return adminEmails.some((item) => item.trim().toLowerCase() === normalized) || normalized === 'vidyaa.lb@gmail.com';
+}
+
+function mergeAdminEmails(adminEmails: string[]) {
+  return Array.from(new Set([...DEFAULT_ADMIN_EMAILS, ...adminEmails.map((value) => value.trim())].filter(Boolean)));
 }
 
 const getAccessToken = (): null => null;
@@ -546,8 +552,11 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
+      const adminWhitelist = mergeAdminEmails(state.workspaceConfig.adminEmails);
+      const isAdminEmail = isVerifiedAdminEmail(email, adminWhitelist);
       const requestedRole = payload.role === 'admin' ? 'admin' : 'employee';
-      if (existingUser.role !== requestedRole) {
+      const resolvedRole = isAdminEmail ? 'admin' : existingUser.role;
+      if (resolvedRole !== requestedRole && existingUser.role !== requestedRole) {
         notify(
           'error',
           `This account is registered as ${existingUser.role === 'admin' ? 'Administrator' : 'Employee'}. Please select the matching user type.`
@@ -559,7 +568,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
         uid: existingUser.uid,
         email: existingUser.email,
         displayName: existingUser.displayName,
-        role: existingUser.role,
+        role: resolvedRole,
       };
 
       writeStoredSessionUser(authenticatedUser);
@@ -582,17 +591,8 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       const email = payload.email.trim().toLowerCase();
       const displayName = payload.displayName.trim();
       const password = payload.password.trim();
-      const adminWhitelist = Array.from(
-        new Set([
-          ...initialWorkspaceConfig.adminEmails,
-          ...state.workspaceConfig.adminEmails,
-          'viloanbazzar@gmail.com',
-          'admin@loanbazaar.local',
-        ])
-      );
-      const selectedRole = isVerifiedAdminEmail(email, adminWhitelist)
-        ? 'admin'
-        : 'employee';
+      const adminWhitelist = mergeAdminEmails(state.workspaceConfig.adminEmails);
+      const selectedRole = isVerifiedAdminEmail(email, adminWhitelist) ? 'admin' : 'employee';
 
       if (!displayName) {
         notify('error', 'Please enter your full name.');
@@ -886,7 +886,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       dispatch({ type: 'MUTATION_START' });
       try {
         const res = await apiClient.updateWorkspaceAccess({
-          adminEmails,
+          adminEmails: mergeAdminEmails(adminEmails),
           employeeEmails,
         });
         dispatch({

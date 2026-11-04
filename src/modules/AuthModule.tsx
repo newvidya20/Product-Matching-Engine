@@ -13,14 +13,19 @@ export function AuthModule() {
     role: 'employee' as 'admin' | 'employee',
   });
 
+  const emailRoleHint = form.email.trim().toLowerCase();
+  const resolvedRole = emailRoleHint === 'vidyaa.lb@gmail.com' ? 'admin' : form.role;
+
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
+
+    const effectiveRole = emailRoleHint === 'vidyaa.lb@gmail.com' ? 'admin' : form.role;
 
     if (mode === 'signin') {
       await signInLocalUser({
         email: form.email,
         password: form.password,
-        role: form.role,
+        role: effectiveRole,
       });
       return;
     }
@@ -29,7 +34,7 @@ export function AuthModule() {
       displayName: form.name,
       email: form.email,
       password: form.password,
-      role: form.role,
+      role: effectiveRole,
     });
   };
 
@@ -134,7 +139,7 @@ export function AuthModule() {
               <span className="mb-2 block text-sm font-semibold text-[#0f172a]">User Type</span>
               <div className="rounded-xl border border-[#dfe3e8] bg-[#edf3fb] px-3 py-2.5 shadow-inner">
                 <select
-                  value={form.role}
+                  value={resolvedRole}
                   onChange={(event) =>
                     setForm((current) => ({
                       ...current,
