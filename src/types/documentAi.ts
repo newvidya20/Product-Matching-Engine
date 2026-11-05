@@ -15,7 +15,7 @@ export const DOCUMENT_AI_LIMITS = {
   /** One upload request: a ZIP of many documents, streamed to disk. DOCUMENT_AI_MAX_UPLOAD_MB overrides it. */
   maxUploadBytes: 2 * 1024 * 1024 * 1024,
   maxFilesPerSession: 300,
-  maxSessionBytes: 100 * 1024 * 1024,
+  maxSessionBytes: 1 * 1024 * 1024 * 1024,
   /** Uncompressed XLSX ceiling, zip-bomb guard. */
   maxXlsxUncompressedBytes: 60 * 1024 * 1024,
   maxOriginalNameLength: 120,

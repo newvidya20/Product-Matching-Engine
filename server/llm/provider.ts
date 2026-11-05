@@ -11,7 +11,7 @@ const GEMINI_DEFAULT_MODEL = 'gemini-3.8-flash';
 export function activeLlmProvider(): LlmProvider {
   const explicit = process.env.LLM_PROVIDER?.trim().toLowerCase();
   if (explicit === 'openrouter') return 'openrouter';
-  if (explicit === 'gemini') return isOpenRouterConfigured() ? 'openrouter' : 'gemini';
+  if (explicit === 'gemini') return 'gemini';
   return isOpenRouterConfigured() ? 'openrouter' : 'gemini';
 }
 

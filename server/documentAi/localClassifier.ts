@@ -62,10 +62,10 @@ const RULES: Array<{ type: DocumentType; test: (text: string) => boolean }> = [
   {
     type: 'existing_sanction_letter',
     test: (t) =>
-      /(sanction letter|sanctioned facility|existing debt profile|repayment obligations|outstanding balance|loan summary|term loan|working capital limit|repayment schedule|security details|loan obligation|obligation sheet)/i.test(t) ||
+      /(sanction letter|sanctioned facility|existing debt profile|repayment obligations|outstanding balance|repayment schedule|security details|loan obligation|obligation sheet|existing debt summary)/i.test(t) ||
       /(?:existing\s+)?debt\s+profile/i.test(t) ||
       /(?:sanction|obligation|repayment|renewal)\s+(?:letter|sheet|schedule)/i.test(t) ||
-      /\b(?:loan|debt|limit)\s+(?:sanction|renewal|obligation)\b/i.test(t),
+      /\b(?:existing|current)\s+debt\b/i.test(t) && /\b(?:balance|profile|schedule|obligation)\b/i.test(t),
   },
   {
     type: 'registration_certificate',
