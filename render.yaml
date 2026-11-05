@@ -7,6 +7,10 @@ services:
     healthCheckPath: /api/settings
     buildCommand: npm install --legacy-peer-deps && npm run build
     startCommand: npm start
+    disk:
+      name: loanbazaar-documents
+      mountPath: /var/lib/loanbazaar
+      sizeGB: 10
     envVars:
       - key: NODE_ENV
         value: production
@@ -37,7 +41,7 @@ services:
       - key: DOCUMENT_AI_SESSION_SECRET
         generateValue: true
       - key: DOCUMENT_AI_DATA_DIR
-        sync: false
+        value: /var/lib/loanbazaar/document-ai
       - key: DOCUMENT_AI_ENABLED
         sync: false
       - key: DOCUMENT_AI_GEMINI_MODEL
