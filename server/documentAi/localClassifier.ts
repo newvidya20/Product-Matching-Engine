@@ -93,9 +93,10 @@ const RULES: Array<{ type: DocumentType; test: (text: string) => boolean }> = [
   {
     type: 'other',
     test: (t) =>
-      /(purchase ledger|sales ledger|ledger statement|purchase and sales ledger|sales register|purchase register|sales & purchase register|register)/i.test(t) ||
-      /ledger/i.test(t) && /(purchase|sales|stock|debtors|creditors)/i.test(t) ||
-      /\b(?:purchase|sales)\s+(?:register|ledger)\b/i.test(t),
+      /\b(?:purchase|sales)\s+(?:ledger|register)\b/i.test(t) ||
+      /\b(?:purchase\s+and\s+sales|sales\s+and\s+purchase)\s+(?:ledger|register)\b/i.test(t) ||
+      /\b(?:ledger\s+statement|purchase\s+ledger|sales\s+ledger)\b/i.test(t) ||
+      /\bledger\b/i.test(t) && /\b(?:purchase|sales|stock|debtors|creditors)\b/i.test(t),
   },
 ];
 

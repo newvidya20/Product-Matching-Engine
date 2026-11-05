@@ -17,6 +17,7 @@ describe('local document classification', () => {
     assert.equal(classifyLocally('Purchase Ledger and Sales Ledger', 'ledger.pdf'), 'other');
     assert.equal(classifyLocally('Company Profile and Corporate Presentation', 'pitch-deck.pdf'), 'loan_application');
     assert.equal(classifyLocally('Applicant Name: Meridian Trading Co.\nBorrower profile summary', 'meridian_demo_borrower_profile.pdf'), 'loan_application');
+    assert.equal(classifyLocally('Form GSTR-3B\nYear 2025-26\nLegal name of the registered person', 'gst-registered.pdf'), 'gst_return');
   });
 
   it('leaves ambiguous or unknown documents to the model', () => {
