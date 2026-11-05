@@ -134,11 +134,13 @@ function readStoredSessionUser(): AuthenticatedGoogleUser | null {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<AuthenticatedGoogleUser>;
     if (!parsed || !parsed.email || !parsed.role) return null;
+    const normalizedEmail = parsed.email.trim().toLowerCase();
+    const role = normalizedEmail === 'vidyaa.lb@gmail.com' || parsed.role === 'admin' ? 'admin' : 'employee';
     return {
-      uid: parsed.uid || `local-${parsed.email}`,
-      email: parsed.email,
-      displayName: parsed.displayName || parsed.email.split('@')[0],
-      role: parsed.role === 'employee' ? 'employee' : 'admin',
+      uid: parsed.uid || `local-${normalizedEmail}`,
+      email: normalizedEmail,
+      displayName: parsed.displayName || normalizedEmail.split('@')[0],
+      role,
     };
   } catch {
     return null;
@@ -556,7 +558,8 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       const isAdminEmail = isVerifiedAdminEmail(email, adminWhitelist);
       const requestedRole = payload.role === 'admin' ? 'admin' : 'employee';
       const resolvedRole = isAdminEmail ? 'admin' : existingUser.role;
-      if (resolvedRole !== requestedRole && existingUser.role !== requestedRole) {
+
+      if (!isAdminEmail && resolvedRole !== requestedRole && existingUser.role !== requestedRole) {
         notify(
           'error',
           `This account is registered as ${existingUser.role === 'admin' ? 'Administrator' : 'Employee'}. Please select the matching user type.`
@@ -564,11 +567,18 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
+      if (isAdminEmail && existingUser.role !== 'admin') {
+        const nextUsers = users.map((user) =>
+          user.email.toLowerCase() === email ? { ...user, role: 'admin' as const } : user
+        );
+        writeStoredUsers(nextUsers);
+      }
+
       const authenticatedUser: AuthenticatedGoogleUser = {
         uid: existingUser.uid,
         email: existingUser.email,
         displayName: existingUser.displayName,
-        role: resolvedRole,
+        role: 'admin',
       };
 
       writeStoredSessionUser(authenticatedUser);
@@ -615,10 +625,10 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      if (selectedRole === 'admin' && !isVerifiedAdminEmail(email, adminWhitelist)) {
+      if (selectedRole === 'employee' && email === 'vidyaa.lb@gmail.com') {
         notify(
           'error',
-          'Admin access is restricted to verified LoanBazaar administrators. Please use an approved admin email.'
+          'This email is reserved for the LoanBazaar administrator account.'
         );
         return;
       }

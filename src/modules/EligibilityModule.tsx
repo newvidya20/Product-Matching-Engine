@@ -235,10 +235,13 @@ export function EligibilityModule(props: EligibilityModuleProps = {}) {
   }, [assessmentProp, sessionProp, doPrefill]);
 
   useEffect(() => {
-    if (!ai.sessionId || !ai.documents.length || sessionId.trim()) return;
-    setSessionId(ai.sessionId);
-    void doPrefill(assessmentId, ai.sessionId);
-  }, [ai.documents.length, ai.sessionId, assessmentId, doPrefill, sessionId]);
+    if (!ai.sessionId) return;
+    if (sessionId.trim() !== ai.sessionId) setSessionId(ai.sessionId);
+    const hasExtractedDoc = ai.documents.some((doc) => doc.status === 'extracted');
+    if (ai.docState && (Object.keys(ai.docState.fields).length > 0 || hasExtractedDoc)) {
+      void doPrefill(assessmentId, ai.sessionId);
+    }
+  }, [ai.docState, ai.documents, ai.sessionId, assessmentId, doPrefill, sessionId]);
 
   const handleDeleteDocument = async (documentId: string, mode: DeleteDocumentMode) => {
     await ai.removeDocument(documentId, mode);
@@ -286,7 +289,21 @@ export function EligibilityModule(props: EligibilityModuleProps = {}) {
       loadRecord(res.record);
       const outcome = res.record.result?.outcome;
       if (status === 'final' && (outcome === 'ELIGIBLE' || outcome === 'CONDITIONALLY_ELIGIBLE')) {
-        navigateTo('matching-engine');
+        try {
+          const continuation = await eligibilityClient.continueToAssessment(res.record.id);
+          setRecord(continuation.record);
+          if (onContinueToAssessment) {
+            onContinueToAssessment(continuation);
+            setNotice(`Finalized ${res.record.referenceCode} and opened the assessment prefill.`);
+            await refreshRecords();
+            return;
+          }
+          setNotice(`Finalized ${res.record.referenceCode}. Continue to New Assessment from the next step.`);
+          await refreshRecords();
+          return;
+        } catch {
+          navigateTo('matching-engine');
+        }
       }
       setNotice(status === 'final' ? `Finalized ${res.record.referenceCode}.` : `Saved draft ${res.record.referenceCode}.`);
       await refreshRecords();
@@ -567,7 +584,7 @@ export function EligibilityModule(props: EligibilityModuleProps = {}) {
               <button
                 type="button"
                 onClick={() => void save('draft')}
-                disabled={working || isFinal || !anyFilled}
+                disabled={working || isFinal}
                 className={BTN_SECONDARY}
               >
                 {busy === 'save' ? (
