@@ -364,6 +364,7 @@ export function EligibilityModule(props: EligibilityModuleProps = {}) {
     });
 
   const newCheck = () => {
+    ai.reset(createBlankForm(defaultCurrency, officerDefault));
     setRecord(null);
     setValues(blankValues());
     setSources({});

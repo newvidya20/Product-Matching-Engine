@@ -72,19 +72,29 @@ function newSessionId(): string {
 }
 
 function readStoredSession(): string | null {
-  try {
-    return window.localStorage.getItem(SESSION_STORAGE_KEY);
-  } catch {
-    return null;
+  if (typeof window === 'undefined') return null;
+  const storages = [window.localStorage, window.sessionStorage];
+  for (const storage of storages) {
+    try {
+      const value = storage?.getItem(SESSION_STORAGE_KEY)?.trim();
+      if (value) return value;
+    } catch {
+      /* ignore storage access failures; the current page view still keeps the active session in memory */
+    }
   }
+  return null;
 }
 
 function writeStoredSession(value: string | null): void {
-  try {
-    if (value) window.localStorage.setItem(SESSION_STORAGE_KEY, value);
-    else window.localStorage.removeItem(SESSION_STORAGE_KEY);
-  } catch {
-    /* storage can be blocked; the session then lasts for this page view only */
+  if (typeof window === 'undefined') return;
+  const storages = [window.localStorage, window.sessionStorage];
+  for (const storage of storages) {
+    try {
+      if (value) storage?.setItem(SESSION_STORAGE_KEY, value);
+      else storage?.removeItem(SESSION_STORAGE_KEY);
+    } catch {
+      /* storage can be blocked; the session then lasts for this page view only */
+    }
   }
 }
 
@@ -771,7 +781,8 @@ export function useDocumentAiForm({
    */
   const afterSave = useCallback(async (assessmentId: string): Promise<string | null> => {
     const sid = sessionIdRef.current;
-    if (readStoredSession() === sid) writeStoredSession(null);
+    // Keep the active document session alive while the user moves between modules, tabs and draft views.
+    // The session is only cleared by an explicit Reset/New check, not by a successful save.
     const linked = docStateRef.current?.session.assessmentId;
     if (sessionExistsRef.current && linked !== assessmentId) {
       try {
