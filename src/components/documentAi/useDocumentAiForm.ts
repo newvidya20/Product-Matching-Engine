@@ -73,7 +73,7 @@ function newSessionId(): string {
 
 function readStoredSession(): string | null {
   try {
-    return window.sessionStorage.getItem(SESSION_STORAGE_KEY);
+    return window.localStorage.getItem(SESSION_STORAGE_KEY);
   } catch {
     return null;
   }
@@ -81,8 +81,8 @@ function readStoredSession(): string | null {
 
 function writeStoredSession(value: string | null): void {
   try {
-    if (value) window.sessionStorage.setItem(SESSION_STORAGE_KEY, value);
-    else window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
+    if (value) window.localStorage.setItem(SESSION_STORAGE_KEY, value);
+    else window.localStorage.removeItem(SESSION_STORAGE_KEY);
   } catch {
     /* storage can be blocked; the session then lasts for this page view only */
   }
