@@ -1,7 +1,6 @@
 /**
- * Which LLM serves every AI feature. LLM_PROVIDER=openrouter|gemini picks one explicitly; unset, it
- * uses OpenRouter when OPENROUTER_API_KEY is present and Gemini otherwise. All Gemini code is kept,
- * so switching back is one env change.
+ * OpenRouter is the active business choice for this project. Gemini remains installed and configured
+ * in the environment, but it stays on standby until an operator deliberately re-enables it.
  */
 import { isOpenRouterConfigured, openRouterModel } from './openrouter.ts';
 
@@ -11,7 +10,8 @@ const GEMINI_DEFAULT_MODEL = 'gemini-3.8-flash';
 
 export function activeLlmProvider(): LlmProvider {
   const explicit = process.env.LLM_PROVIDER?.trim().toLowerCase();
-  if (explicit === 'openrouter' || explicit === 'gemini') return explicit;
+  if (explicit === 'openrouter') return 'openrouter';
+  if (explicit === 'gemini') return isOpenRouterConfigured() ? 'openrouter' : 'gemini';
   return isOpenRouterConfigured() ? 'openrouter' : 'gemini';
 }
 

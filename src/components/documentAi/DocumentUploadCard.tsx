@@ -32,7 +32,7 @@ const ERROR_COPY: Record<ExtractionErrorCode, string> = {
   llm_not_configured: 'Document reading is not set up on the server yet.',
   llm_rate_limited: 'The AI service is busy. Retry in a minute.',
   llm_quota_exhausted:
-    "The AI service's daily free limit is used up. Click Retry tomorrow, or use a paid OpenRouter key or Gemini.",
+    "The AI service's daily free limit is used up. Click Retry tomorrow, or use a paid OpenRouter key.",
   llm_timeout: 'The AI step timed out. Values read locally were kept, if any. Retry for the rest.',
   llm_invalid_response: 'The AI returned something unusable. Retry.',
   llm_failed: 'The AI service failed. Retry.',
@@ -194,7 +194,7 @@ export function DocumentUploadCard(props: Props) {
             choose files
           </button>
         </p>
-        <p className="mt-1 text-[11px] text-stone-500">PDF, Word, Excel, CSV, TXT, PNG, JPG, WebP or ZIP · up to 50 MB per file, ZIP up to 2 GB · 300 files</p>
+        <p className="mt-1 text-[11px] text-stone-500">PDF, Word, Excel, CSV, TXT, PNG, JPG, WebP or ZIP · up to 100 MB per file, ZIP up to 2 GB · 300 files</p>
         <input
           ref={inputRef}
           type="file"

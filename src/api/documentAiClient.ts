@@ -68,7 +68,7 @@ const FRIENDLY_MESSAGES: Partial<Record<DocumentAiErrorCode | 'network', string>
     'Document AI is locked because no access code is set. An admin must add DOCUMENT_AI_ACCESS_CODE and DOCUMENT_AI_ADMIN_CODE in the server environment (Render > Environment).',
   too_many_attempts: 'Too many attempts. Try again in a few minutes.',
   disabled: 'Document AI is turned off in Settings.',
-  file_too_large: 'That file is larger than 12 MB.',
+  file_too_large: 'That file is larger than 100 MB.',
   too_many_files: 'This assessment already has 25 files.',
   session_too_large: 'This assessment has reached the 100 MB upload limit.',
   unsupported_type: 'Only PDF, XLSX, CSV, PNG, JPG and WebP files are supported. Save .xls files as .xlsx.',

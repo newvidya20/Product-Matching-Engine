@@ -11,11 +11,11 @@ export const DOCUMENT_AI_API_BASE = '/api/document-ai';
 
 export const DOCUMENT_AI_LIMITS = {
   /** One document (a direct upload or one file inside a ZIP). */
-  maxFileBytes: 50 * 1024 * 1024,
+  maxFileBytes: 100 * 1024 * 1024,
   /** One upload request: a ZIP of many documents, streamed to disk. DOCUMENT_AI_MAX_UPLOAD_MB overrides it. */
   maxUploadBytes: 2 * 1024 * 1024 * 1024,
   maxFilesPerSession: 300,
-  maxSessionBytes: 3 * 1024 * 1024 * 1024,
+  maxSessionBytes: 100 * 1024 * 1024,
   /** Uncompressed XLSX ceiling, zip-bomb guard. */
   maxXlsxUncompressedBytes: 60 * 1024 * 1024,
   maxOriginalNameLength: 120,
