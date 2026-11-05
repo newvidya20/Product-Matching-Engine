@@ -16,6 +16,7 @@ describe('local document classification', () => {
     assert.equal(classifyLocally('Sanction Letter and Existing Debt Profile with outstanding balance and repayment schedule', 'debt-profile.pdf'), 'existing_sanction_letter');
     assert.equal(classifyLocally('Purchase Ledger and Sales Ledger', 'ledger.pdf'), 'other');
     assert.equal(classifyLocally('Company Profile and Corporate Presentation', 'pitch-deck.pdf'), 'loan_application');
+    assert.equal(classifyLocally('Applicant Name: Meridian Trading Co.\nBorrower profile summary', 'meridian_demo_borrower_profile.pdf'), 'loan_application');
   });
 
   it('leaves ambiguous or unknown documents to the model', () => {

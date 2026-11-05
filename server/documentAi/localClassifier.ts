@@ -85,9 +85,10 @@ const RULES: Array<{ type: DocumentType; test: (text: string) => boolean }> = [
     type: 'loan_application',
     test: (t) =>
       /loan application/i.test(t) ||
-      /(company profile|corporate presentation|pitch deck|investor presentation|business profile|company profile and corporate presentation)/i.test(t) ||
-      /\b(?:company|corporate)\s+(?:presentation|profile)\b/i.test(t) ||
-      /\bprofile\b/i.test(t) && /\b(?:company|business|corporate)\b/i.test(t),
+      /(?:borrower|customer|applicant|company|corporate)\s+(?:profile|details|summary)/i.test(t) ||
+      /(company profile|corporate presentation|pitch deck|investor presentation|business profile|company profile and corporate presentation|borrower profile)/i.test(t) ||
+      /\b(?:company|corporate|business|borrower|customer|applicant)\s+(?:presentation|profile)\b/i.test(t) ||
+      /\bprofile\b/i.test(t) && /\b(?:company|business|corporate|borrower|customer|applicant)\b/i.test(t),
   },
   {
     type: 'other',

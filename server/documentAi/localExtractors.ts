@@ -132,7 +132,7 @@ const RULES: readonly FieldRule[] = [
   rule('identity.dateOfEstablishment', 'date',
     String.raw`date\s+of\s+(?:incorporation|registration|liability|commencement(?:\s+of\s+business)?|establishment)`),
   rule('applicantLabel', 'text',
-    String.raw`legal\s+name(?:\s+of\s+(?:the\s+)?(?:business|registered\s+person|taxpayer))?|name\s+of\s+(?:the\s+)?(?:business|company|applicant|borrower|firm|entity|taxpayer|assessee)|applicant(?:'s)?(?:\s+name)?|borrower(?:'s)?\s+name|company\s+name|account\s+holder(?:'s)?(?:\s+name)?`),
+    String.raw`legal\s+name(?:\s+of\s+(?:the\s+)?(?:business|registered\s+person|taxpayer))?|name\s+of\s+(?:the\s+)?(?:business|company|applicant|borrower|firm|entity|taxpayer|assessee)|applicant(?:'s)?(?:\s+name)?|borrower(?:'s)?\s+name|customer(?:'s)?\s+name|company\s+name|account\s+holder(?:'s)?(?:\s+name)?|applicant\s+name|borrower\s+profile|customer\s+profile`),
   rule('applicantLabel', 'text', String.raw`name(?=\s*:)`, { only: ['itr'] }),
   rule('entityType', 'entity',
     String.raw`constitution(?:\s+of\s+(?:the\s+)?business)?|legal\s+status|type\s+of\s+(?:entity|organi[sz]ation|business)|entity\s+type|business\s+type`),
