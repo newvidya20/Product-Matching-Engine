@@ -123,10 +123,125 @@ test('current vs previous follows the heading dates, whichever column comes firs
   assert.equal(by(out, 'totalAssets')?.period, 'FY 2025-26');
 });
 
-test('a unit heading from an earlier statement is not carried over; a statement with none is skipped', () => {
+test("a unit heading is the statement's own; with no scale word anywhere the figures are plain rupees", () => {
   const noUnit = BS.filter((l) => l !== 'Rs. In Lakhs');
-  assert.equal(readFinancialStatements([noUnit], 0.9).length, 0);
-  assert.equal(readFinancialStatements([BS, noUnit.map((l) => l)], 0.9).some((f) => f.page === 2), false);
+  // No scale word anywhere in the document: plain rupees, no stated unit.
+  const plain = readFinancialStatements([noUnit], 0.9);
+  assert.equal(by(plain, 'totalAssets')?.statedUnit, null);
+  assert.equal(by(plain, 'totalAssets')?.unitText, null);
+  // A scale named on another page does not scale a statement that has no heading of its own.
+  assert.equal(readFinancialStatements([['All figures in Lakhs unless stated'], noUnit], 0.9).length, 0);
   const rupees = BS.map((l) => (l === 'Rs. In Lakhs' ? '(Amount in Rupees)' : l));
   assert.equal(by(readFinancialStatements([rupees], 0.9), 'totalAssets')?.statedUnit, 'rupees');
+});
+
+const SIMPLE = [
+  'ABC PRIVATE LIMITED',
+  'BALANCE SHEET AS AT 31ST MARCH 2025',
+  'Particulars Note 31.03.2025 31.03.2024',
+  'EQUITY AND LIABILITIES',
+  'Shareholders funds',
+  'Share capital 1 10,00,000 10,00,000',
+  'Reserves and surplus 2 40,00,000 30,00,000',
+  'Non-current liabilities',
+  'Long-term borrowings 3 50,00,000 60,00,000',
+  'Current liabilities',
+  'Short-term borrowings 4 20,00,000 15,00,000',
+  'Trade payables 5 30,00,000 25,00,000',
+  'Other current liabilities 6 5,00,000 4,00,000',
+  'TOTAL 1,55,00,000 1,44,00,000',
+  'ASSETS',
+  'Non-current assets',
+  'Property, plant and equipment 7 60,00,000 55,00,000',
+  'Current assets',
+  'Inventories 8 40,00,000 38,00,000',
+  'Trade receivables 9 35,00,000 30,00,000',
+  'Cash and bank balances 10 20,00,000 21,00,000',
+  'TOTAL 1,55,00,000 1,44,00,000',
+];
+
+test('bare TOTAL rows on each side prove current assets, current liabilities and equity', () => {
+  const out = readFinancialStatements([SIMPLE], 0.9);
+  assert.equal(by(out, 'totalAssets')?.rawValue, '1,55,00,000');
+  assert.equal(by(out, 'currentAssets')?.rawValue, '9500000.00');
+  assert.equal(by(out, 'currentLiabilities')?.rawValue, '5500000.00');
+  assert.equal(by(out, 'shareholdersEquity')?.rawValue, '5000000.00');
+  const broken = SIMPLE.map((l, i) => (i === SIMPLE.length - 1 ? 'TOTAL 1,60,00,000 1,44,00,000' : l));
+  assert.equal(by(readFinancialStatements([broken], 0.9), 'currentAssets'), undefined);
+});
+
+test('heading styles count as column headings', () => {
+  for (const head of ['March 31, 2025 | March 31, 2024', '2024-25 | 2023-24', 'As at 31st March 2025 As at 31st March 2024']) {
+    const lines = SIMPLE.map((l) => (l.startsWith('Particulars') ? `Particulars ${head}` : l));
+    assert.equal(by(readFinancialStatements([lines], 0.9), 'totalAssets')?.period, 'FY 2024-25', head);
+  }
+});
+
+const PL_SIMPLE = (patLabel: string, revLabel = 'Revenue from operations') => [
+  'STATEMENT OF PROFIT AND LOSS FOR THE YEAR ENDED 31ST MARCH 2025',
+  'Particulars 2024-25 2023-24',
+  `${revLabel} 11 4,50,00,000 3,90,00,000`,
+  'Other income 12 2,00,000 1,00,000',
+  'Total income 4,52,00,000 3,91,00,000',
+  'Finance costs 15 9,00,000 10,00,000',
+  'Depreciation and amortisation 16 8,00,000 7,00,000',
+  'Other expenses 17 3,60,00,000 3,50,00,000',
+  'Total expenses 3,77,00,000 3,67,00,000',
+  'Profit before tax 75,00,000 24,00,000',
+  `${patLabel} 56,00,000 18,00,000`,
+];
+
+test('common P&L labels are recognised', () => {
+  for (const label of ['Profit for the year', 'Profit after tax', 'Net profit', 'Profit/(Loss) for the period']) {
+    assert.equal(by(readFinancialStatements([PL_SIMPLE(label)], 0.9), 'netProfitAfterTax', 'FY 2024-25')?.rawValue, '56,00,000', label);
+  }
+  const total = readFinancialStatements([PL_SIMPLE('Profit for the year', 'Total revenue')], 0.9);
+  assert.equal(by(total, 'annualRevenue', 'FY 2024-25')?.confidence, 0.8);
+  const ops = readFinancialStatements([PL_SIMPLE('Profit for the year')], 0.9);
+  assert.equal(by(ops, 'annualRevenue', 'FY 2024-25')?.confidence, 0.9);
+  assert.equal(by(ops, 'interestExpense')?.rawValue, '9,00,000');
+  assert.equal(by(ops, 'depreciation')?.rawValue, '8,00,000');
+});
+
+const T_BS = [
+  'ABC TRADERS',
+  'BALANCE SHEET AS AT 31ST MARCH 2025',
+  'Liabilities Rs. Assets Rs.',
+  'Capital Account 10,00,000 Fixed Assets 10,00,000',
+  'Reserves 5,00,000 Furniture 5,00,000',
+  'Secured Loan 15,00,000 Stock in Trade 12,00,000',
+  'Sundry Creditors 8,00,000 Sundry Debtors 9,00,000',
+  'Outstanding Expenses 2,00,000 Cash at Bank 4,00,000',
+  'Total 40,00,000 Total 40,00,000',
+];
+
+test('T-form balance sheet is read only when both sides agree', () => {
+  const out = readFinancialStatements([T_BS], 0.9);
+  assert.equal(by(out, 'totalAssets')?.rawValue, '40,00,000');
+  assert.equal(by(out, 'shareholdersEquity')?.rawValue, '1500000.00');
+  assert.equal(by(out, 'currentLiabilities')?.rawValue, '1000000.00');
+  assert.equal(by(out, 'currentAssets')?.rawValue, '2500000.00');
+  assert.equal(by(out, 'currentAssets')?.reconciled, true);
+  const bad = T_BS.map((l) => (l.startsWith('Total') ? 'Total 40,00,000 Total 50,00,000' : l));
+  assert.equal(by(readFinancialStatements([bad], 0.9), 'totalAssets'), undefined);
+});
+
+test('Trading and P&L account is read per balanced block', () => {
+  const lines = [
+    'TRADING AND PROFIT & LOSS ACCOUNT FOR THE YEAR ENDED 31ST MARCH 2025',
+    'To Opening Stock 10,00,000 By Sales 90,00,000',
+    'To Purchases 60,00,000 By Closing Stock 20,00,000',
+    'To Gross Profit c/d 40,00,000 By Scrap Sales 1,00,000',
+    'Total 1,10,00,000 Total 1,11,00,000',
+    'To Interest 4,00,000 By Gross Profit b/d 40,00,000',
+    'To Depreciation 6,00,000 By Other Income 1,00,000',
+    'To Net Profit 31,00,000 By Rent Received 0.00',
+    'Total 41,00,000 Total 41,00,000',
+  ];
+  const res = readFinancialStatements([lines], 0.9);
+  assert.equal(by(res, 'netProfitAfterTax')?.rawValue, '31,00,000');
+  assert.equal(by(res, 'depreciation')?.rawValue, '6,00,000');
+  assert.equal(by(res, 'interestExpense')?.rawValue, '4,00,000');
+  // The first block (1,10,00,000 vs 1,11,00,000) does not agree, so no revenue is taken from it.
+  assert.equal(by(res, 'annualRevenue'), undefined);
 });

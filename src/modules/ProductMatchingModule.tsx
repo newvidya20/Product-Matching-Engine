@@ -107,8 +107,8 @@ export function ProductMatchingModule() {
           icon={<Cpu className="w-6 h-6" />}
           title="No Borrower Assessments Available"
           description="Create a borrower assessment first. Matching searches the project’s local PDFs and does not determine lending eligibility."
-          actionLabel="Create Borrower Assessment"
-          onAction={() => navigateTo('new-assessment')}
+          actionLabel="Start Eligibility Check"
+          onAction={() => navigateTo('eligibility')}
         />
       </div>
     );

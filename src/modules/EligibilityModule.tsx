@@ -7,6 +7,7 @@ import { DocumentUploadCard } from '../components/documentAi/DocumentUploadCard'
 import { DocumentPreviewDrawer } from '../components/documentAi/DocumentPreviewDrawer';
 import { DeleteDocumentDialog } from '../components/documentAi/DeleteDocumentDialog';
 import { ReviewPanel } from '../components/documentAi/ReviewPanel';
+import { ELIGIBILITY_DOC_FIELD_IDS, eligibilityFieldForDocField } from '../components/eligibility/docFieldMap';
 import { useDocumentAiForm } from '../components/documentAi/useDocumentAiForm';
 import { createBlankForm } from '../components/documentAi/formModel';
 import { EligibilityError, eligibilityClient } from '../api/eligibilityClient';
@@ -132,7 +133,12 @@ export function EligibilityModule(props: EligibilityModuleProps = {}) {
     return out;
   }, [rules]);
 
+  // Values the user typed or confirmed from a document: a later re-read of the documents never replaces them.
+  const lockedRef = useRef<Partial<Record<EligibilityInputField, string>>>({});
+
   const handleChange = (field: EligibilityInputField, value: string) => {
+    if (value.trim() === '') delete lockedRef.current[field];
+    else lockedRef.current[field] = value;
     setValues((current) => ({ ...current, [field]: value }));
     setSources((current) => {
       const next = { ...current };
@@ -187,6 +193,7 @@ export function EligibilityModule(props: EligibilityModuleProps = {}) {
   };
 
   const loadRecord = (r: EligibilityAssessmentRecord) => {
+    lockedRef.current = {};
     setRecord(r);
     setValues(inputToForm(r.input));
     setSources(r.inputSources);
@@ -210,7 +217,7 @@ export function EligibilityModule(props: EligibilityModuleProps = {}) {
           throw new Error('Choose an assessment or enter a document session ID to prefill from.');
         }
         const res = await eligibilityClient.prefill(request);
-        setValues(inputToForm(res.input));
+        setValues({ ...inputToForm(res.input), ...lockedRef.current });
         setSources(res.inputSources);
         setPending(res.pendingVerification);
         setPreview(null);
@@ -242,6 +249,53 @@ export function EligibilityModule(props: EligibilityModuleProps = {}) {
       void doPrefill(assessmentId, ai.sessionId);
     }
   }, [ai.docState, ai.documents, ai.sessionId, assessmentId, doPrefill, sessionId]);
+
+  /**
+   * "Confirm & fill" / "Use this value" in the review list: the person has checked the document value,
+   * so it goes into the Eligibility form (and the Document AI form), and is kept across re-reads.
+   */
+  const confirmDocumentValue = (
+    fieldId: string,
+    candidateId: string,
+    origin?: 'accepted_document_value' | 'resolved_conflict'
+  ) => {
+    ai.acceptCandidate(fieldId, candidateId, origin);
+    const field = eligibilityFieldForDocField(fieldId);
+    const result = ai.docState?.fields[fieldId];
+    if (!field || !result) return;
+    const candidate = result.candidates.find((c) => c.candidateId === candidateId);
+    const value = result.status === 'conflict' ? candidate?.value : (result.value ?? candidate?.value);
+    if (value === null || value === undefined) return;
+    handleChange(field, String(value));
+    setSources((current) => ({
+      ...current,
+      [field]: { kind: 'document_ai', documentSessionId: ai.sessionId ?? '', fieldId },
+    }));
+    setPending((current) => current.filter((item) => item.field !== field));
+    setNotice('Value confirmed and filled in.');
+  };
+
+  /** Document values waiting for an OK, by Eligibility field. A conflict has no single value to propose. */
+  const proposals = useMemo(() => {
+    const out: Partial<Record<EligibilityInputField, string>> = {};
+    for (const item of pending) {
+      const docId = ELIGIBILITY_DOC_FIELD_IDS[item.field];
+      const result = docId ? ai.docState?.fields[docId] : undefined;
+      if (result && result.status === 'needs_verification' && result.value !== null && result.value !== undefined) {
+        out[item.field] = String(result.value);
+      }
+    }
+    return out;
+  }, [pending, ai.docState]);
+
+  const confirmProposal = (field: EligibilityInputField) => {
+    const docId = ELIGIBILITY_DOC_FIELD_IDS[field];
+    const result = docId ? ai.docState?.fields[docId] : undefined;
+    const candidate =
+      result?.candidates.find((c) => c.candidateId === result.suggestedCandidateId) ??
+      result?.candidates.find((c) => c.value !== null);
+    if (docId && candidate) confirmDocumentValue(docId, candidate.candidateId);
+  };
 
   const handleDeleteDocument = async (documentId: string, mode: DeleteDocumentMode) => {
     await ai.removeDocument(documentId, mode);
@@ -364,6 +418,7 @@ export function EligibilityModule(props: EligibilityModuleProps = {}) {
     });
 
   const newCheck = () => {
+    lockedRef.current = {};
     ai.reset(createBlankForm(defaultCurrency, officerDefault));
     setRecord(null);
     setValues(blankValues());
@@ -465,7 +520,7 @@ export function EligibilityModule(props: EligibilityModuleProps = {}) {
               edited={ai.edited}
               applied={ai.applied}
               isDismissed={ai.fieldContext.isDismissed}
-              acceptCandidate={ai.acceptCandidate}
+              acceptCandidate={confirmDocumentValue}
               dismiss={ai.dismiss}
               hasDocuments
               busy={ai.isBusy}
@@ -562,6 +617,8 @@ export function EligibilityModule(props: EligibilityModuleProps = {}) {
             sources={sources}
             errors={{ ...parsed.errors, ...fieldErrors }}
             pending={pending}
+            proposals={proposals}
+            onConfirm={confirmProposal}
             disabled={isFinal || working}
             onChange={handleChange}
           />

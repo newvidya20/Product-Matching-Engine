@@ -326,14 +326,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
 
           <div className="flex items-center gap-3 shrink-0">
-            {state.activeModule !== 'new-assessment' && (
+            {state.activeModule !== 'eligibility' && (
               <button
                 type="button"
-                onClick={() => navigateTo('new-assessment')}
+                onClick={() => navigateTo('eligibility')}
                 className="inline-flex items-center gap-1.5 px-4 py-2.5 text-xs font-semibold text-white bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 rounded-lg shadow-sm transition-all whitespace-nowrap shrink-0 cursor-pointer"
               >
                 <Plus className="w-3.5 h-3.5" />
-                <span>New Assessment</span>
+                <span>Eligibility Check</span>
               </button>
             )}
 

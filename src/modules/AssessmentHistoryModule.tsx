@@ -370,11 +370,11 @@ export function AssessmentHistoryModule() {
             )}
             <button
               type="button"
-              onClick={() => navigateTo('new-assessment')}
+              onClick={() => navigateTo('eligibility')}
               className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-orange-600 hover:bg-orange-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Plus className="w-3.5 h-3.5" />
-              <span>New Assessment</span>
+              <span>Eligibility Check</span>
             </button>
           </>
         }
@@ -420,8 +420,8 @@ export function AssessmentHistoryModule() {
           icon={<History className="w-6 h-6" />}
           title="No Assessment Records Match Your Filter"
           description="Adjust your search criteria, include fictional demo cases, or create a new borrower intake assessment."
-          actionLabel="Create Borrower Assessment"
-          onAction={() => navigateTo('new-assessment')}
+          actionLabel="Start Eligibility Check"
+          onAction={() => navigateTo('eligibility')}
         />
       ) : (
         <div className="bg-white border border-stone-200 rounded-xl overflow-hidden">

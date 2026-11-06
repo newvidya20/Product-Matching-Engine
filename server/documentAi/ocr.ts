@@ -31,7 +31,7 @@ const envInt = (name: string, fallback: number, min: number, max: number): numbe
 };
 
 /** Pages read per document. Summary figures sit on the first pages; the rest would cost minutes. */
-export const MAX_OCR_PAGES = envInt('DOCUMENT_AI_OCR_MAX_PAGES', 5, 1, 30);
+export const MAX_OCR_PAGES = envInt('DOCUMENT_AI_OCR_MAX_PAGES', 10, 1, 30);
 /** One page on the Render free plan (a tenth of a CPU) can take well over a minute. */
 export const OCR_PAGE_TIMEOUT_MS = envInt('DOCUMENT_AI_OCR_PAGE_TIMEOUT_MS', 120_000, 1_000, 600_000);
 /**

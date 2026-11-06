@@ -255,7 +255,7 @@ export function ReviewPanel(props: ReviewPanelProps) {
                   <ItemShell key={result.fieldId} definition={definition} badge={<ConflictBadge />}>
                     <p className="text-[11px] text-stone-500">
                       {SECTION_TITLES[definition.section]} · documents disagree. Neither value has been
-                      applied to the form. Pick one, or type your own in the form.
+                      applied to the form. Click “Use this value” on the right one, or type your own.
                     </p>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                       {result.candidates
@@ -281,6 +281,16 @@ export function ReviewPanel(props: ReviewPanelProps) {
                             </p>
                             <ConfidenceBadge value={candidate.confidence} />
                             <SourceText field={candidate} defaultOpen />
+                            {writable && (
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => acceptCandidate(result.fieldId, candidate.candidateId, 'resolved_conflict')}
+                                className="inline-flex items-center gap-1.5 rounded bg-emerald-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-emerald-700 disabled:opacity-50 cursor-pointer"
+                              >
+                                <Check className="w-3 h-3" aria-hidden="true" /> Use this value
+                              </button>
+                            )}
                           </div>
                         ))}
                     </div>
@@ -315,9 +325,19 @@ export function ReviewPanel(props: ReviewPanelProps) {
                   })()}
                   <div className="flex flex-wrap gap-2">
                     {!invalid && writable && !wrongPurpose && (
-                      <span className="inline-flex items-center gap-1.5 rounded bg-emerald-50 px-2 py-1 text-[10px] font-semibold text-emerald-700 border border-emerald-200">
-                        <Check className="w-3 h-3" aria-hidden="true" /> Auto-filled when a valid value is read
-                      </span>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => {
+                          const chosen =
+                            result.candidates.find((c) => c.candidateId === result.suggestedCandidateId) ??
+                            result.candidates.find((c) => c.value !== null);
+                          if (chosen) acceptCandidate(result.fieldId, chosen.candidateId);
+                        }}
+                        className="inline-flex items-center gap-1.5 rounded bg-emerald-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-emerald-700 disabled:opacity-50 cursor-pointer"
+                      >
+                        <Check className="w-3 h-3" aria-hidden="true" /> Confirm &amp; fill
+                      </button>
                     )}
                   </div>
                 </ItemShell>

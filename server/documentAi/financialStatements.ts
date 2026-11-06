@@ -134,7 +134,7 @@ function toFigure(token: string): Figure | null {
   return { token, value: negative && value !== 0 ? -value : value };
 }
 
-const LABEL_NUMBERING = /^(?:[ivx]{1,4}\s+(?=[a-z(])|\(?[a-z]{1,2}\)\s*|\(?[ivx]{1,4}\)\s*|\(?\d{1,2}\)\s*|[ivx]{1,4}\.\s+|\d{1,2}\.\s+|[a-z]\.\s+)+/i;
+const LABEL_NUMBERING = /^(?:[ivx]{1,4}\s+(?=[a-z(])|\(?[a-z]{1,2}\)\s*|\(?[ivx]{1,4}\)\s*|\(?\d{1,2}\)\s*|[ivx]{1,4}\.\s*(?=[a-z])|[ivx]{1,4}\.\s+|\d{1,2}\.\s+|[a-z]\.\s+)+/i;
 
 function normaliseLabel(label: string): string {
   return clean(label)
@@ -163,6 +163,8 @@ function splitLine(text: string): { label: string; figures: string[] } {
 }
 
 // ------------------------------------------------------------------ Units
+
+const SCALE_WORD = /\b(?:lakhs?|lacs?|crores?|crs?|thousands?|millions?|mn)\b/i;
 
 const UNIT_WORDS: ReadonlyArray<[RegExp, AmountUnit]> = [
   [/\bcrores?\b|\bcrs?\b/i, 'crore'],
@@ -194,7 +196,7 @@ type Kind = 'bs' | 'pl' | 'cf';
 const HEADING_START = new RegExp(
   String.raw`^(?:(?:standalone|consolidated|audited|unaudited|provisional|abridged)\s+)*(?:` +
     String.raw`(?<bs>balance\s+sheet|statement\s+of\s+assets\s*(?:&|and)\s*liabilities)|` +
-    String.raw`(?<pl>statement\s+of\s+(?:audited\s+|unaudited\s+)?(?:financial\s+results?|profit\s*(?:&|and)\s*loss(?:\s+account)?)|profit\s*(?:&|and)\s*loss\s+(?:account|statement)|statement\s+of\s+income)|` +
+    String.raw`(?<pl>statement\s+of\s+(?:audited\s+|unaudited\s+)?(?:financial\s+results?|profit\s*(?:&|and)\s*loss(?:\s+account)?)|profit\s*(?:&|and)\s*loss\s+(?:account|statement)|statement\s+of\s+income|trading(?:\s+(?:and|&)\s+profit\s*(?:&|and)\s*loss)?\s+account)|` +
     String.raw`(?<cf>cash\s*flow\s+statement|statement\s+of\s+cash\s+flows?)` +
     String.raw`)`,
   'i'
@@ -328,7 +330,8 @@ function columnDates(section: Section): ColumnInfo {
     const ok = lastPhrase === 'year' && march && lastTwoAreYears;
     return ok ? { current, previous, fullYear: true, multiColumn: true } : none;
   }
-  const fullYear = march && FULL_YEAR_HEADING.test(headText);
+  // Two year-on-year dates printed as column headings (`2024-25 | 2023-24`) are a heading of their own.
+  const fullYear = march && (FULL_YEAR_HEADING.test(headText) || previous !== null);
   return { current, previous, fullYear, multiColumn: false };
 }
 
@@ -433,10 +436,21 @@ function readBalanceSheet(parsed: ParsedSection): BalanceSheet | null {
   let block: Block = null;
   let totalAssets: Row | null = null;
   let totalEL: Row | null = null;
+  // Which side of the sheet we are on, so a bare `TOTAL` row can be told apart: the first one after
+  // EQUITY AND LIABILITIES is the liabilities total, the one after ASSETS the assets total.
+  let side: 'L' | 'A' | null = null;
   for (const row of parsed.rows) {
     if (row.cur === null) {
+      if (/^equity\s*(?:&|and)\s*liabilit|^liabilities$/.test(row.label)) side = 'L';
+      else if (/^assets$/.test(row.label)) side = 'A';
       const next = blockOf(row.label);
       if (next !== undefined) block = next;
+      continue;
+    }
+    if (/^total$/.test(row.label) && side) {
+      if (side === 'L' && !totalEL) totalEL = row;
+      else if (side === 'A' && !totalAssets) totalAssets = row;
+      block = null;
       continue;
     }
     if (TOTAL_EL.test(row.label)) {
@@ -490,7 +504,7 @@ class Emitter {
     private readonly unit: { unit: AmountUnit; unitText: string } | null
   ) {}
 
-  printed(fieldId: string, row: Row, col: Col, period: string | null): void {
+  printed(fieldId: string, row: Row, col: Col, period: string | null, cap = 1): void {
     const figure = col === 'cur' ? row.cur : row.prev;
     if (!figure || DASHES.has(figure.token)) return;
     this.fields.push({
@@ -501,9 +515,9 @@ class Emitter {
       sheetName: null,
       cellRef: null,
       snippet: snip(row.line),
-      confidence: this.confidence,
+      confidence: Math.min(this.confidence, cap),
       statedUnit: this.unit?.unit ?? null,
-      unitText: this.unit?.unitText ?? null,
+      unitText: this.unit?.unitText || null,
       period,
       subjectRef: null,
     });
@@ -526,7 +540,7 @@ class Emitter {
       snippet: snip(`${note}: ${quoted}`),
       confidence: Math.min(this.confidence, cap),
       statedUnit: this.unit?.unit ?? null,
-      unitText: this.unit?.unitText ?? null,
+      unitText: this.unit?.unitText || null,
       period,
       subjectRef: null,
       reconciled: true,
@@ -607,17 +621,21 @@ function emitProfitAndLoss(parsed: ParsedSection, emit: Emitter): void {
   const cur = periodOf(parsed.current);
   const prev = periodOf(parsed.previous);
 
-  const revenue = find(rows, /^(?:total\s+)?revenue\s+from\s+operations|^net\s+sales|^revenue\s+from\s+sale|^sales\b|^turnover|^gross\s+revenue/, /other|total\s+income/);
+  const revenueOps = find(rows, /^(?:total\s+)?revenue\s+from\s+operations|^net\s+sales|^revenue\s+from\s+sale|^sales\b|^turnover|^gross\s+revenue|^income\s+from\s+operations|^net\s+revenue/, /other|total\s+income/);
+  // `Total revenue` can include other income, so it stands in only when no operations line exists, and is reviewed.
+  const revenueTotal = revenueOps ? null : find(rows, /^total\s+revenue$|^revenue$/, /other/);
+  const revenue = revenueOps ?? revenueTotal;
   const totalIncome = find(rows, /^total\s+(?:income|revenue)$|^total\s+income\b/);
   const totalExpenses = find(rows, /^total\s+expenses?/);
-  const financeCosts = find(rows, /^finance\s+costs?|^interest\s+expenses?|^interest\s+and\s+finance|^interest$/, /income|received/);
+  const financeCosts = find(rows, /^finance\s+costs?|^finance\s+charges|^interest\s+expenses?|^interest\s+and\s+finance|^interest\s+(?:paid|charges|on\s+(?:borrowings|loans?|term))|^interest$/, /income|received|earned/);
   const depreciation = find(rows, /depreciation/, /accumulated|^less/);
   const pbt = find(rows, /profit.*before.*tax|^pbt$/, /exceptional|extraordinary|discontinu/) ?? find(rows, /profit.*before.*tax/);
-  const pat = find(rows, /^profit\s*\/?\s*\(?loss\)?\s*for\s+(?:the\s+)?(?:period|year)|^profit\s+after\s+tax|^net\s+profit\b(?!.*before)|^profit\s*\/?\s*\(?loss\)?\s*after\s+tax/, /before|comprehensive|per\s+share|attributable/);
+  const pat = find(rows, /^profit(?:\s*\/?\s*\(?loss\)?)?\s*for\s+(?:the\s+)?(?:period|year)|^profit(?:\s*\/?\s*\(?loss\)?)?\s*after\s+tax|^net\s+profit(?:\s*\/?\s*\(?loss\)?)?\b(?!.*before)|^pat$|^profit\s*\/\s*\(?loss\)?$/, /before|comprehensive|per\s+share|attributable/);
 
   if (revenue) {
-    emit.printed('financialProfile.annualRevenue', revenue, 'cur', cur);
-    if (prev) emit.printed('financialProfile.annualRevenue', revenue, 'prev', prev);
+    const cap = revenueTotal ? 0.8 : 1;
+    emit.printed('financialProfile.annualRevenue', revenue, 'cur', cur, cap);
+    if (prev) emit.printed('financialProfile.annualRevenue', revenue, 'prev', prev, cap);
   }
   if (pat) {
     emit.printed('financialProfile.netProfitAfterTax', pat, 'cur', cur);
@@ -638,6 +656,138 @@ function emitProfitAndLoss(parsed: ParsedSection, emit: Emitter): void {
   }
 }
 
+
+// ------------------------------------------------------------------ T-form (two-sided) statements
+
+const FIG_SRC = String.raw`\(?-?\d[\d,]*(?:\.\d+)?\)?`;
+/** `Capital Account 10,00,000 Fixed Assets 20,00,000`: a left item and a right item on one line. */
+const PAIR_LINE = new RegExp(String.raw`^(.*?[A-Za-z].*?)\s+(${FIG_SRC})\s+(.*?[A-Za-z].*?)\s+(${FIG_SRC})$`);
+
+interface TPair {
+  left: Row;
+  right: Row;
+}
+
+function tRow(label: string, token: string, line: Line): Row | null {
+  if (!isValueToken(token)) return null;
+  const figure = toFigure(token);
+  return figure ? { label: normaliseLabel(label), line: line.text, page: line.page, cur: figure, prev: null, columns: 1 } : null;
+}
+
+function tPairs(section: Section): TPair[] {
+  const pairs: TPair[] = [];
+  for (const line of section.lines) {
+    const m = PAIR_LINE.exec(clean(stripDates(line.text)));
+    if (!m) continue;
+    const left = tRow(m[1], m[2], line);
+    const right = tRow(m[3], m[4], line);
+    if (left && right) pairs.push({ left, right });
+  }
+  return pairs;
+}
+
+/** Liabilities and Assets side by side: a header names both, and several lines carry two items. */
+function isTForm(section: Section): boolean {
+  const named = section.lines
+    .slice(0, 14)
+    .some((l) => /liabilit/i.test(l.text) && /\bassets?\b/i.test(l.text) && splitLine(l.text).figures.length === 0);
+  return named && tPairs(section).length >= 3;
+}
+
+const T_EQUITY = /capital|reserve|surplus|profit|share\s+premium|retained/;
+const T_CURRENT_LIAB = /creditor|payable|provision|outstanding|overdraft|cash\s+credit|expenses|bills\s+payable|current\s+maturit|advances?\s+from|short/;
+const T_TERM_LIAB = /loan|borrowing|debenture|term|secured|mortgage/;
+const T_FIXED = /fixed|plant|machiner|building|land|furniture|vehicle|computer|equipment|investment|goodwill|intangible|patent|trademark|preliminary|capital\s+work/;
+const T_CURRENT_ASSET = /stock|inventor|debtor|receivable|cash|bank|advance|prepaid|deposit|accrued|closing/;
+
+interface TBlock {
+  rows: TPair[];
+  left: Row;
+  right: Row;
+}
+
+/** Blocks of pairs ended by a `Total | Total` pair; only a block whose two sides agree is used. */
+function tBlocks(pairs: readonly TPair[]): TBlock[] {
+  const blocks: TBlock[] = [];
+  let rows: TPair[] = [];
+  for (const pair of pairs) {
+    if (/^total\b/.test(pair.left.label) && /^total\b/.test(pair.right.label)) {
+      const sumL = rows.reduce((t, r) => t + r.left.cur!.value, 0);
+      const sumR = rows.reduce((t, r) => t + r.right.cur!.value, 0);
+      if (
+        rows.length > 0 &&
+        near(sumL, pair.left.cur!.value, rows.length) &&
+        near(sumR, pair.right.cur!.value, rows.length) &&
+        near(pair.left.cur!.value, pair.right.cur!.value, 2)
+      ) {
+        blocks.push({ rows, left: pair.left, right: pair.right });
+      }
+      rows = [];
+      continue;
+    }
+    rows.push(pair);
+  }
+  return blocks;
+}
+
+const sumOf = (rows: readonly Row[]) => rows.reduce((t, r) => t + r.cur!.value, 0);
+
+function emitTFormBalanceSheet(parsed: ParsedSection, emit: Emitter): void {
+  const period = periodOf(parsed.current);
+  const block = tBlocks(tPairs(parsed.section))[0];
+  if (!block) return; // the two sides do not agree with their printed totals: nothing is derived
+  emit.printed('financialProfile.totalAssets', block.right, 'cur', period);
+  const left = block.rows.map((r) => r.left);
+  const right = block.rows.map((r) => r.right);
+  const kindOfLeft = (row: Row) =>
+    T_CURRENT_LIAB.test(row.label) ? 'cl' : T_TERM_LIAB.test(row.label) ? 'ncl' : T_EQUITY.test(row.label) ? 'eq' : null;
+  const kindOfRight = (row: Row) => (T_FIXED.test(row.label) ? 'nca' : T_CURRENT_ASSET.test(row.label) ? 'ca' : null);
+
+  if (right.every((r) => kindOfRight(r))) {
+    const ca = right.filter((r) => kindOfRight(r) === 'ca');
+    if (ca.length > 0) emit.computed('financialProfile.currentAssets', sumOf(ca), ca, 'cur', period, 'Current assets (both sides total the same)');
+  }
+  if (!left.every((r) => kindOfLeft(r))) return;
+  const eq = left.filter((r) => kindOfLeft(r) === 'eq');
+  const cl = left.filter((r) => kindOfLeft(r) === 'cl');
+  const equity = sumOf(eq);
+  const others = left.filter((r) => !eq.includes(r));
+  const outside = block.left.cur!.value - equity;
+  if (cl.length > 0) emit.computed('financialProfile.currentLiabilities', sumOf(cl), cl, 'cur', period, 'Current liabilities (both sides total the same)');
+  if (eq.length === 0) return;
+  emit.computed('financialProfile.shareholdersEquity', equity, eq, 'cur', period, 'Capital and reserves');
+  emit.computed('financialProfile.totalLiabilities', outside, others, 'cur', period, 'Liabilities other than capital and reserves');
+  emit.computed('financialProfile.totalOutsideLiabilities', outside, others, 'cur', period, 'Outside liabilities');
+  const intangibles = right.filter((r) => /goodwill|intangible|patent|trademark|preliminary/.test(r.label));
+  emit.computed(
+    'financialProfile.tangibleNetWorth',
+    equity - sumOf(intangibles),
+    [...eq, ...intangibles],
+    'cur',
+    period,
+    'Capital and reserves less intangibles',
+    intangibles.length > 0 ? 1 : 0.8
+  );
+}
+
+/** Trading and Profit & Loss account: expenses on the left, income on the right, each block balanced. */
+function emitTFormProfitAndLoss(parsed: ParsedSection, emit: Emitter): void {
+  const cur = periodOf(parsed.current);
+  for (const block of tBlocks(tPairs(parsed.section))) {
+    const strip = (label: string) => label.replace(/^(?:to|by)\s+/, '');
+    const left = block.rows.map((r) => ({ ...r.left, label: strip(r.left.label) }));
+    const right = block.rows.map((r) => ({ ...r.right, label: strip(r.right.label) }));
+    const sales = right.find((r) => /^(?:sales|revenue\s+from\s+operations|turnover|net\s+sales)\b/.test(r.label));
+    if (sales) emit.printed('financialProfile.annualRevenue', sales, 'cur', cur);
+    const profit = left.find((r) => /^net\s+profit\b/.test(r.label));
+    if (profit) emit.printed('financialProfile.netProfitAfterTax', profit, 'cur', cur, 0.8);
+    const dep = left.find((r) => /depreciation/.test(r.label));
+    if (dep) emit.printed('financialProfile.depreciation', dep, 'cur', cur);
+    const interest = left.find((r) => /^interest|^finance\s+charges|^finance\s+costs?/.test(r.label) && !/received|income/.test(r.label));
+    if (interest) emit.printed('financialProfile.interestExpense', interest, 'cur', cur);
+  }
+}
+
 // ------------------------------------------------------------------ Cash flow
 
 function emitCashFlow(parsed: ParsedSection, emit: Emitter): void {
@@ -652,19 +802,21 @@ export function readFinancialStatements(pages: ReadonlyArray<readonly string[]>,
   const sections = findSections(lines);
   const out: RawField[] = [];
   let label: RawField | null = null;
+  // No scale word anywhere in the document means plain rupees; one named elsewhere never scales this statement.
+  const docNamesScale = lines.some((l) => SCALE_WORD.test(l.text));
 
   for (const kind of ['bs', 'pl', 'cf'] as const) {
     const parsed = sections
       .filter((s) => s.kind === kind)
       .map(parseSection)
       // Whole 31 March years only, with a unit heading of their own: never scaled by a guessed unit.
-      .filter((p) => p.fullYear && p.section.unit !== null && p.rows.some((r) => r.cur !== null));
+      .filter((p) => p.fullYear && (p.section.unit !== null || !docNamesScale) && p.rows.some((r) => r.cur !== null));
     // Standalone before consolidated; then the first section with the most recognised rows.
     parsed.sort((a, b) => Number(a.section.consolidated) - Number(b.section.consolidated));
     for (const candidate of parsed) {
       const emit = new Emitter(confidence, candidate.section.unit);
-      if (kind === 'bs') emitBalanceSheet(candidate, emit);
-      else if (kind === 'pl') emitProfitAndLoss(candidate, emit);
+      if (kind === 'bs') (isTForm(candidate.section) ? emitTFormBalanceSheet : emitBalanceSheet)(candidate, emit);
+      else if (kind === 'pl') (tPairs(candidate.section).length >= 3 ? emitTFormProfitAndLoss : emitProfitAndLoss)(candidate, emit);
       else emitCashFlow(candidate, emit);
       if (emit.fields.length === 0) continue;
       out.push(...emit.fields);

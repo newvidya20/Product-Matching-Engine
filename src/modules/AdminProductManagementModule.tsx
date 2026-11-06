@@ -588,8 +588,8 @@ export function AdminProductManagementModule() {
           icon={<Lock className="w-6 h-6" />}
           title="Administrator Authorization Required"
           description="Your Google Workspace account is assigned Employee permissions. You can create borrower assessments, run Two-Stage Product Matching, and inspect the Product Directory and Assessment History. Ask a LoanBazaar Administrator to add your email to the Admin Access list in Settings if you need to manage products or verify extracted PDF rules."
-          actionLabel="Go to New Borrower Assessment"
-          onAction={() => navigateTo('new-assessment')}
+          actionLabel="Go to Eligibility Check"
+          onAction={() => navigateTo('eligibility')}
         />
       </div>
     );

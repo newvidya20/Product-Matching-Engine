@@ -205,9 +205,9 @@ export function DashboardModule() {
               <EmptyStatePanel
                 icon={<ClipboardPlus className="w-6 h-6" />}
                 title="No Borrower Assessments Visible"
-                description="Log a new borrower requirement to evaluate against your verified Product Master."
-                actionLabel="Start New Assessment"
-                onAction={() => navigateTo('new-assessment')}
+                description="Run an eligibility check first; once it is finalized you can log the borrower assessment."
+                actionLabel="Start Eligibility Check"
+                onAction={() => navigateTo('eligibility')}
               />
             </div>
           ) : (

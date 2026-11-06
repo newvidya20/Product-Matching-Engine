@@ -12,10 +12,13 @@ interface Props {
   errors: Partial<Record<EligibilityInputField, string>>;
   pending: PendingVerificationInput[];
   disabled: boolean;
+  /** Document values waiting for a person's OK, by field (shown as text, never filled in unasked). */
+  proposals?: Partial<Record<EligibilityInputField, string>>;
+  onConfirm?: (field: EligibilityInputField) => void;
   onChange: (field: EligibilityInputField, value: string) => void;
 }
 
-export function EligibilityInputForm({ values, sources, errors, pending, disabled, onChange }: Props) {
+export function EligibilityInputForm({ values, sources, errors, pending, disabled, proposals = {}, onConfirm, onChange }: Props) {
   const pendingByField = new Map(pending.map((p) => [p.field, p]));
   return (
     <div className="space-y-5">
@@ -75,10 +78,30 @@ export function EligibilityInputForm({ values, sources, errors, pending, disable
                     <p className="text-[11px] text-stone-500">Source: {sourceLabel(source)}</p>
                   )}
                   {value === '' && held && (
-                    <p className="text-[11px] text-amber-800">
-                      A document has a value waiting for review in New Assessment ({held.status.replace(/_/g, ' ')}). It
-                      was not used.
-                    </p>
+                    <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 space-y-1.5">
+                      {proposals[meta.field] !== undefined ? (
+                        <>
+                          <p className="text-[11px] text-amber-900">
+                            Read from your documents: <span className="font-mono font-semibold">{proposals[meta.field]}</span>{' '}
+                            ({held.status.replace(/_/g, ' ')}). Check it, then confirm to fill it in.
+                          </p>
+                          {onConfirm && !disabled && (
+                            <button
+                              type="button"
+                              onClick={() => onConfirm(meta.field)}
+                              className="inline-flex items-center rounded bg-emerald-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-emerald-700 cursor-pointer"
+                            >
+                              Confirm &amp; fill
+                            </button>
+                          )}
+                        </>
+                      ) : (
+                        <p className="text-[11px] text-amber-900">
+                          The documents disagree on this value ({held.status.replace(/_/g, ' ')}). Pick one in “Review
+                          Extracted Data”, or type it.
+                        </p>
+                      )}
+                    </div>
                   )}
                 </div>
               );
@@ -95,7 +118,7 @@ export function PendingSummary({ pending }: { pending: PendingVerificationInput[
   return (
     <div className="px-4 py-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-900 leading-relaxed">
       {pending.length} value{pending.length === 1 ? '' : 's'} from documents {pending.length === 1 ? 'is' : 'are'}{' '}
-      waiting for review in New Assessment and {pending.length === 1 ? 'was' : 'were'} left blank:{' '}
+      waiting for your confirmation below and {pending.length === 1 ? 'was' : 'were'} left blank:{' '}
       {pending.map((p) => fieldLabel(p.field)).join(', ')}.
     </div>
   );
