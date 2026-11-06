@@ -546,8 +546,11 @@ export function keyFieldsMissing(documentType: DocumentType, local: LocalExtract
 async function runExtraction(input: ExtractDocumentInput): Promise<DocumentExtractionResult> {
   const { documentId, fileName, kind, bytes, declaredDocumentType, today, signal, jobId } = input;
 
+  // An /Encrypt mark alone does not mean the file needs a password: many bureau and bank PDFs are
+  // encrypted only to stop editing and open freely. Only a file the PDF engine cannot open is refused.
   if (kind === 'pdf' && isEncryptedPdf(bytes)) {
-    return { ok: false, documentId, errorCode: 'password_protected' };
+    const probe = await readPdfText(bytes, signal, { maxPages: 1 });
+    if (probe.source.kind === 'unreadable') return { ok: false, documentId, errorCode: 'password_protected' };
   }
 
   const prepared = await prepareDocument(input);

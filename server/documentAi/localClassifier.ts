@@ -31,7 +31,8 @@ const RULES: Array<{ type: DocumentType; test: (text: string) => boolean }> = [
         /(opening balance|closing balance|withdrawal|deposit)/i.test(t)) ||
       // A statement that heads its totals `Statement Summary` instead of naming itself.
       (/\bstatement summary\b/i.test(t) && /total deposit amount/i.test(t) && /closing balance/i.test(t)) ||
-      /(?:axis|sbi|kotak|hdfc|icici|citizencredit|bank)\s+(?:statement|account)/i.test(t) ||
+      /(?:axis|sbi|kotak|hdfc|icici|citizencredit)\s+(?:statement|account)/i.test(t) ||
+      /bank\s+statement/i.test(t) ||
       /\b(?:cc|ca)\s*[-\s]*\d{2}-\d{2}-\d{4}\s*to\s*\d{2}-\d{2}-\d{4}\b/i.test(t),
   },
   {
@@ -66,6 +67,11 @@ const RULES: Array<{ type: DocumentType; test: (text: string) => boolean }> = [
       /(?:existing\s+)?debt\s+profile/i.test(t) ||
       /(?:sanction|obligation|repayment|renewal)\s+(?:letter|sheet|schedule)/i.test(t) ||
       /\b(?:existing|current)\s+debt\b/i.test(t) && /\b(?:balance|profile|schedule|obligation)\b/i.test(t),
+  },
+  {
+    // A lender / EMI table kept by the borrower: bank or NBFC name, EMI and balance per facility.
+    type: 'existing_sanction_letter',
+    test: (t) => /name\s+of\s+(?:the\s+)?bank\s*\/?\s*nbfc/i.test(t) && /EMI/i.test(t),
   },
   {
     type: 'registration_certificate',
@@ -103,7 +109,19 @@ const RULES: Array<{ type: DocumentType; test: (text: string) => boolean }> = [
 /** Looks at the start of the text (where titles are) plus the file name. */
 export function classifyLocally(text: string, fileName: string): DocumentType | null {
   const fileLabel = fileName.replace(/[_.-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  // A borrower's lender / EMI table is recognised by its column headings alone.
+  if (/name\s+of\s+(?:the\s+)?bank\s*\/?\s*nbfc/i.test(text.slice(0, 3000)) && /EMI/i.test(text.slice(0, 3000))) {
+    return 'existing_sanction_letter';
+  }
+  // An income-tax computation quotes the profit and loss account, but it is an income-tax document.
+  if (/computation\s+of\s+(?:total\s+)?income/i.test(`${fileLabel} ${text.slice(0, 3000)}`)) return 'itr';
+  // A long report quotes other documents' words (a credit report lists `outstanding balance` and
+  // `repayment`), so its title and file name decide first: when they alone point to one type, that is it.
+  const title = `${fileLabel}
+${text.slice(0, 400)}`;
+  const titleMatches = [...new Set(RULES.filter((rule) => rule.test(title)).map((rule) => rule.type))];
+  if (titleMatches.length === 1) return titleMatches[0];
   const sample = `${fileLabel}\n${text.slice(0, 6000)}`;
-  const matches = RULES.filter((rule) => rule.test(sample)).map((rule) => rule.type);
+  const matches = [...new Set(RULES.filter((rule) => rule.test(sample)).map((rule) => rule.type))];
   return matches.length === 1 ? matches[0] : null;
 }

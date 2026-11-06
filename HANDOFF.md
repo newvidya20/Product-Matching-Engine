@@ -1,3 +1,19 @@
+# Update 2026-11-06: document reading rebuilt as local, proved readers
+
+Why extraction "did nothing" before: with no free LLM quota, bank statements gave no monthly totals, Schedule III statements gave 2 fields,
+CIBIL print-outs (every glyph repeated 4x) were classed "other", the lender/EMI sheet was "other", and any PDF with an /Encrypt mark was
+refused even when it opens freely (the CMR report). Now, with NO AI at all, the real "Neelam" ZIP (146 files, 131 MB) reads in about 1 minute.
+New readers (server/documentAi): bankStatements.ts (every row proved by the running balance, checked against printed totals, capped SBI
+statements marked partial, split-month fragments stitched in derive.ts), financialStatements.ts (Schedule III, lakh/crore, current vs
+previous year, sums proved against printed totals), creditReports.ts (CIBIL consumer, commercial CMR report, 4x-glyph collapse),
+debtObligations.ts (EMI sheet total, sanction letters), companyIdentity.ts (CIN -> entity type, incorporation date).
+`reconciled` = computed from printed figures and proved by arithmetic (skips the printed-figure check). Derived vintage / profitability /
+bank average now auto-apply when their inputs are clean; GST annual turnover stays review-only.
+Local test harness idea: run the pipeline on the ZIP with DOCUMENT_AI_LLM_FALLBACK=off.
+Known open points: two directors' CIBIL scores conflict (user picks the promoter); multi-account bank average includes own-account transfers
+(kept at 0.8, review); DSCR needs annual principal repayments (not derivable from an EMI sheet, entered by the user); scanned FY23-24/24-25
+statements only read via OCR (first 5 pages); not browser-tested in this session.
+
 # Handoff (updated 2026-11-04, stopped because of the weekly usage limit)
 
 Rules for this project: FREE only (free OpenRouter key ~50 requests/day, Render free 512 MB / ~0.1 CPU / disk wiped on restart, local OCR). No paid services.

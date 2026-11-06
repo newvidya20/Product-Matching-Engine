@@ -24,6 +24,12 @@ import {
 
 const isEligible = (candidate: ExtractedField) => candidate.status !== 'rejected_validation';
 
+/** An input a derived value may rest on: it carries no doubt of its own (a prior-year copy is fine). */
+const isSoundInput = (candidate: ExtractedField) =>
+  candidate.sourceCheck !== 'failed' &&
+  candidate.reasons.every((reason) => reason === 'superseded_period' || reason === 'low_confidence') &&
+  candidate.confidence >= 0.7;
+
 interface DerivedInput {
   fieldId: string;
   ruleId: DerivationRuleId;
@@ -71,7 +77,7 @@ export function vintageYears(establishedOn: string, today: string): number | nul
 function deriveVintage(candidates: ExtractedField[], today: string): ExtractedField[] {
   const fieldId = 'businessVintageYears';
   if (ofField(candidates, fieldId).length > 0) return [];
-  const dates = ofField(candidates, 'identity.dateOfEstablishment');
+  const dates = ofField(candidates, 'identity.dateOfEstablishment').filter(isSoundInput);
   if (dates.length === 0 || new Set(dates.map((date) => date.value)).size > 1) return [];
   const years = vintageYears(String(dates[0].value), today);
   if (years === null) return [];
@@ -121,6 +127,8 @@ function deriveProfitability(candidates: ExtractedField[]): ExtractedField[] {
   else value = prior !== null && prior > 0 ? 'profitable_2plus_years' : 'profitable_1_year';
 
   const inputs = latest > 0 ? [...latestGroup, ...priorGroup] : latestGroup;
+  // A doubtful input (not found in the text, wrong source...) means the derived value would rest on a doubt.
+  if (inputs.some((input) => !isSoundInput(input) && !input.reasons.includes('superseded_period'))) return [];
   // A positive figure beside loss wording may really be a loss, so it decides nothing.
   if (inputs.some((input) => input.reasons.includes('loss_wording'))) return [];
   return [
@@ -129,7 +137,11 @@ function deriveProfitability(candidates: ExtractedField[]): ExtractedField[] {
       ruleId: 'profitability_from_pat',
       value,
       fromCandidateIds: inputs.map((input) => input.candidateId),
-      confidence: Math.min(...inputs.map((input) => input.confidence)),
+      // The candidates of one year agree (agreedAmount), so a year is as sure as its surest reading.
+      confidence: Math.min(
+        Math.max(...latestGroup.map((input) => input.confidence)),
+        ...(latest > 0 && priorGroup.length > 0 ? [Math.max(...priorGroup.map((input) => input.confidence))] : [])
+      ),
       source: latestGroup[0].source,
       period: latestPeriod,
     }),
@@ -151,6 +163,60 @@ const BANK_METRICS: readonly BankMetric[] = [
   { fieldId: 'financialProfile.averageMonthlyBankingBalance', read: (row) => row.closingBalance },
 ];
 
+/** Latest months an average is taken over. */
+const BANK_AVERAGE_MONTHS = 12;
+/** A statement fragment reaching within this many days of a month's ends counts as touching them (no transactions on a holiday). */
+const MONTH_EDGE_DAYS = 3;
+const DAY_MS = 86_400_000;
+const dayNumber = (date: string) => Math.floor(Date.parse(`${date}T00:00:00Z`) / DAY_MS);
+
+/**
+ * One account's figure for one month, or null when no complete, agreeing figure exists. A capped
+ * (partial) statement is never used. A statement covering the whole month stands alone; fragments
+ * (an SBI month downloaded in two halves) count only when they run on from each other and together
+ * span the month. Whole-month statements and fragment sets must agree, or the month is dropped.
+ */
+function monthFigure(
+  rows: BankMonthlyTotal[],
+  month: string,
+  read: (row: BankMonthlyTotal) => number | null,
+  combine: 'sum' | 'last' = 'sum'
+): { amount: number; rows: BankMonthlyTotal[] } | 'contradictory' | null {
+  const first = dayNumber(`${month}-01`);
+  const last = dayNumber(lastDayOfMonth(month));
+  const usable = rows.filter((row) => !row.partial);
+  const spans = (row: BankMonthlyTotal) => (row.coverFrom && row.coverTo ? [dayNumber(row.coverFrom), dayNumber(row.coverTo)] : null);
+  const whole = usable.filter((row) => {
+    const span = spans(row);
+    return !span || (span[0] <= first + MONTH_EDGE_DAYS && span[1] >= last - MONTH_EDGE_DAYS);
+  });
+  const options: Array<{ amount: number; rows: BankMonthlyTotal[] }> = [];
+  for (const row of whole) {
+    const amount = read(row);
+    if (amount !== null) options.push({ amount, rows: [row] });
+  }
+  const pieces = usable
+    .filter((row) => !whole.includes(row) && spans(row))
+    .sort((a, b) => (spans(a)![0] - spans(b)![0]));
+  if (pieces.length >= 2) {
+    let reach = first - 1;
+    let ok = true;
+    for (const piece of pieces) {
+      const [from, to] = spans(piece)!;
+      // Fragments must run on from each other: a gap loses days, an overlap would count them twice.
+      if (reach === first - 1 ? from > first + MONTH_EDGE_DAYS : from !== reach + 1) ok = false;
+      reach = Math.max(reach, to);
+    }
+    const amounts = pieces.map(read);
+    if (ok && reach >= last - MONTH_EDGE_DAYS && amounts.every((a): a is number => a !== null)) {
+      options.push({ amount: combine === 'sum' ? amounts.reduce((sum, a) => sum + a, 0) : amounts[amounts.length - 1], rows: pieces });
+    }
+  }
+  if (options.length === 0) return null;
+  if (options.some((option) => !currencyEqual(option.amount, options[0].amount))) return 'contradictory';
+  return options[0];
+}
+
 function deriveBankAverage(
   metric: BankMetric,
   candidates: ExtractedField[],
@@ -165,44 +231,48 @@ function deriveBankAverage(
     bySubject.set(key, [...(bySubject.get(key) ?? []), row]);
   }
 
-  const derived: ExtractedField[] = [];
-  let discriminator = 0;
+  // Each account's complete months.
+  const accounts: Array<Map<string, { amount: number; rows: BankMonthlyTotal[] }>> = [];
   for (const subjectRows of bySubject.values()) {
-    const months = new Map<string, { amount: number; row: BankMonthlyTotal }>();
-    let contradictory = false;
-    for (const row of subjectRows) {
-      const amount = metric.read(row);
-      if (amount === null) continue;
-      if (amount < 0 && definition?.signPolicy !== 'signed') {
-        contradictory = true;
-        continue;
-      }
-      const existing = months.get(row.month);
-      if (existing && !currencyEqual(existing.amount, amount)) contradictory = true;
-      if (!existing) months.set(row.month, { amount, row });
+    const months = new Map<string, { amount: number; rows: BankMonthlyTotal[] }>();
+    for (const month of new Set(subjectRows.map((row) => row.month))) {
+      const figure = monthFigure(subjectRows.filter((row) => row.month === month), month, metric.read, metric.fieldId.endsWith('Balance') ? 'last' : 'sum');
+      if (figure === 'contradictory' || figure === null) continue;
+      if (figure.amount < 0 && definition?.signPolicy !== 'signed') continue;
+      months.set(month, figure);
     }
-    if (contradictory || months.size < 3) continue;
-
-    const entries = [...months.entries()].sort(([a], [b]) => a.localeCompare(b));
-    const mean = entries.reduce((sum, [, entry]) => sum + entry.amount, 0) / entries.length;
-    const [lastMonth, last] = entries[entries.length - 1];
-    derived.push(
-      derivedCandidate({
-        fieldId: metric.fieldId,
-        ruleId: 'average_monthly_from_bank_table',
-        value: Math.round(mean),
-        fromCandidateIds: entries.map(([month, entry]) => `${entry.row.source.documentId}:bank:${month}`),
-        confidence: Math.min(...entries.map(([, entry]) => entry.row.confidence)),
-        source: last.row.source,
-        period: lastDayOfMonth(lastMonth),
-        subjectRef: last.row.subjectRef,
-        discriminator,
-        sourceCheck: entries.some(([, entry]) => entry.row.sourceCheck === 'failed') ? 'failed' : undefined,
-      })
-    );
-    discriminator += 1;
+    if (months.size > 0) accounts.push(months);
   }
-  return derived;
+  if (accounts.length === 0) return [];
+
+  // Several accounts: the borrower's turnover is what passes through all of them, so only months
+  // every account has are used, and the accounts' figures for a month are added.
+  const common = [...accounts[0].keys()].filter((month) => accounts.every((account) => account.has(month))).sort();
+  const chosen = common.slice(-BANK_AVERAGE_MONTHS);
+  if (chosen.length < 3) return [];
+  const monthly = chosen.map((month) => accounts.reduce((sum, account) => sum + account.get(month)!.amount, 0));
+  const mean = monthly.reduce((sum, amount) => sum + amount, 0) / monthly.length;
+  const usedRows = chosen.flatMap((month) => accounts.flatMap((account) => account.get(month)!.rows));
+  const lastRow = accounts[0].get(chosen[chosen.length - 1])!.rows[0];
+  const note =
+    accounts.length > 1
+      ? `Average of the combined monthly ${metric.fieldId.endsWith('Credits') ? 'credits' : 'closing balances'} of ${accounts.length} accounts over ${chosen.length} months (${chosen[0]} to ${chosen[chosen.length - 1]}). Includes any transfers between the borrower's own accounts: review before relying on it.`
+      : `Average of ${chosen.length} complete months (${chosen[0]} to ${chosen[chosen.length - 1]}) from the bank statement.`;
+  return [
+    derivedCandidate({
+      fieldId: metric.fieldId,
+      ruleId: 'average_monthly_from_bank_table',
+      value: Math.round(mean),
+      fromCandidateIds: usedRows.map((row) => `${row.source.documentId}:bank:${row.month}`),
+      // Several accounts add transfers between them: kept below auto-apply so a person looks at it.
+      confidence: accounts.length > 1 ? Math.min(0.8, ...usedRows.map((row) => row.confidence)) : Math.min(...usedRows.map((row) => row.confidence)),
+      source: { ...lastRow.source, snippet: note.slice(0, 300) },
+      period: lastDayOfMonth(chosen[chosen.length - 1]),
+      subjectRef: accounts.length > 1 ? null : lastRow.subjectRef,
+      discriminator: 0,
+      sourceCheck: usedRows.some((row) => row.sourceCheck === 'failed') ? 'failed' : undefined,
+    }),
+  ];
 }
 
 // ------------------------------------------------------------------ GSTR-3B months

@@ -17,6 +17,11 @@ import { getFieldDefinition } from '../../src/documentAi/fieldMap.ts';
 import type { DocumentType } from '../../src/types/documentAi.ts';
 import type { RawBankMonth, RawField } from './prompt.ts';
 import type { ParsedSheet } from './spreadsheet.ts';
+import { bankMonthsFromStatement } from './bankStatements.ts';
+import { readFinancialStatements } from './financialStatements.ts';
+import { readCompanyIdentity } from './companyIdentity.ts';
+import { readCreditReport } from './creditReports.ts';
+import { readObligationSheet, readSanctionLetter } from './debtObligations.ts';
 import { readGstr3b, type RawGstReturnPeriod } from './gstr3b.ts';
 import { normalizeFinancialYear, normalizePeriod, parseDate, type AmountUnit } from './validators.ts';
 
@@ -412,7 +417,11 @@ function readValue(kind: ValueKind, rest: string, next: string | undefined, labe
     }
     case 'text': {
       if (!/^\s*[:\-–|]/.test(rest)) return null; // a string needs `Label: value`, never prose
-      const value = afterSeparator.split(/\s{2,}|\s\|\s/)[0].trim();
+      // A name stops where the next printed label starts (`... Limited A.Y. 2025-26 PAN : ...`).
+      const value = afterSeparator
+        .split(/\s{2,}|\s\|\s/)[0]
+        .replace(/\s+(?:(?:A\.?\s?Y|F\.?\s?Y)\.?(?=[\s:])|(?:PAN|GSTIN|CIN|TAN|DIN|Code)).*$/i, '')
+        .trim();
       if (value.length < 3 || value.length > 120 || !/[A-Za-z]{2}/.test(value) || /^\d/.test(value)) return null;
       return { rawValue: value };
     }
@@ -751,7 +760,11 @@ function bankRow(
   return { ...location, month, totalCredits: credits, closingBalance: closing, statedUnit: null, unitText: null, confidence, subjectRef };
 }
 
-function bankMonthsFromText(pages: ReadonlyArray<readonly string[]>, confidence: number): RawBankMonth[] {
+function bankMonthsFromText(pages: ReadonlyArray<readonly string[]>, confidence: number, complete = true): RawBankMonth[] {
+  // Statements that list their transactions: every row proved by the running balance. One that did
+  // not reconcile falls through to a printed summary, which can be checked against the source.
+  const read = bankMonthsFromStatement(pages, confidence, complete);
+  if (read.months.length > 0 && (read.statement.reconciled || read.statement.truncated)) return read.months;
   const lines = pages.flatMap((page, pageIndex) => page.map((text) => ({ text: clean(text), page: pageIndex + 1 })));
   const subjectRef = lines.map((l) => l.text.match(ACCOUNT_NUMBER)?.[1] ?? null).find(Boolean) ?? null;
   const rows = new Map<string, RawBankMonth>();
@@ -871,6 +884,9 @@ function bankMonthsFromSheets(fileKind: 'xlsx' | 'csv', sheets: readonly ParsedS
   return [...rows.values()];
 }
 
+/** Fields the statement reader must find before it replaces the generic scan. */
+const STATEMENT_MIN_FIELDS = 6;
+
 // ------------------------------------------------------------------ Entry point
 
 /** Labelled values from the document's own text. Returns nothing for a field it cannot read for certain. */
@@ -889,19 +905,36 @@ export function extractLocally(input: LocalExtractionInput): LocalExtraction {
   const generic = emitted.map((e) => e.raw);
   const itrAck =
     documentType === 'itr' && content.kind === 'text' ? readItrAcknowledgement(content.pages, confidence) : null;
-  const own = [...(gstr3b?.fields ?? []), ...(itrAck ?? [])].filter(
-    (field) => !generic.some((g) => g.fieldId === field.fieldId && g.rawValue === field.rawValue)
-  );
+  // A lender / EMI table or a sanction letter: totals computed from its rows, proved by the rows themselves.
+  const debt =
+    documentType !== 'existing_sanction_letter'
+      ? []
+      : content.kind === 'sheets'
+        ? readObligationSheet(content.sheets, confidence)
+        : readSanctionLetter(content.pages, confidence);
+  const identity = content.kind === 'text' ? readCompanyIdentity(content.pages, confidence) : [];
+  const credit = documentType === 'credit_report' && content.kind === 'text' ? readCreditReport(content.pages, confidence) : null;
+  // A balance sheet / P&L in Schedule III form: read by line name and year column, with unit and totals checked.
+  const read =
+    documentType === 'financial_statement' && content.kind === 'text' ? readFinancialStatements(content.pages, confidence) : [];
+  // A real statement gives many fields at once; a stray figure or two is left to the generic line scan.
+  const statements = read.length >= STATEMENT_MIN_FIELDS ? read : [];
+  const statementIds = new Set(statements.map((field) => field.fieldId));
+  // The statement reader's fields are kept whole: they replace the generic scan's, never merge into them.
+  const own = [...(gstr3b?.fields ?? []), ...(itrAck ?? []), ...debt, ...(credit?.fields ?? []), ...identity]
+    .filter((field) => !generic.some((g) => g.fieldId === field.fieldId && g.rawValue === field.rawValue))
+    .concat(statements);
   const seen = new Set<string>();
   const fields = [
-    ...emitted.filter((e) => !seen.has(e.key) && seen.add(e.key)).map((e) => e.raw),
+    // Where the dedicated reader found a field, its period-tagged values replace the generic line scan's.
+    ...emitted.filter((e) => !statementIds.has(e.raw.fieldId) && !seen.has(e.key) && seen.add(e.key)).map((e) => e.raw),
     ...own.filter((field) => fieldAllowed(field.fieldId, documentType)),
   ];
   const bankMonthlyTotals =
     documentType !== 'bank_statement'
       ? []
       : content.kind === 'text'
-        ? bankMonthsFromText(content.pages, confidence)
+        ? bankMonthsFromText(content.pages, confidence, complete)
         : bankMonthsFromSheets(content.fileKind, content.sheets, confidence);
   const recognisedForm = gstr3b?.period ? 'gstr3b' : itrAck ? 'itr_acknowledgement' : undefined;
   return {

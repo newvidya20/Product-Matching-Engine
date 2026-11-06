@@ -215,8 +215,7 @@ describe('dropped candidates (contract 4.2 rule 1)', () => {
       run([successDocument(DOC_STATEMENT, 'financial_statement', [profitability('profitability_from_pat')])]),
       'profitabilityStatus'
     );
-    assert.equal(valid.status, 'needs_verification');
-    assert.ok(valid.reasons.includes('derived_value'));
+    assert.equal(valid.status, 'auto_applied');
   });
 });
 
@@ -1452,7 +1451,7 @@ describe('injection, period and unit flags (contract 4.2 rule 4)', () => {
     assert.ok(r.reasons.includes('ambiguous_unit'));
   });
 
-  it('marks a derived value needs_verification with derived_value', () => {
+  it('applies a derived vintage on its own when its inputs were verified (derived rules that follow exactly from checked inputs)', () => {
     const r = result(
       run([
         successDocument(DOC_REG, 'registration_certificate', [
@@ -1470,8 +1469,8 @@ describe('injection, period and unit flags (contract 4.2 rule 4)', () => {
       ]),
       'businessVintageYears'
     );
-    assert.equal(r.status, 'needs_verification');
-    assert.ok(r.reasons.includes('derived_value'));
+    assert.equal(r.status, 'auto_applied');
+    assert.ok(!r.reasons.includes('derived_value'));
   });
 });
 
@@ -1611,7 +1610,7 @@ describe('conflicts (contract 4.3)', () => {
     assert.equal(r.value, 10000000);
   });
 
-  it('keeps agreeing values as needs_verification when any candidate needs verification', () => {
+  it('an agreeing low-confidence copy does not hold back a value a strong reading already gave', () => {
     const r = result(
       run([
         successDocument(DOC_STATEMENT, 'financial_statement', [revenueIn(DOC_STATEMENT, 10000000, '1,00,00,000', 0.95)]),
@@ -1619,7 +1618,7 @@ describe('conflicts (contract 4.3)', () => {
       ]),
       REVENUE
     );
-    assert.equal(r.status, 'needs_verification');
+    assert.equal(r.status, 'auto_applied');
     assert.equal(r.value, 10000000);
   });
 

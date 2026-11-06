@@ -27,6 +27,7 @@ import type {
   SourceRef,
 } from '../../src/types/documentAi.ts';
 import { deriveCandidates } from './derive.ts';
+import type { DerivationRuleId } from '../../src/types/documentAi.ts';
 import type { RawBankMonth, RawField, RawLocation } from './prompt.ts';
 import { periodMonths, type RawGstReturnPeriod } from './gstr3b.ts';
 import {
@@ -342,6 +343,17 @@ function snippetShowsValue(definition: FieldDefinition, candidate: ExtractedFiel
  * placeholders, except ambiguous_unit, which needs the stated unit and cannot be recomputed.
  * Returns null for a dropped candidate. Idempotent.
  */
+/**
+ * Server-computed values that follow exactly from inputs which each passed every check (an
+ * establishment date, two years' profit, complete bank months). They apply on their own once their
+ * inputs are at auto-apply confidence. GST turnover from monthly returns is not here: it stays reviewed.
+ */
+const DERIVED_AUTO_OK: ReadonlySet<DerivationRuleId> = new Set<DerivationRuleId>([
+  'vintage_from_establishment_date',
+  'profitability_from_pat',
+  'average_monthly_from_bank_table',
+]);
+
 export function settleCandidate(
   candidate: ExtractedField,
   ctx: SettleContext,
@@ -367,11 +379,11 @@ export function settleCandidate(
   if (isRejected) reasons.add('validation_failed');
   if (nonInr) reasons.add('non_inr_currency');
   if (candidate.confidence < ctx.threshold) reasons.add('low_confidence');
-  if (!isDerived && !snippetShowsValue(definition, candidate)) reasons.add('value_not_in_snippet');
+  if (!isDerived && !candidate.reconciled && !snippetShowsValue(definition, candidate)) reasons.add('value_not_in_snippet');
   if (!definition.sourceDocumentTypes.includes(documentType)) reasons.add('unexpected_source_type');
   if (ctx.injectedDocuments.has(candidate.source.documentId)) reasons.add('injection_suspected');
   if (!isDerived && definition.periodScoped && candidate.period === null) reasons.add('period_unknown');
-  if (isDerived) reasons.add('derived_value');
+  if (isDerived && !DERIVED_AUTO_OK.has(candidate.derivation!.ruleId)) reasons.add('derived_value');
   if (candidate.sourceCheck === 'failed') reasons.add('not_in_source');
   if (!isDerived && value !== null) {
     for (const reason of wordingReasons(definition, candidate, value)) reasons.add(reason);
@@ -454,7 +466,12 @@ export function buildCandidates(
 
     const source = buildSource(raw, ctx);
     const value = isValue ? normalized.value : null;
-    const finding = checkAgainstSource(verify, definition, raw, source, value);
+    // A value a reader computed and proved by arithmetic has no single printed figure to find; it
+    // is accepted as verified, and its snippet quotes the printed figures it came from.
+    const finding: SourceFinding =
+      raw.reconciled && value !== null
+        ? { check: 'verified', rowLabel: raw.snippet.slice(0, 200) }
+        : checkAgainstSource(verify, definition, raw, source, value);
 
     const settled = settleCandidate(
       {
@@ -475,6 +492,7 @@ export function buildCandidates(
         unitText: raw.unitText,
         sourceCheck: finding.check,
         rowLabel: finding.rowLabel,
+        ...(raw.reconciled ? { reconciled: true } : {}),
         ...(finding.sourceSign ? { sourceSign: finding.sourceSign } : {}),
         ...(finding.scaleHeaders && definition.unit === 'currency' ? { scaleHeaders: finding.scaleHeaders } : {}),
       },
@@ -489,6 +507,8 @@ function parseBankAmount(raw: string | null, row: RawBankMonth, verify: SourceVe
   if (raw === null) return null;
   const parsed = parseIndianAmount(raw, { statedUnit: row.statedUnit, documentType: 'bank_statement' });
   if (!parsed.ok || parsed.ambiguousUnit) return null;
+  // Proved by arithmetic over the statement's own rows (bankStatements.ts): no printed figure to find.
+  if (row.reconciled) return parsed.value;
   if (hasForeignUnit(`${row.snippet} ${row.unitText ?? ''}`)) return null;
   if (row.statedUnit !== null && !unitTextSupports(row.statedUnit, row.unitText)) return null;
   const unitAgrees = unitAgreesWithSnippet({
@@ -549,6 +569,9 @@ export function buildBankMonthlyTotals(rows: RawBankMonth[], ctx: DocumentContex
       subjectRef: maskSubjectRef(row.subjectRef, ctx.documentType),
       source: buildSource(row, ctx),
       confidence,
+      ...(row.coverFrom ? { coverFrom: row.coverFrom } : {}),
+      ...(row.coverTo ? { coverTo: row.coverTo } : {}),
+      ...(row.partial ? { partial: true } : {}),
       ...(unreadable ? { sourceCheck: 'failed' as const } : {}),
     });
   }
@@ -849,7 +872,16 @@ function resolveField(
         ''
       );
       group = dated.filter((candidate) => periodEndDate(candidate.period) === latestEnd);
-      undated = contenders.filter((candidate) => periodEndDate(candidate.period) === null);
+      // An undated figure that is exactly an older year's figure is that year's, not a rival for this one.
+      const olderDated = dated.filter((candidate) => (periodEndDate(candidate.period) as string) < latestEnd);
+      undated = contenders.filter(
+        (candidate) =>
+          periodEndDate(candidate.period) === null &&
+          !olderDated.some(
+            (older) =>
+              older.value !== null && candidate.value !== null && older.value === candidate.value
+          )
+      );
       listed = candidates.map((candidate) => {
         const end = periodEndDate(candidate.period);
         const superseded = end !== null && end < latestEnd && candidate.status !== 'rejected_validation';
@@ -878,7 +910,18 @@ function resolveField(
   );
   if (undatedDisagrees && !reasons.includes('period_unknown')) reasons.push('period_unknown');
 
-  const needsReview = undatedDisagrees || group.some((candidate) => candidate.status === 'needs_verification');
+  // A weak reading (an OCR copy, below auto-apply only for that reason) of the very value a strong
+  // reading already gave adds no doubt: it agrees, so it does not hold the field back.
+  const strongAgrees = group.some(
+    (candidate) => candidate.status === 'auto_applied' && candidate === chosen
+  );
+  const needsReview =
+    undatedDisagrees ||
+    group.some(
+      (candidate) =>
+        candidate.status === 'needs_verification' &&
+        !(strongAgrees && candidate.reasons.length > 0 && candidate.reasons.every((reason) => reason === 'low_confidence'))
+    );
   return {
     multipleSubjects: false,
     result: {

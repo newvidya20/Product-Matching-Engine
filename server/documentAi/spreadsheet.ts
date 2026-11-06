@@ -3,6 +3,7 @@
  * because the parser in server/pdfExtractionService.ts is private and drops sheet names and cell
  * references. Throws on a corrupt spreadsheet with JSZip's own text: pipeline.ts maps that to a code.
  */
+import { collapseRepeatedGlyphs } from './creditReports.ts';
 import JSZip from 'jszip';
 import { DOCUMENT_AI_LIMITS, type SpreadsheetPreview } from '../../src/types/documentAi.ts';
 import type { DocumentSource, PdfReadFailure, SourceRow } from './validators.ts';
@@ -594,7 +595,10 @@ export async function readPdfText(bytes: Uint8Array, signal: AbortSignal, option
     const stop = AbortSignal.any([signal, timeout]);
     const startedAt = Date.now();
     try {
-      const { pages, totalPages } = await raceSignal(readPdfLines(bytes, stop, engine, maxPages), stop);
+      const read = await raceSignal(readPdfLines(bytes, stop, engine, maxPages), stop);
+      // Print-to-PDF 'fake bold' repeats every glyph run 4 times (`712712712712`): collapsed here, once.
+      const pages = collapseRepeatedGlyphs(read.pages);
+      const totalPages = read.totalPages;
       const lines = pages.flat();
       const characters = pdfTextChars(lines);
       const source: DocumentSource = characters < MIN_PDF_TEXT_CHARS ? { kind: 'no_text' } : { kind: 'pdf', lines, pages };

@@ -236,6 +236,8 @@ export interface ExtractedField {
   sourceSign?: SourceSign | null;
   /** Scale headers the server read on the cited page or sheet, for currency fields. Absent when it read none. */
   scaleHeaders?: AmountUnit[];
+  /** Computed from printed figures by a deterministic reader and proved by arithmetic (sums to a printed total). */
+  reconciled?: boolean;
   /** Present on server-computed values: the rule and the candidates it used. */
   derivation?: { ruleId: DerivationRuleId; fromCandidateIds: string[] };
 }
@@ -280,6 +282,11 @@ export interface BankMonthlyTotal {
   source: SourceRef;
   /** `failed` when the server could not read the file: an average of this row carries not_in_source. */
   sourceCheck?: SourceCheck;
+  /** First and last day (YYYY-MM-DD) the statement this row came from covers. */
+  coverFrom?: string;
+  coverTo?: string;
+  /** The statement is cut off (a capped online statement): never used for an average. */
+  partial?: boolean;
 }
 
 /**

@@ -222,6 +222,12 @@ export interface RawLocation {
 }
 
 export interface RawField extends RawLocation {
+  /**
+   * Set by a deterministic reader when the value is not printed as one figure but was computed from
+   * printed figures and proved by arithmetic (lines sum to a printed total, balances reconcile).
+   * The source check then accepts it; the snippet must quote the figures it was computed from.
+   */
+  reconciled?: boolean;
   fieldId: string;
   rawValue: string;
   enumValue: string | null;
@@ -233,6 +239,13 @@ export interface RawField extends RawLocation {
 }
 
 export interface RawBankMonth extends RawLocation {
+  /** Computed from proved transaction rows (bankStatements.ts), not printed as one figure. */
+  reconciled?: boolean;
+  /** First and last date (YYYY-MM-DD) of the statement fragment this month row covers. */
+  coverFrom?: string | null;
+  coverTo?: string | null;
+  /** The file lists only part of what the bank holds (a capped statement): never used for averages. */
+  partial?: boolean;
   month: string;
   totalCredits: string | null;
   closingBalance: string | null;
