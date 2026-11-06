@@ -223,6 +223,13 @@ type DefinitionInput = Omit<
 
 function field(input: DefinitionInput): FieldDefinition {
   const extractionMode = input.extractionMode ?? 'direct';
+  // The borrower's own intake profile / loan application states these too (it is the app's own form on
+  // paper). Its figures are self-declared, so they sit beside the audited ones and surface as a
+  // disagreement when they differ; they are never trusted over a statement.
+  const sources =
+    extractionMode === 'direct' && (input.policy ?? 'stated') === 'stated' && !(input.sourceDocumentTypes ?? []).includes('loan_application')
+      ? [...(input.sourceDocumentTypes ?? []), 'loan_application' as const]
+      : input.sourceDocumentTypes;
   return {
     allowedValues: [],
     policy: 'stated',
@@ -230,6 +237,7 @@ function field(input: DefinitionInput): FieldDefinition {
     hasVisibleInput: true,
     defaultValue: '',
     ...input,
+    sourceDocumentTypes: sources,
     extractionMode,
     extractable: extractionMode !== 'none',
   };

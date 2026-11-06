@@ -19,6 +19,7 @@ import type { RawBankMonth, RawField } from './prompt.ts';
 import type { ParsedSheet } from './spreadsheet.ts';
 import { bankMonthsFromStatement } from './bankStatements.ts';
 import { readFinancialStatements } from './financialStatements.ts';
+import { readProfileForm } from './profileForm.ts';
 import { readCompanyIdentity } from './companyIdentity.ts';
 import { readCreditReport } from './creditReports.ts';
 import { readObligationSheet, readSanctionLetter } from './debtObligations.ts';
@@ -912,6 +913,9 @@ export function extractLocally(input: LocalExtractionInput): LocalExtraction {
       : content.kind === 'sheets'
         ? readObligationSheet(content.sheets, confidence)
         : readSanctionLetter(content.pages, confidence);
+  // The app's own intake profile (the form printed as label / value rows).
+  const profile = documentType === 'loan_application' && content.kind === 'text' ? readProfileForm(content.pages, confidence) : [];
+  const profileIds = new Set(profile.map((field) => field.fieldId));
   const identity = content.kind === 'text' ? readCompanyIdentity(content.pages, confidence) : [];
   const credit = documentType === 'credit_report' && content.kind === 'text' ? readCreditReport(content.pages, confidence) : null;
   // A balance sheet / P&L in Schedule III form: read by line name and year column, with unit and totals checked.
@@ -923,11 +927,12 @@ export function extractLocally(input: LocalExtractionInput): LocalExtraction {
   // The statement reader's fields are kept whole: they replace the generic scan's, never merge into them.
   const own = [...(gstr3b?.fields ?? []), ...(itrAck ?? []), ...debt, ...(credit?.fields ?? []), ...identity]
     .filter((field) => !generic.some((g) => g.fieldId === field.fieldId && g.rawValue === field.rawValue))
-    .concat(statements);
+    .concat(statements)
+    .concat(profile);
   const seen = new Set<string>();
   const fields = [
     // Where the dedicated reader found a field, its period-tagged values replace the generic line scan's.
-    ...emitted.filter((e) => !statementIds.has(e.raw.fieldId) && !seen.has(e.key) && seen.add(e.key)).map((e) => e.raw),
+    ...emitted.filter((e) => !statementIds.has(e.raw.fieldId) && !profileIds.has(e.raw.fieldId) && !seen.has(e.key) && seen.add(e.key)).map((e) => e.raw),
     ...own.filter((field) => fieldAllowed(field.fieldId, documentType)),
   ];
   const bankMonthlyTotals =
