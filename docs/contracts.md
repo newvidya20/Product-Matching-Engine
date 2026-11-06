@@ -62,6 +62,9 @@ export function readSpreadsheetPreview(bytes: Uint8Array, kind: 'xlsx' | 'csv'):
   374 seconds (4 × 90 s, plus up to 14 s of backoff), and a file makes up to two calls, while `jobs.ts` allows a file 300
   seconds. A file can therefore end in `llm_timeout` at 300 seconds, before its retries run out. That code is retryable.
 - Validators live in `server/documentAi/validators.ts` with the signatures in section 6.
+- The local `credit_analysis_report` reader uses the report's stated FY columns and labelled rows; it ignores policy
+  thresholds and derived ratios. A printed DSCR is exposed only as `financialProfile.statedDscr` for review, and can
+  be explicitly accepted into Eligibility Check's `dscrStated` input. It never overwrites the assessment's computed DSCR.
 
 ## 3. Extracted field JSON
 
@@ -178,7 +181,7 @@ own snippet:
 |---|---|---|
 | `xlsx`, `csv` | Parsed visible cells. Hidden sheets, rows (including zero height) and columns are excluded, and do not reach the model | `rawValue` is in no visible cell, preferring the cited cell. For an enum, its evidence keyword is in no cell |
 | Digital `pdf` | The text layer, via `pdfjs-dist`, by page. Digital means at least 50 non-space characters | Any digits of `snippet` or `rawValue` are absent. A string's `rawValue`, or an enum's evidence keyword, is absent. An inline unit differs from the unit printed beside that figure |
-| A PDF that will not parse, or takes over 20 seconds | Nothing | Always. A file must not escape the check by breaking the parser. The pdf.js task is destroyed on timeout |
+| A PDF that will not parse, or times out while loading its text layer | Nothing | Always. A file must not escape the check by breaking the parser. The pdf.js task is destroyed on timeout; each read attempt is capped at 60 seconds by default and retried once |
 | Scanned `pdf`, images | Nothing | Never: `no_text`. See section 12 |
 
 `unitText` must also be in the source where a source exists. A failure gives `not_in_source` and caps at
@@ -536,7 +539,8 @@ A document must belong to the session in its path, and a job likewise, else 404.
 | `GET /sessions?assessmentId=` | | `FindSessionResponse` | `session: null` when none |
 | `GET /sessions/:sessionId` | | `DocumentSessionState` | 404 until first upload, which the client treats as empty |
 | `POST /sessions/:sessionId/link` | `LinkSessionRequest` | `DocumentSessionState` | Assessment must exist. A session has one assessment and vice versa; a different existing link is 409 |
-| `POST /sessions/:sessionId/documents` | `UploadDocumentRequest` | 201 `UploadDocumentResponse` | Creates the session if new. One file per request |
+| `POST /sessions/:sessionId/uploads` | Raw `application/octet-stream`; encoded `X-File-Name` header | 201 `UploadDocumentResponse` | Streams one file or ZIP. Creates the session if new |
+| `POST /sessions/:sessionId/documents` | `UploadDocumentRequest` | 201 `UploadDocumentResponse` | Legacy base64 JSON upload; one file per request |
 | `GET /sessions/:sessionId/documents` | | `ListDocumentsResponse` | |
 | `PATCH /sessions/:sessionId/documents/:documentId` | `UpdateDocumentRequest` | `DocumentSessionState` | Sets `documentTypeOverridden`; client then re-extracts with `force` |
 | `GET .../documents/:documentId/file?disposition=inline\|attachment` | | bytes | See section 7.4 |
@@ -547,16 +551,26 @@ A document must belong to the session in its path, and a job likewise, else 404.
 | `PUT /sessions/:sessionId/edits` | `UpdateEditsRequest` | `SessionEdits` | Unknown field IDs: 400 |
 
 If disabled: upload and extract give 403 `disabled`. Read, delete, edits and settings still work, so documents stay
-manageable. A missing `GEMINI_API_KEY` allows upload; the job fails per document with `llm_not_configured`.
+manageable. Local extraction works without an LLM key; only optional model fallback is unavailable.
 
 ### 7.3 Upload checks
 
-Reuse the existing base64 JSON path: `express.json` is already 100 MB, so add no parser. ui-builder pre-checks size
+The app uses `POST /sessions/:sessionId/uploads` with raw `application/octet-stream` bytes and an encoded
+`X-File-Name`. The request is streamed to a temporary file; it is not parsed as JSON or buffered as base64.
+The whole request is capped at 2 GB (`DOCUMENT_AI_MAX_UPLOAD_MB` can lower or raise this limit), one document
+inside a ZIP is capped at 100 MB, and the assessment's stored documents are capped at 1 GB. ZIP entries are read
+one at a time; nested ZIPs and junk files are skipped, and each accepted entry is checked against its actual
+uncompressed bytes. ZIP limits are 300 files per assessment. Temporary upload files are removed after processing.
+
+The older `POST /sessions/:sessionId/documents` JSON/base64 endpoint remains for compatibility; new clients should
+use the streamed endpoint so large files do not need a base64 copy in memory. ui-builder pre-checks the same limits
 client-side. On the server, in order:
 
-1. Enabled, session ID valid, `fileName` a non-empty string, `base64` valid.
-2. Decoded size up to 12 MB (413 `file_too_large`), 25 files per session (`too_many_files`), 100 MB per session (`session_too_large`).
-3. Kind from magic bytes, in `fileValidation.ts`. The extension must agree, else 415 `type_mismatch`. Client `mimeType` is ignored.
+1. Enabled, session ID valid, non-empty file name, and a valid upload body.
+2. One document up to 100 MB (413 `file_too_large`), 300 files per assessment (`too_many_files`), and 1 GB of
+   stored documents per assessment (`session_too_large`).
+3. Kind from magic bytes, in `fileValidation.ts`. The extension must agree, else 415 `type_mismatch`. Client
+   `mimeType` is ignored.
 
 | Kind | Extensions | Check |
 |---|---|---|
@@ -600,8 +614,12 @@ offered only on the New Assessment page, and History offers `file_only`. Edited 
 
 Extraction can take over 30 seconds per file, so `POST .../extract` returns 202 immediately.
 
-- Queue: in-process, global concurrency 2, FIFO, 300 seconds per file via `AbortController`. Files sequentially
-  go to `extractDocument`. One failing document does not stop the rest.
+- Queue: in-process, global concurrency 2 by default, FIFO. A memory gate runs large files alone and reserves
+  projected RSS before PDF extraction (PDF.js copies the input; scanned pages may also need render/OCR memory).
+  If the current RSS plus the estimate exceeds 90% of the container limit for 60 seconds, the document fails
+  retryably with `server_busy` rather than risking a process crash. PDF text extraction reads at most 150 pages
+  by default; local OCR reads at most the first 5 scanned pages. A file has a bounded work timer and abort path.
+  One failing document does not stop the rest.
 - Terminal status: `completed`; `completed_with_errors` if some failed; `failed` if all did.
 - Persist the job after every state change. On boot, any `queued` or `running` job becomes `failed`, and its unfinished
   documents `failed` with `interrupted`. The client offers Retry.

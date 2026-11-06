@@ -20,6 +20,7 @@ const DOCUMENT_TYPE_GUIDE: Record<DocumentType, string> = {
   itr: 'income tax return or its acknowledgement or computation',
   pan_card: 'PAN card',
   credit_report: 'credit bureau report such as CIBIL, Experian, Equifax or CRIF',
+  credit_analysis_report: 'a credit analysis or triangulation report summarising financial, banking and bureau data',
   registration_certificate: 'incorporation certificate, Udyam registration, partnership or LLP deed',
   loan_application: "the borrower's own loan application or request for funding",
   existing_sanction_letter: "a lender's letter about a facility that already exists",

@@ -11,7 +11,7 @@
     "preview": "vite preview",
     "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true });\"",
     "lint": "tsc --noEmit",
-    "test": "node --import tsx --test tests/field-map.test.ts tests/validators.test.ts tests/merge.test.ts tests/apply-field-results.test.ts tests/fixtures.test.ts tests/llm-provider.test.ts tests/document-formats.test.ts tests/local-classifier.test.ts tests/local-extraction.test.ts tests/offline-extraction.test.ts tests/ocr-safety.test.ts tests/eligibility-engine.test.ts tests/core-credit-rules.test.ts tests/eligibility-prefill.test.ts tests/eligibility-routes.test.ts tests/gstr3b.test.ts tests/bank-statements.test.ts tests/financial-statements.test.ts tests/debt-obligations.test.ts",
+    "test": "node --import tsx --test tests/field-map.test.ts tests/validators.test.ts tests/merge.test.ts tests/apply-field-results.test.ts tests/fixtures.test.ts tests/llm-provider.test.ts tests/document-formats.test.ts tests/local-classifier.test.ts tests/local-extraction.test.ts tests/offline-extraction.test.ts tests/document-intelligence.test.ts tests/ocr-safety.test.ts tests/eligibility-engine.test.ts tests/core-credit-rules.test.ts tests/eligibility-prefill.test.ts tests/eligibility-routes.test.ts tests/gstr3b.test.ts tests/bank-statements.test.ts tests/financial-statements.test.ts tests/debt-obligations.test.ts",
     "index:study-material": "tsx scripts/buildStudyMaterialReference.ts"
   },
   "engines": {

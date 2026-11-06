@@ -206,9 +206,10 @@ const NAME_SOURCES: readonly DocumentType[] = [
   'registration_certificate',
   'loan_application',
   'credit_report',
+  'credit_analysis_report',
 ];
-const STATEMENT_SOURCES: readonly DocumentType[] = ['financial_statement', 'itr'];
-const BALANCE_SOURCES: readonly DocumentType[] = ['financial_statement'];
+const STATEMENT_SOURCES: readonly DocumentType[] = ['financial_statement', 'itr', 'credit_analysis_report'];
+const BALANCE_SOURCES: readonly DocumentType[] = ['financial_statement', 'credit_analysis_report'];
 
 type DefinitionInput = Omit<
   FieldDefinition,
@@ -407,7 +408,7 @@ export const FIELD_DEFINITIONS: readonly FieldDefinition[] = [
     label: 'PAN (review only)',
     valueType: 'string',
     target: { kind: 'review_only', key: 'pan' },
-    sourceDocumentTypes: ['pan_card', 'itr', 'financial_statement', 'credit_report', 'loan_application'],
+    sourceDocumentTypes: ['pan_card', 'itr', 'financial_statement', 'credit_report', 'loan_application', 'credit_analysis_report'],
     hasVisibleInput: false,
     defaultValue: null,
   }),
@@ -417,7 +418,7 @@ export const FIELD_DEFINITIONS: readonly FieldDefinition[] = [
     label: 'GSTIN (review only)',
     valueType: 'string',
     target: { kind: 'review_only', key: 'gstin' },
-    sourceDocumentTypes: ['gst_certificate', 'gst_return', 'loan_application'],
+    sourceDocumentTypes: ['gst_certificate', 'gst_return', 'loan_application', 'credit_analysis_report'],
     hasVisibleInput: false,
     defaultValue: null,
   }),
@@ -558,7 +559,7 @@ export const FIELD_DEFINITIONS: readonly FieldDefinition[] = [
     label: 'Annual Turnover / Income',
     valueType: 'number',
     target: { kind: 'form', key: 'annualTurnoverOrIncome' },
-    sourceDocumentTypes: ['financial_statement', 'itr', 'gst_return'],
+    sourceDocumentTypes: ['financial_statement', 'itr', 'gst_return', 'credit_analysis_report'],
     extractionMode: 'mirror',
     mirrorOf: 'financialProfile.annualRevenue',
     mirrorFallbacks: ['financialProfile.gstAnnualTurnover'],
@@ -572,7 +573,7 @@ export const FIELD_DEFINITIONS: readonly FieldDefinition[] = [
     label: 'Credit Bureau Score (CIBIL / Commercial)',
     valueType: 'number',
     target: { kind: 'form', key: 'creditScore' },
-    sourceDocumentTypes: ['credit_report'],
+    sourceDocumentTypes: ['credit_report', 'credit_analysis_report'],
     extractionMode: 'mirror',
     mirrorOf: 'financialProfile.personalCibilScore',
     mirrorFallbacks: ['financialProfile.promoterCibilScore'],
@@ -599,7 +600,7 @@ export const FIELD_DEFINITIONS: readonly FieldDefinition[] = [
     label: 'Existing Monthly EMI',
     valueType: 'number',
     target: { kind: 'form', key: 'existingEmiObligations' },
-    sourceDocumentTypes: ['credit_report', 'existing_sanction_letter', 'loan_application'],
+    sourceDocumentTypes: ['credit_report', 'existing_sanction_letter', 'loan_application', 'credit_analysis_report'],
     extractionMode: 'mirror',
     mirrorOf: 'financialProfile.existingMonthlyEmi',
     unit: 'currency',
@@ -648,7 +649,7 @@ export const FIELD_DEFINITIONS: readonly FieldDefinition[] = [
   money('currentLiabilities', 'Current Liabilities', BALANCE_SOURCES),
   money('totalAssets', 'Total Assets', BALANCE_SOURCES, { hasVisibleInput: false }),
   money('totalLiabilities', 'Total Liabilities', BALANCE_SOURCES, { hasVisibleInput: false }),
-  money('totalOutstandingBorrowings', 'Total Outstanding Borrowings', ['financial_statement', 'credit_report'], {
+  money('totalOutstandingBorrowings', 'Total Outstanding Borrowings', ['financial_statement', 'credit_report', 'credit_analysis_report'], {
     hasVisibleInput: false,
   }),
   money('totalOutsideLiabilities', 'Total Outside Liabilities', BALANCE_SOURCES),
@@ -660,7 +661,7 @@ export const FIELD_DEFINITIONS: readonly FieldDefinition[] = [
   money('annualScheduledPrincipalRepayments', 'Annual Scheduled Principal Repayments',
     ['financial_statement', 'existing_sanction_letter'], { ...ANNUAL, hasVisibleInput: false }),
   money('existingMonthlyEmi', 'Existing Monthly EMI (Financial)',
-    ['credit_report', 'existing_sanction_letter', 'loan_application'], {
+    ['credit_report', 'existing_sanction_letter', 'loan_application', 'credit_analysis_report'], {
       hasVisibleInput: false,
       periodScoped: false,
     }),
@@ -669,7 +670,22 @@ export const FIELD_DEFINITIONS: readonly FieldDefinition[] = [
     signPolicy: 'signed',
     hasVisibleInput: false,
   }),
-  money('averageMonthlyBankingCredits', 'Monthly Banking Credits', ['bank_statement'], {
+  field({
+    fieldId: 'financialProfile.statedDscr',
+    section: '04',
+    label: 'Stated DSCR (review only)',
+    valueType: 'number',
+    target: { kind: 'review_only', key: 'statedDscr' },
+    sourceDocumentTypes: ['credit_analysis_report'],
+    unit: 'ratio',
+    signPolicy: 'non_negative',
+    min: 0,
+    max: 1000,
+    periodScoped: true,
+    hasVisibleInput: false,
+    defaultValue: null,
+  }),
+  money('averageMonthlyBankingCredits', 'Monthly Banking Credits', ['bank_statement', 'credit_analysis_report'], {
     derivation: 'average_monthly_from_bank_table',
   }),
   money('averageMonthlyBankingBalance', 'Average Monthly Banking Balance', ['bank_statement'], {
@@ -720,7 +736,7 @@ export const FIELD_DEFINITIONS: readonly FieldDefinition[] = [
     label: 'Personal CIBIL',
     valueType: 'number',
     target: { kind: 'financial', key: 'personalCibilScore' },
-    sourceDocumentTypes: ['credit_report'],
+    sourceDocumentTypes: ['credit_report', 'credit_analysis_report'],
     unit: 'score',
     signPolicy: 'non_negative',
     min: 300,
@@ -732,7 +748,7 @@ export const FIELD_DEFINITIONS: readonly FieldDefinition[] = [
     label: 'Promoter CIBIL',
     valueType: 'number',
     target: { kind: 'financial', key: 'promoterCibilScore' },
-    sourceDocumentTypes: ['credit_report'],
+    sourceDocumentTypes: ['credit_report', 'credit_analysis_report'],
     hasVisibleInput: false,
     unit: 'score',
     signPolicy: 'non_negative',
@@ -754,7 +770,7 @@ export const FIELD_DEFINITIONS: readonly FieldDefinition[] = [
     label: 'Commercial CMR Rank',
     valueType: 'number',
     target: { kind: 'financial', key: 'commercialCmrRank' },
-    sourceDocumentTypes: ['credit_report'],
+    sourceDocumentTypes: ['credit_report', 'credit_analysis_report'],
     unit: 'rank',
     signPolicy: 'non_negative',
     min: 1,

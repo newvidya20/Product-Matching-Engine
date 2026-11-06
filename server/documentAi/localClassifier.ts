@@ -5,6 +5,7 @@
  * model, or, with no model available, is treated as 'other' (nothing is extracted from it).
  */
 import type { DocumentType } from '../../src/types/documentAi.ts';
+import { isCreditAnalysisReportTitle } from './creditAnalysisReport.ts';
 
 const RULES: Array<{ type: DocumentType; test: (text: string) => boolean }> = [
   {
@@ -109,6 +110,7 @@ const RULES: Array<{ type: DocumentType; test: (text: string) => boolean }> = [
 /** Looks at the start of the text (where titles are) plus the file name. */
 export function classifyLocally(text: string, fileName: string): DocumentType | null {
   const fileLabel = fileName.replace(/[_.-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (isCreditAnalysisReportTitle(`${fileLabel}\n${text.slice(0, 1500)}`)) return 'credit_analysis_report';
   // A borrower's lender / EMI table is recognised by its column headings alone.
   if (/name\s+of\s+(?:the\s+)?bank\s*\/?\s*nbfc/i.test(text.slice(0, 3000)) && /EMI/i.test(text.slice(0, 3000))) {
     return 'existing_sanction_letter';

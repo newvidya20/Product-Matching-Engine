@@ -279,6 +279,14 @@ function reducer(state: AppState, action: Action): AppState {
     case 'SET_WORKSPACE_CONFIG':
       return { ...state, workspaceConfig: action.workspaceConfig };
     case 'SET_MODULE':
+      if (
+        action.moduleId === 'new-assessment' &&
+        state.activeModule !== 'new-assessment' &&
+        !state.editingAssessmentId &&
+        !state.eligibilityPrefill
+      ) {
+        return { ...state, activeModule: 'eligibility', editingAssessmentId: null };
+      }
       return { ...state, activeModule: action.moduleId, editingAssessmentId: null };
     case 'OPEN_NEW_ASSESSMENT_WITH_PREFILL':
       return { ...state, editingAssessmentId: null, eligibilityPrefill: action.prefill, activeModule: 'new-assessment' };

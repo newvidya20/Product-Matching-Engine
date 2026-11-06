@@ -359,6 +359,41 @@ describe('memory gate diagnostics', () => {
     assert.match(lines[0], /^\[document-ai\] memory gate holding files: heap 200\/250 MB, 0 running, 1 queued$/);
     assert.match(lines[1], /^\[document-ai\] memory gate turned a file away \(server_busy\): heap 200\/250 MB/);
   });
+
+  it('reserves projected memory before admitting a large PDF', async () => {
+    const MB = 1024 * 1024;
+    const gate = new FileGate({
+      concurrency: 1,
+      bytesBudget: 40 * MB,
+      largeFileBytes: 15 * MB,
+      heapHighRatio: 1,
+      rssHighBytes: 460 * MB,
+      memoryWaitMs: 20,
+      pollMs: 5,
+      readMemory: () => ({ heapUsed: 100 * MB, heapLimit: 250 * MB, rss: 200 * MB }),
+      warn: () => undefined,
+    });
+    const result = await gate.admit(74 * MB, 74 * MB * 2.5 + 64 * MB);
+    assert.equal(result.ok, true, 'the 74 MB report fits when the instance has enough headroom');
+    if (result.ok) result.release();
+  });
+
+  it('turns away a PDF whose estimated working set exceeds Render headroom', async () => {
+    const MB = 1024 * 1024;
+    const gate = new FileGate({
+      concurrency: 1,
+      bytesBudget: 40 * MB,
+      largeFileBytes: 15 * MB,
+      heapHighRatio: 1,
+      rssHighBytes: 460 * MB,
+      memoryWaitMs: 20,
+      pollMs: 5,
+      readMemory: () => ({ heapUsed: 100 * MB, heapLimit: 250 * MB, rss: 220 * MB }),
+      warn: () => undefined,
+    });
+    const result = await gate.admit(74 * MB, 74 * MB * 2.5 + 64 * MB);
+    assert.equal(result.ok, false, 'do not start a PDF likely to exceed the container limit');
+  });
 });
 
 // ------------------------------------------------------------------ PDF engine load time

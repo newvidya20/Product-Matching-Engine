@@ -14,6 +14,14 @@ Known open points: two directors' CIBIL scores conflict (user picks the promoter
 (kept at 0.8, review); DSCR needs annual principal repayments (not derivable from an EMI sheet, entered by the user); scanned FY23-24/24-25
 statements only read via OCR (first 5 pages); not browser-tested in this session.
 
+## Current working tree update (2026-11-06; uncommitted)
+
+The current `main` worktree now also has eligibility-first navigation/finalization, direct accept actions for verified/review values,
+a local reader for the Business Credit Triangulation Report (including stated DSCR as review-only), and projected-RSS admission for
+large PDFs. Streamed uploads support a 100 MB document and 2 GB request limit; PDFs are still bounded to 150 text pages and 5 OCR pages
+by default. Validation passed locally: TypeScript, Vite production build, and all 651 tests. The 74 MB CIBIL has not been tested on the
+live Render instance, so production capacity must still be confirmed from its job result/logs.
+
 # Handoff (updated 2026-11-04, stopped because of the weekly usage limit)
 
 Rules for this project: FREE only (free OpenRouter key ~50 requests/day, Render free 512 MB / ~0.1 CPU / disk wiped on restart, local OCR). No paid services.
@@ -36,10 +44,10 @@ Never guess a value: missing data is flagged, not assumed. NEVER commit real bor
 2. Keep uploads / reading results / form in the browser until Reset is pressed (and the Eligibility form until "New check"), with a banner when the server restarted.
    Started: `src/components/documentAi/draftStore.ts`, `useDocumentAiForm.ts`. Not finished, not browser-tested.
 3. Reading the user's real documents better (why a small PDF filled only ~4 fields):
-   - New reader for the "Business Credit Triangulation Report" (the user's other tool's report): `server/documentAi/creditAnalysisReport.ts`, plus changes in `localClassifier.ts`, `localExtractors.ts`, `merge.ts`, `pipeline.ts`, `prompt.ts`, `src/documentAi/fieldMap.ts`, `src/types/documentAi.ts`.
+   - The "Business Credit Triangulation Report" reader is now ported into the current working tree (not committed). Its fixed-year table reader excludes policy thresholds, holds financial restatements for review, and exposes stated DSCR only for human review and explicit Eligibility Check acceptance.
    - Layout: three year columns FY2024 | FY2025 | FY2026 (FY2026 provisional): read by column header, FY2026 = current, the others previous. "N/A" stays missing (operating cash flow is N/A). Printed policy thresholds ("Minimum 750 or above") are not values. Report DSCR (1.97x, provisional, different method) goes only to a stated-DSCR field as needs-verification.
-   - Still to cover: audited and provisional financial statements, CMR, CIBIL, company profile, existing debt profile, CRISIL/CARE/ICRA rating, purchase and sales ledger.
-   - Test file `tests/document-intelligence.test.ts` exists, NOT in the test list. Status when stopped: 25 of 26 pass; failing test: "splits a horizontal (T-form) account into its two sides".
+   - Still to cover: audited and provisional financial statements in other layouts, additional CMR/CIBIL formats, company profiles, CRISIL/CARE/ICRA ratings, purchase and sales ledgers.
+   - `tests/document-intelligence.test.ts` is now included in `npm test`; the focused report-reader tests pass. The separate horizontal (T-form) account-layout test from the WIP branch has not been ported or verified.
    - `npx tsc --noEmit` passes on the WIP branch.
 4. Open decisions: make CMR / TOL-TNW / banking turnover mandatory (they only give Conditionally eligible when failed); align the matching engine `server/ruleEngine.ts` per-purpose thresholds with the five core rules (left unchanged on purpose); block the AI from filling average monthly banking credits directly.
 

@@ -525,6 +525,7 @@ const KEY_FIELDS: Partial<Record<DocumentType, ReadonlyArray<readonly string[]>>
  */
 export function keyFieldsMissing(documentType: DocumentType, local: LocalExtraction, gstPeriodsRead = 0): boolean {
   if (documentType === 'bank_statement') return local.bankMonthlyTotals.length === 0;
+  if (documentType === 'credit_analysis_report') return local.fields.length === 0 && local.bankMonthlyTotals.length === 0;
   if (documentType === 'gst_return' && gstPeriodsRead > 0) return false;
   // An ITR-V prints PAN and name, and no turnover or profit: once its PAN is read there is nothing
   // more the model could honestly add.
