@@ -547,7 +547,7 @@ function parseBankAmount(raw: string | null, row: RawBankMonth, verify: SourceVe
  * from them then carries not_in_source to the reviewer, where a drop would leave nothing to see.
  */
 export function buildBankMonthlyTotals(rows: RawBankMonth[], ctx: DocumentContext): BankMonthlyTotal[] {
-  if (ctx.documentType !== 'bank_statement' && ctx.documentType !== 'credit_analysis_report') return [];
+  if (ctx.documentType !== 'bank_statement') return [];
   const unreadable = ctx.source.kind === 'unreadable';
   const verify: SourceVerifier = unreadable
     ? () => ({ check: 'no_text', rowLabel: null })

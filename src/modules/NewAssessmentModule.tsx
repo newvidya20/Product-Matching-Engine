@@ -153,14 +153,9 @@ function AssessmentForm({
   // Open the extra financial inputs by themselves when Document AI fills one, so the value is visible.
   const appliedKey = Object.keys(ai.applied).join('|');
   useEffect(() => {
-    if (
-      MORE_FINANCIAL_FIELD_IDS.some((id) => id in ai.applied) ||
-      MORE_FINANCIAL_FIELD_IDS.some((id) => ['accepted_document_value', 'resolved_conflict'].includes(ai.edited[id]?.origin))
-    ) {
-      setMoreOpen(true);
-    }
+    if (MORE_FINANCIAL_FIELD_IDS.some((id) => id in ai.applied)) setMoreOpen(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [appliedKey, ai.edited]);
+  }, [appliedKey]);
 
   const unresolvedCount = useMemo(() => {
     const fields = ai.docState?.fields ?? {};

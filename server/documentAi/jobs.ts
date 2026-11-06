@@ -114,7 +114,6 @@ export type Admission = { ok: true; release(): void } | { ok: false };
 
 interface GateWaiter {
   size: number;
-  projectedRssBytes: number;
   resolve(admission: Admission): void;
   /** When memory first kept this file out with nothing else running. */
   memoryBlockedSince: number | null;
@@ -169,7 +168,7 @@ export class FileGate {
     return this.waiting.length;
   }
 
-  memoryHigh(projectedRssBytes = 0): boolean {
+  memoryHigh(): boolean {
     let reading: MemoryReading;
     try {
       reading = this.options.readMemory();
@@ -178,16 +177,15 @@ export class FileGate {
     }
     const { heapHighRatio, rssHighBytes } = this.options;
     const heapHigh = reading.heapLimit > 0 && reading.heapUsed > heapHighRatio * reading.heapLimit;
-    const rssHigh = rssHighBytes > 0 && reading.rss + projectedRssBytes > rssHighBytes;
+    const rssHigh = rssHighBytes > 0 && reading.rss > rssHighBytes;
     return heapHigh || rssHigh;
   }
 
   /** Resolves when the file may start, or with `{ ok: false }` when memory stayed high. */
-  admit(sizeBytes: number, projectedRssBytes = 0): Promise<Admission> {
+  admit(sizeBytes: number): Promise<Admission> {
     const size = Number.isFinite(sizeBytes) && sizeBytes > 0 ? sizeBytes : 0;
-    const projected = Number.isFinite(projectedRssBytes) && projectedRssBytes > 0 ? projectedRssBytes : 0;
     return new Promise<Admission>((resolve) => {
-      this.waiting.push({ size, projectedRssBytes: projected, resolve, memoryBlockedSince: null });
+      this.waiting.push({ size, resolve, memoryBlockedSince: null });
       this.pump();
     });
   }
@@ -209,7 +207,7 @@ export class FileGate {
         if (this.runningAlone || this.alone(head.size)) break;
         if (this.runningBytes + head.size > this.options.bytesBudget) break;
       }
-      if (this.memoryHigh(head.projectedRssBytes)) {
+      if (this.memoryHigh()) {
         if (this.running > 0) {
           waitingOnMemory = true; // one file at a time until memory falls
           break;
@@ -518,10 +516,7 @@ function extractObserved(observer: ExtractionObserver, input: ExtractDocumentInp
 async function admitAndProcess(job: ExtractionJob, documentId: string, actorEmail: string): Promise<void> {
   const doc = await getDocument(job.sessionId, documentId);
   if (!doc || doc.fileDeletedAt) return; // deleted while queued
-  // PDF.js copies the input and scanned reports may also hold rendered pages and an OCR worker.
-  // Budget that peak before starting, rather than discovering the limit after the process is full.
-  const projectedRssBytes = doc.kind === 'pdf' ? doc.sizeBytes * 2.5 + 64 * MB : 0;
-  const admission = await fileGate.admit(doc.sizeBytes, projectedRssBytes);
+  const admission = await fileGate.admit(doc.sizeBytes);
   if (!admission.ok) {
     await processDocument(job, documentId, actorEmail, false);
     return;

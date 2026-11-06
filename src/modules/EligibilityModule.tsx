@@ -45,40 +45,6 @@ const INPUT =
 
 const blankValues = (): FormValues => inputToForm({ ...EMPTY_ELIGIBILITY_INPUT });
 
-const DOCUMENT_FIELD_TO_INPUT: Partial<Record<string, EligibilityInputField>> = {
-  entityType: 'entityType',
-  fundingPurpose: 'fundingPurpose',
-  requestedAmount: 'requestedAmount',
-  requestedTenureMonths: 'requestedTenureMonths',
-  businessVintageYears: 'businessVintageYears',
-  creditScore: 'personalCibilScore',
-  'financialProfile.personalCibilScore': 'personalCibilScore',
-  'financialProfile.promoterCibilScore': 'promoterCibilScore',
-  'financialProfile.commercialCmrRank': 'commercialCmrRank',
-  'financialProfile.commercialCreditReportStatus': 'commercialCreditReportStatus',
-  'financialProfile.annualRevenue': 'annualRevenue',
-  annualTurnoverOrIncome: 'annualRevenue',
-  'financialProfile.netProfitAfterTax': 'netProfitAfterTax',
-  'financialProfile.ebitda': 'ebitda',
-  'financialProfile.ebit': 'ebit',
-  'financialProfile.depreciation': 'depreciation',
-  'financialProfile.amortization': 'amortization',
-  'financialProfile.interestExpense': 'interestExpense',
-  profitabilityStatus: 'profitabilityStatus',
-  'financialProfile.currentAssets': 'currentAssets',
-  'financialProfile.currentLiabilities': 'currentLiabilities',
-  'financialProfile.totalOutsideLiabilities': 'totalOutsideLiabilities',
-  'financialProfile.tangibleNetWorth': 'tangibleNetWorth',
-  'financialProfile.annualScheduledPrincipalRepayments': 'annualScheduledPrincipalRepayments',
-  'financialProfile.existingMonthlyEmi': 'existingMonthlyEmi',
-  existingEmiObligations: 'existingMonthlyEmi',
-  'financialProfile.operatingCashFlow': 'operatingCashFlow',
-  'financialProfile.statedDscr': 'dscrStated',
-  'financialProfile.averageMonthlyBankingCredits': 'averageMonthlyBankingCredits',
-  'financialProfile.gstAnnualTurnover': 'gstAnnualTurnover',
-  'financialProfile.gstComplianceStatus': 'gstComplianceStatus',
-};
-
 function snapshotOf(result: EligibilityResult): EligibilityResultSnapshot {
   return {
     outcome: result.outcome,
@@ -130,38 +96,6 @@ export function EligibilityModule(props: EligibilityModuleProps = {}) {
   });
 
   const isFinal = record?.status === 'final';
-
-  const acceptDocumentValue = (
-    fieldId: string,
-    candidateId: string,
-    origin: 'accepted_document_value' | 'resolved_conflict' = 'accepted_document_value'
-  ) => {
-    const result = ai.docState?.fields[fieldId];
-    const candidate = result?.candidates.find((item) => item.candidateId === candidateId);
-    if (!result || !candidate || result.status === 'rejected_validation') return;
-    const value = result.status === 'conflict' ? candidate.value : (result.value ?? candidate.value);
-    if (value === null || value === undefined) return;
-
-    ai.acceptCandidate(fieldId, candidateId, origin);
-    const inputField = DOCUMENT_FIELD_TO_INPUT[fieldId];
-    if (inputField && String(value) !== 'not_provided') {
-      setValues((current) => ({ ...current, [inputField]: String(value) }));
-      setSources((current) => ({
-        ...current,
-        [inputField]: { kind: 'document_ai', documentSessionId: ai.sessionId, fieldId },
-      }));
-      setPending((current) => current.filter((item) => item.field !== inputField));
-      setFieldErrors((current) => {
-        if (!(inputField in current)) return current;
-        const next = { ...current };
-        delete next[inputField];
-        return next;
-      });
-    }
-    if (fieldId === 'applicantLabel') setApplicantLabel(String(value));
-    setPreview(null);
-    setConfirmFinal(false);
-  };
 
   const refreshRecords = useCallback(async () => {
     setRecordsLoading(true);
@@ -355,17 +289,21 @@ export function EligibilityModule(props: EligibilityModuleProps = {}) {
       loadRecord(res.record);
       const outcome = res.record.result?.outcome;
       if (status === 'final' && (outcome === 'ELIGIBLE' || outcome === 'CONDITIONALLY_ELIGIBLE')) {
-        const continuation = await eligibilityClient.continueToAssessment(res.record.id);
-        setRecord(continuation.record);
-        if (onContinueToAssessment) {
-          onContinueToAssessment(continuation);
-          setNotice(`Finalized ${res.record.referenceCode} and opened the assessment prefill.`);
+        try {
+          const continuation = await eligibilityClient.continueToAssessment(res.record.id);
+          setRecord(continuation.record);
+          if (onContinueToAssessment) {
+            onContinueToAssessment(continuation);
+            setNotice(`Finalized ${res.record.referenceCode} and opened the assessment prefill.`);
+            await refreshRecords();
+            return;
+          }
+          setNotice(`Finalized ${res.record.referenceCode}. Continue to New Assessment from the next step.`);
           await refreshRecords();
           return;
+        } catch {
+          navigateTo('matching-engine');
         }
-        setNotice(`Finalized ${res.record.referenceCode}. Continue to New Assessment from the next step.`);
-        await refreshRecords();
-        return;
       }
       setNotice(status === 'final' ? `Finalized ${res.record.referenceCode}.` : `Saved draft ${res.record.referenceCode}.`);
       await refreshRecords();
@@ -527,8 +465,7 @@ export function EligibilityModule(props: EligibilityModuleProps = {}) {
               edited={ai.edited}
               applied={ai.applied}
               isDismissed={ai.fieldContext.isDismissed}
-              acceptCandidate={acceptDocumentValue}
-              acceptReviewOnlyFieldIds={['financialProfile.statedDscr']}
+              acceptCandidate={ai.acceptCandidate}
               dismiss={ai.dismiss}
               hasDocuments
               busy={ai.isBusy}

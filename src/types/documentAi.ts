@@ -69,7 +69,6 @@ export const DOCUMENT_TYPES = [
   'itr',
   'pan_card',
   'credit_report',
-  'credit_analysis_report', // a third-party triangulation report; restated figures require review
   'registration_certificate', // incorporation, Udyam, partnership/LLP deed
   'loan_application', // the borrower's request: application, sanction request
   'existing_sanction_letter', // a lender's letter about an EXISTING facility

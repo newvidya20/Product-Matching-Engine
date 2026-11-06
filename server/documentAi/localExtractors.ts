@@ -21,7 +21,6 @@ import { bankMonthsFromStatement } from './bankStatements.ts';
 import { readFinancialStatements } from './financialStatements.ts';
 import { readCompanyIdentity } from './companyIdentity.ts';
 import { readCreditReport } from './creditReports.ts';
-import { readCreditAnalysisReport, REPORT_SUMMARY_CONFIDENCE } from './creditAnalysisReport.ts';
 import { readObligationSheet, readSanctionLetter } from './debtObligations.ts';
 import { readGstr3b, type RawGstReturnPeriod } from './gstr3b.ts';
 import { normalizeFinancialYear, normalizePeriod, parseDate, type AmountUnit } from './validators.ts';
@@ -894,16 +893,6 @@ const STATEMENT_MIN_FIELDS = 6;
 export function extractLocally(input: LocalExtractionInput): LocalExtraction {
   const { documentType, content, fromOcr, complete = true, ocrPages } = input;
   if (documentType === 'other') return { fields: [], bankMonthlyTotals: [] };
-  if (documentType === 'credit_analysis_report') {
-    if (content.kind !== 'text') return { fields: [], bankMonthlyTotals: [] };
-    const report = readCreditAnalysisReport(content.pages);
-    const cap = <T extends { confidence: number }>(row: T): T =>
-      fromOcr ? { ...row, confidence: Math.min(row.confidence, LOCAL_OCR_CONFIDENCE) } : row;
-    return {
-      fields: report.fields.filter((field) => fieldAllowed(field.fieldId, documentType)).map(cap),
-      bankMonthlyTotals: report.bankMonthlyTotals.map(cap),
-    };
-  }
   const confidence = fromOcr ? LOCAL_OCR_CONFIDENCE : LOCAL_TEXT_CONFIDENCE;
   const emitted =
     content.kind === 'text'

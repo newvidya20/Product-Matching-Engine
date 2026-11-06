@@ -70,7 +70,6 @@ interface ReviewPanelProps {
     candidateId: string,
     origin?: 'accepted_document_value' | 'resolved_conflict'
   ) => void;
-  acceptReviewOnlyFieldIds?: readonly string[];
   dismiss: (fieldId: string) => void;
   hasDocuments: boolean;
   busy: boolean;
@@ -151,19 +150,7 @@ function ItemShell({
 }
 
 export function ReviewPanel(props: ReviewPanelProps) {
-  const {
-    form,
-    fields,
-    warnings,
-    edited,
-    applied,
-    isDismissed,
-    acceptCandidate,
-    acceptReviewOnlyFieldIds = [],
-    dismiss,
-    hasDocuments,
-    busy,
-  } = props;
+  const { form, fields, warnings, edited, applied, isDismissed, acceptCandidate, dismiss, hasDocuments, busy } = props;
   const [showApplied, setShowApplied] = useState(false);
 
   if (!hasDocuments) return null;
@@ -218,7 +205,7 @@ export function ReviewPanel(props: ReviewPanelProps) {
         <ClipboardList className="w-4 h-4 text-orange-700" aria-hidden="true" />
         <h3 className="text-sm font-semibold text-stone-900 font-display">Review Extracted Data</h3>
         <span className="text-xs text-stone-500">
-          {filled.length} auto-filled · {attention.length + reviewOnly.filter(({ result }) => result.status !== 'auto_applied').length} to check
+          {filled.length} auto-filled · {attention.length} to check
           {busy ? ' · reading documents…' : ''}
         </span>
       </div>
@@ -262,8 +249,7 @@ export function ReviewPanel(props: ReviewPanelProps) {
           <ul className="mt-2 divide-y divide-orange-100/70 bg-white/60">
             {attention.map(({ definition, result }) => {
               const writable = isFormBacked(definition);
-              const wrongPurpose =
-                definition.target.kind === 'dynamic' && definition.target.purpose !== form.fundingPurpose;
+              const wrongPurpose = false;
               if (result.status === 'conflict') {
                 return (
                   <ItemShell key={result.fieldId} definition={definition} badge={<ConflictBadge />}>
@@ -271,11 +257,6 @@ export function ReviewPanel(props: ReviewPanelProps) {
                       {SECTION_TITLES[definition.section]} · documents disagree. Neither value has been
                       applied to the form. Pick one, or type your own in the form.
                     </p>
-                    {wrongPurpose && (
-                      <p className="text-[11px] text-amber-800">
-                        This question belongs to a different funding purpose and cannot be applied to the current form.
-                      </p>
-                    )}
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                       {result.candidates
                         .filter((c) => c.value !== null && c.status !== 'rejected_validation')
@@ -300,16 +281,6 @@ export function ReviewPanel(props: ReviewPanelProps) {
                             </p>
                             <ConfidenceBadge value={candidate.confidence} />
                             <SourceText field={candidate} defaultOpen />
-                            {writable && !wrongPurpose && candidate.value !== null && candidate.status !== 'rejected_validation' && (
-                              <button
-                                type="button"
-                                onClick={() => acceptCandidate(result.fieldId, candidate.candidateId, 'resolved_conflict')}
-                                className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold text-white bg-orange-600 hover:bg-orange-700 rounded cursor-pointer"
-                              >
-                                <Check className="w-3 h-3" aria-hidden="true" />
-                                Use this value
-                              </button>
-                            )}
                           </div>
                         ))}
                     </div>
@@ -335,11 +306,6 @@ export function ReviewPanel(props: ReviewPanelProps) {
                     </p>
                   )}
                   {!invalid && <ConfidenceBadge value={result.confidence} />}
-                  {wrongPurpose && (
-                    <p className="text-[11px] text-amber-800">
-                      This question belongs to a different funding purpose and cannot be applied to the current form.
-                    </p>
-                  )}
                   <Reasons reasons={result.reasons} />
                   {(() => {
                     const shown =
@@ -347,19 +313,13 @@ export function ReviewPanel(props: ReviewPanelProps) {
                       result.candidates[0];
                     return shown ? <SourceText field={shown} defaultOpen /> : null;
                   })()}
-                  {!invalid && writable && !wrongPurpose && (() => {
-                    const candidateId = result.suggestedCandidateId ?? result.candidates[0]?.candidateId;
-                    return candidateId ? (
-                      <button
-                        type="button"
-                        onClick={() => acceptCandidate(result.fieldId, candidateId, 'accepted_document_value')}
-                        className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-semibold text-white bg-orange-600 hover:bg-orange-700 rounded cursor-pointer"
-                      >
-                        <Check className="w-3 h-3" aria-hidden="true" />
-                        Accept into form
-                      </button>
-                    ) : null;
-                  })()}
+                  <div className="flex flex-wrap gap-2">
+                    {!invalid && writable && !wrongPurpose && (
+                      <span className="inline-flex items-center gap-1.5 rounded bg-emerald-50 px-2 py-1 text-[10px] font-semibold text-emerald-700 border border-emerald-200">
+                        <Check className="w-3 h-3" aria-hidden="true" /> Auto-filled when a valid value is read
+                      </span>
+                    )}
+                  </div>
                 </ItemShell>
               );
             })}
@@ -409,70 +369,21 @@ export function ReviewPanel(props: ReviewPanelProps) {
         <div>
           <h4 className="px-4 sm:px-5 pt-3 text-xs font-semibold text-stone-800">For reference only</h4>
           <p className="px-4 sm:px-5 text-[11px] text-stone-500">
-            Shown to help you check the file. They are never automatically applied to the assessment.
+            Shown to help you check the file. These are not saved to the assessment.
           </p>
           <ul className="mt-2 divide-y divide-orange-100/70 bg-white/60">
-            {reviewOnly.map(({ definition, result }) => {
-              const canAccept = acceptReviewOnlyFieldIds.includes(result.fieldId);
-              const candidates = result.candidates.filter((candidate) => candidate.value !== null && candidate.status !== 'rejected_validation');
-              return (
-                <ItemShell
-                  key={result.fieldId}
-                  definition={definition}
-                  badge={result.status !== 'auto_applied' ? <VerifyBadge /> : undefined}
-                >
-                  {result.status === 'conflict' ? (
-                    <div className="space-y-2">
-                      <p className="text-[11px] text-stone-500">Documents disagree. Pick the stated value to use for eligibility.</p>
-                      {candidates.map((candidate) => (
-                        <div key={candidate.candidateId} className="rounded-lg border border-stone-200 bg-white p-2 space-y-1">
-                          <p className="text-xs text-stone-700">
-                            <span className="font-mono">{String(candidate.value)}</span>{' '}
-                            <span className="text-stone-500">from {sourceLabel({ source: candidate.source })}</span>
-                          </p>
-                          <ConfidenceBadge value={candidate.confidence} />
-                          <SourceText field={candidate} defaultOpen />
-                          {canAccept && (
-                            <button
-                              type="button"
-                              onClick={() => acceptCandidate(result.fieldId, candidate.candidateId, 'resolved_conflict')}
-                              className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold text-white bg-orange-600 hover:bg-orange-700 rounded cursor-pointer"
-                            >
-                              <Check className="w-3 h-3" aria-hidden="true" />
-                              Use for eligibility
-                            </button>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <>
-                      <p className="text-xs text-stone-700 break-words">
-                        <span className="font-mono">{result.value === null ? '—' : String(result.value)}</span>{' '}
-                        <span className="text-stone-500">from {sourceLabel(result)}</span>
-                      </p>
-                      {result.status !== 'auto_applied' && <ConfidenceBadge value={result.confidence} />}
-                      {(() => {
-                        const shown =
-                          result.candidates.find((candidate) => candidate.candidateId === result.suggestedCandidateId) ??
-                          candidates[0];
-                        return shown ? <SourceText field={shown} defaultOpen /> : null;
-                      })()}
-                      {canAccept && candidates[0] && (
-                        <button
-                          type="button"
-                          onClick={() => acceptCandidate(result.fieldId, candidates[0].candidateId)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-semibold text-white bg-orange-600 hover:bg-orange-700 rounded cursor-pointer"
-                        >
-                          <Check className="w-3 h-3" aria-hidden="true" />
-                          Use for eligibility
-                        </button>
-                      )}
-                    </>
-                  )}
-                </ItemShell>
-              );
-            })}
+            {reviewOnly.map(({ definition, result }) => (
+              <ItemShell
+                key={result.fieldId}
+                definition={definition}
+                badge={result.status !== 'auto_applied' ? <VerifyBadge /> : undefined}
+              >
+                <p className="text-xs text-stone-700 break-words">
+                  <span className="font-mono">{result.value === null ? '—' : String(result.value)}</span>{' '}
+                  <span className="text-stone-500">from {sourceLabel(result)}</span>
+                </p>
+              </ItemShell>
+            ))}
           </ul>
         </div>
       )}

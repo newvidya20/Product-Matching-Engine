@@ -73,7 +73,6 @@ const wrap =
 
 const MAX_BASE64_CHARS = Math.ceil((DOCUMENT_AI_LIMITS.maxFileBytes * 4) / 3) + 8;
 const BASE64_PATTERN = /^[A-Za-z0-9+/]*={0,2}$/;
-const MAX_FILE_SIZE_MESSAGE = `This file is larger than the ${DOCUMENT_AI_LIMITS.maxFileBytes / (1024 * 1024)} MB per-document limit.`;
 
 function contentDisposition(kind: 'inline' | 'attachment', name: string, ext: string): string {
   const encoded = encodeURIComponent(name).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
@@ -211,7 +210,7 @@ export function createDocumentAiRouter(options: DocumentAiRouterOptions): expres
     };
 
     if (body.base64.length > MAX_BASE64_CHARS) {
-      return reject(413, 'file_too_large', MAX_FILE_SIZE_MESSAGE);
+      return reject(413, 'file_too_large', 'This file is larger than the 12 MB limit.');
     }
     if (body.base64.length % 4 !== 0 || !BASE64_PATTERN.test(body.base64)) {
       return sendError(res, 400, 'invalid_request', 'base64 content is not valid.');
@@ -219,7 +218,7 @@ export function createDocumentAiRouter(options: DocumentAiRouterOptions): expres
     const bytes = Buffer.from(body.base64, 'base64');
     if (bytes.byteLength === 0) return sendError(res, 400, 'invalid_request', 'The file is empty.');
     if (bytes.byteLength > DOCUMENT_AI_LIMITS.maxFileBytes) {
-      return reject(413, 'file_too_large', MAX_FILE_SIZE_MESSAGE, bytes.byteLength);
+      return reject(413, 'file_too_large', 'This file is larger than the 12 MB limit.', bytes.byteLength);
     }
 
     if (isZipUpload(originalName, bytes)) {
