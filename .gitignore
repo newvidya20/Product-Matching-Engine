@@ -11,3 +11,11 @@ Testing source files/
 "Testing source files/**"
 *.zip
 *.rar
+
+# document pipeline outputs
+/output/
+/docpipeline/__pycache__/
+/docpipeline/tessdata/
+/docpipeline/lexicon.txt
+__pycache__/
+/docpipeline/bench_cases.json
