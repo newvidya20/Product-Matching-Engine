@@ -94,8 +94,8 @@ export const FIELD_GROUPS: FieldGroup[] = [
       { field: 'netProfitAfterTax', label: 'Net profit after tax (₹)', kind: 'currency', supplier: 'Audited financials or ITR (profit and loss)' },
       { field: 'ebitda', label: 'EBITDA (₹)', kind: 'currency', supplier: 'Audited financials (profit and loss)' },
       { field: 'ebit', label: 'EBIT (₹)', kind: 'currency', supplier: 'Audited financials (profit and loss)' },
-      { field: 'depreciation', label: 'Depreciation (₹)', kind: 'currency', hint: 'Enter as a positive amount.', supplier: 'Audited financials (profit and loss or schedules)' },
-      { field: 'amortization', label: 'Amortisation (₹)', kind: 'currency', hint: 'Optional for DSCR. Leave blank if not stated separately.', supplier: 'Audited financials (profit and loss or schedules)' },
+      { field: 'depreciation', label: 'Depreciation (₹)', kind: 'currency', hint: 'Enter as a positive amount. Used in DSCR: (net profit + depreciation + interest) / (monthly EMI x 12).', supplier: 'Audited financials (profit and loss or schedules)' },
+      { field: 'amortization', label: 'Amortisation (₹)', kind: 'currency', hint: 'Added to the DSCR numerator when stated. Leave blank if not stated separately.', supplier: 'Audited financials (profit and loss or schedules)' },
       { field: 'interestExpense', label: 'Interest expense (₹)', kind: 'currency', hint: 'Enter as a positive amount.', supplier: 'Audited financials (profit and loss)' },
       { field: 'profitabilityStatus', label: 'Profitability track record', kind: 'enum', options: PROFIT_OPTIONS, supplier: 'Last two years of audited financials or ITRs' },
     ],
@@ -114,9 +114,9 @@ export const FIELD_GROUPS: FieldGroup[] = [
     title: 'Existing obligations',
     description: 'Zero is a real answer ("no debt"). Blank means not known.',
     fields: [
-      { field: 'operatingCashFlow', label: 'Operating cash flow (₹)', kind: 'currency', hint: 'May be negative. DSCR = operating cash flow / (annual principal repayments + monthly EMI x 12).', supplier: 'Audited financials (cash flow statement)' },
-      { field: 'annualScheduledPrincipalRepayments', label: 'Annual scheduled principal repayments (₹)', kind: 'currency', supplier: 'Loan statements, repayment schedule or CMA data' },
-      { field: 'existingMonthlyEmi', label: 'Existing monthly EMI (₹)', kind: 'currency', supplier: 'Loan statements or bureau report' },
+      { field: 'operatingCashFlow', label: 'Operating cash flow (₹)', kind: 'currency', hint: 'May be negative. For reference only: it does not feed DSCR.', supplier: 'Audited financials (cash flow statement)' },
+      { field: 'annualScheduledPrincipalRepayments', label: 'Annual scheduled principal repayments (₹)', kind: 'currency', hint: 'For reference only: it does not feed DSCR (the EMI already includes principal).', supplier: 'Loan statements, repayment schedule or CMA data' },
+      { field: 'existingMonthlyEmi', label: 'Existing monthly EMI (₹)', kind: 'currency', hint: 'Total of all loans. DSCR denominator = this x 12.', supplier: 'Loan statements or bureau report' },
     ],
   },
   {

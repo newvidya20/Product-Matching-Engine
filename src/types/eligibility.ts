@@ -98,7 +98,7 @@ export interface EligibilityInput {
   // Obligations
   annualScheduledPrincipalRepayments: number | null;
   existingMonthlyEmi: number | null;
-  /** Annual operating cash flow (signed). DSCR numerator (section 4.1). */
+  /** Annual operating cash flow (signed). Informational: it does not feed DSCR. */
   operatingCashFlow: number | null;
 
   // Banking and GST
@@ -240,8 +240,8 @@ export const CRITERION_DEFINITIONS: Readonly<Record<EligibilityCriterionId, Crit
     id: 'dscr',
     kind: 'number_min',
     unit: 'ratio',
-    requiredInputs: ['operatingCashFlow', 'annualScheduledPrincipalRepayments', 'existingMonthlyEmi'],
-    optionalInputs: ['dscrStated'],
+    requiredInputs: ['netProfitAfterTax', 'depreciation', 'interestExpense', 'existingMonthlyEmi'],
+    optionalInputs: ['amortization', 'dscrStated'],
   },
   banking_credits_vs_requested: {
     id: 'banking_credits_vs_requested',
@@ -304,7 +304,7 @@ export interface SkippedCriterion {
 
 /** Each metric is null when any required input is null. Never computed from assumptions. */
 export interface EligibilityDerivedMetrics {
-  /** operatingCashFlow / (annualScheduledPrincipalRepayments + existingMonthlyEmi * 12), or the stated DSCR. */
+  /** (netProfitAfterTax + depreciation + amortization + interestExpense) / (existingMonthlyEmi * 12), or the stated DSCR. */
   dscr: number | null;
   dscrBasis: 'computed' | 'stated' | null;
   /** requestedAmount / averageMonthlyBankingCredits. */

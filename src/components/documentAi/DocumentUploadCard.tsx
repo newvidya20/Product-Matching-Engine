@@ -6,6 +6,7 @@ import {
   FileSpreadsheet,
   FileText,
   Image as ImageIcon,
+  KeyRound,
   Loader2,
   RefreshCw,
   Trash2,
@@ -27,7 +28,7 @@ const DATA_NOTE =
   "Uploaded documents are sent to the external AI service configured on this server (OpenRouter or Google Gemini) for processing and may contain personal and financial data, including PAN and bank details. Upload only documents you are authorised to process.";
 
 const ERROR_COPY: Record<ExtractionErrorCode, string> = {
-  password_protected: 'This PDF is password protected. Upload an unlocked copy.',
+  password_protected: 'This PDF is password protected. Type its password and click Unlock, or upload an unlocked copy.',
   unreadable_document: 'The document could not be read. Try a clearer copy.',
   llm_not_configured: 'Document reading is not set up on the server yet.',
   llm_rate_limited: 'The AI service is busy. Retry in a minute.',
@@ -53,16 +54,25 @@ function KindIcon({ kind }: { kind: StoredDocument['kind'] }) {
   return <ImageIcon className={cls} aria-hidden="true" />;
 }
 
-function StatusChip({ doc, inRunningJob }: { doc: StoredDocument; inRunningJob: boolean }) {
+function StatusChip({ doc, inRunningJob, fieldCount }: { doc: StoredDocument; inRunningJob: boolean; fieldCount?: number }) {
   const base = 'inline-flex items-center gap-1 text-[11px] font-medium';
   // A file the running job has not reached yet is queued, whatever its stored status says.
   const status = inRunningJob && doc.status === 'uploaded' ? 'queued' : doc.status;
   switch (status) {
     case 'extracted':
       return (
-        <span className={`${base} text-emerald-700`}>
-          <CheckCircle2 className="w-3 h-3" aria-hidden="true" /> Done
-        </span>
+        fieldCount === 0 ? (
+          <span className={`${base} text-amber-800`}>
+            <AlertCircle className="w-3 h-3 shrink-0" aria-hidden="true" /> Read, but no values were taken from this
+            file. The file type may have no built-in reader here. Enter its values manually, or use Retry all failed
+            once the AI service is available.
+          </span>
+        ) : (
+          <span className={`${base} text-emerald-700`}>
+            <CheckCircle2 className="w-3 h-3" aria-hidden="true" /> Done
+            {fieldCount !== undefined ? ` · ${fieldCount} field${fieldCount === 1 ? '' : 's'} read` : ''}
+          </span>
+        )
       );
     case 'failed':
       return (
@@ -95,10 +105,81 @@ interface Props {
   onPreview: (doc: StoredDocument) => void;
   onDelete: (doc: StoredDocument) => void;
   onRetry: (documentId: string) => void;
+  /**
+   * Opens a password-protected PDF and reads it. Resolves to an error message to show on the row, or null on success.
+   * The password box is hidden when this is not passed.
+   */
+  onUnlock?: (documentId: string, password: string) => Promise<string | null>;
   /** Retries every failed file in one job. The retry-all button is hidden when this is not passed. */
   onRetryFailed?: () => void;
   onChangeType: (documentId: string, type: DocumentType) => void;
+  /** Fields read from each document, by document ID. 0 shows a "no fields" message; omitted = no count shown. */
+  fieldCountByDocument?: Record<string, number>;
   onRefresh: () => void;
+}
+
+/** Password box for one protected PDF. The password lives only in this component's state until it is sent. */
+function PasswordUnlock({ doc, disabled, onUnlock }: {
+  doc: StoredDocument;
+  disabled: boolean;
+  onUnlock: (documentId: string, password: string) => Promise<string | null>;
+}) {
+  const [password, setPassword] = useState('');
+  const [show, setShow] = useState(false);
+  const [working, setWorking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!password || working || disabled) return;
+    setWorking(true);
+    setError(null);
+    const message = await onUnlock(doc.documentId, password);
+    setWorking(false);
+    if (message) setError(message);
+    else setPassword(''); // never kept after it has been sent
+  };
+
+  return (
+    <form onSubmit={submit} className="flex flex-col items-end gap-1" autoComplete="off">
+      <div className="flex items-center gap-1">
+        <input
+          type={show ? 'text' : 'password'}
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          aria-label={`Password for ${doc.originalName}`}
+          placeholder="PDF password"
+          autoComplete="new-password"
+          spellCheck={false}
+          maxLength={256}
+          disabled={working}
+          className="w-32 sm:w-40 rounded-lg border border-stone-300 bg-white px-2 py-1 text-xs text-stone-900 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-orange-300"
+        />
+        <button
+          type="button"
+          onClick={() => setShow((v) => !v)}
+          aria-label={show ? 'Hide password' : 'Show password'}
+          className="px-1.5 py-1 text-[11px] text-stone-500 hover:text-stone-800 cursor-pointer"
+        >
+          {show ? 'Hide' : 'Show'}
+        </button>
+        <button
+          type="submit"
+          disabled={!password || working || disabled}
+          title={disabled ? 'Wait for the current reading to finish' : undefined}
+          className="inline-flex items-center gap-1 rounded-lg bg-orange-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-orange-700 disabled:opacity-50 cursor-pointer"
+        >
+          {working ? <Loader2 className="w-3 h-3 animate-spin" aria-hidden="true" /> : <KeyRound className="w-3 h-3" aria-hidden="true" />}
+          Unlock
+        </button>
+      </div>
+      {error && (
+        <p role="alert" className="text-[11px] text-red-700 max-w-[18rem] text-right">
+          {error}
+        </p>
+      )}
+    </form>
+  );
 }
 
 export function DocumentUploadCard(props: Props) {
@@ -272,11 +353,14 @@ export function DocumentUploadCard(props: Props) {
                   <p className="text-xs font-medium text-stone-800 break-words">{doc.originalName}</p>
                   <div className="mt-0.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-stone-500">
                     <span>{formatSize(doc.sizeBytes)}</span>
-                    <StatusChip doc={doc} inRunningJob={jobIds.has(doc.documentId)} />
+                    <StatusChip doc={doc} inRunningJob={jobIds.has(doc.documentId)} fieldCount={props.fieldCountByDocument?.[doc.documentId]} />
                     {doc.fileDeletedAt && <span>File removed</span>}
                   </div>
                 </div>
                 <div className="flex items-center gap-0.5 shrink-0">
+                  {props.onUnlock && doc.status === 'failed' && doc.errorCode === 'password_protected' && !doc.fileDeletedAt && (
+                    <PasswordUnlock doc={doc} disabled={running} onUnlock={props.onUnlock} />
+                  )}
                   {!doc.fileDeletedAt && (
                     <button
                       type="button"

@@ -75,6 +75,7 @@ export const DOCUMENT_TYPES = [
   'cma_projection',
   'collateral_valuation',
   'quotation_invoice',
+  'triangulation_report', // LoanBazaar Business Credit Triangulation Report
   'other',
 ] as const;
 export type DocumentType = (typeof DOCUMENT_TYPES)[number];
@@ -155,6 +156,10 @@ export type ExtractionErrorCode =
 
 export type DocumentAiErrorCode =
   | ExtractionErrorCode
+  /** Unlock a password-protected PDF: the password was wrong, the protection cannot be removed, or the engine failed. */
+  | 'wrong_password'
+  | 'unsupported_encryption'
+  | 'unlock_failed'
   | 'unauthenticated'
   | 'forbidden'
   | 'auth_not_configured'
@@ -503,6 +508,8 @@ export const ACTIVITY_EVENT_TYPES = [
   'file_deleted',
   'fields_cleared',
   'document_type_overridden',
+  'pdf_unlocked',
+  'pdf_unlock_failed',
   'extraction_queued',
   'extraction_started',
   'extraction_document_completed',

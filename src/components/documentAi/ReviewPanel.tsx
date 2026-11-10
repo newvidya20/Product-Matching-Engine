@@ -166,6 +166,8 @@ export function ReviewPanel(props: ReviewPanelProps) {
   const differs: Array<{ definition: FieldDefinition; result: FieldResult }> = [];
   const reviewOnly: Array<{ definition: FieldDefinition; result: FieldResult }> = [];
   const filled: Array<{ definition: FieldDefinition; result: FieldResult }> = [];
+  // Read with confidence but not in the form (so it would otherwise be invisible here).
+  const readOnly: Array<{ definition: FieldDefinition; result: FieldResult }> = [];
 
   for (const result of Object.values(fields)) {
     const definition = getFieldDefinition(result.fieldId);
@@ -180,13 +182,20 @@ export function ReviewPanel(props: ReviewPanelProps) {
       const hasValue = result.value !== null && (result.status === 'auto_applied' || result.status === 'needs_verification');
       if (hasValue && toFormValue(definition, result.value!) !== readField(form, definition)) {
         differs.push({ definition, result });
-      } else if (result.status === 'conflict' && !isDismissed(result.fieldId)) {
-        attention.push({ definition, result });
+      } else if (result.status === 'conflict') {
+        // A conflict is resolved once the form holds one of the candidates' values ("Use this value" or typed in).
+        const current = readField(form, definition).trim();
+        const resolved = result.candidates.some(
+          (c) => c.value !== null && c.status !== 'rejected_validation' && toFormValue(definition, c.value) === current
+        );
+        if (resolved) filled.push({ definition, result });
+        else if (!isDismissed(result.fieldId)) attention.push({ definition, result });
       }
       continue;
     }
     if (result.status === 'auto_applied') {
       if (result.fieldId in applied) filled.push({ definition, result });
+      else if (result.value !== null) readOnly.push({ definition, result });
     } else if (!isDismissed(result.fieldId)) {
       attention.push({ definition, result });
     }
@@ -195,6 +204,8 @@ export function ReviewPanel(props: ReviewPanelProps) {
   const bySection = (a: { definition: FieldDefinition }, b: { definition: FieldDefinition }) =>
     a.definition.section.localeCompare(b.definition.section);
   attention.sort(bySection);
+  readOnly.sort(bySection);
+  const nothingRead = Object.keys(fields).length === 0;
 
   return (
     <section
@@ -209,6 +220,16 @@ export function ReviewPanel(props: ReviewPanelProps) {
           {busy ? ' · reading documents…' : ''}
         </span>
       </div>
+
+      {nothingRead && !busy && (
+        <p role="status" className="px-4 sm:px-5 py-3 text-xs text-amber-900 bg-amber-50 flex items-start gap-1.5">
+          <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" aria-hidden="true" />
+          <span>
+            Read, but no values were taken from your files. Those file types may have no built-in reader here, or the AI
+            service was unavailable (see any files marked failed above). Enter the values manually, or retry later.
+          </span>
+        </p>
+      )}
 
       {warnings.length > 0 && (
         <div className="px-4 sm:px-5 py-3 space-y-1.5">
@@ -284,7 +305,6 @@ export function ReviewPanel(props: ReviewPanelProps) {
                             {writable && (
                               <button
                                 type="button"
-                                disabled={busy}
                                 onClick={() => acceptCandidate(result.fieldId, candidate.candidateId, 'resolved_conflict')}
                                 className="inline-flex items-center gap-1.5 rounded bg-emerald-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-emerald-700 disabled:opacity-50 cursor-pointer"
                               >
@@ -408,6 +428,25 @@ export function ReviewPanel(props: ReviewPanelProps) {
         </div>
       )}
 
+      {readOnly.length > 0 && (
+        <div>
+          <h4 className="px-4 sm:px-5 pt-3 text-xs font-semibold text-stone-800">Read from your documents</h4>
+          <p className="px-4 sm:px-5 text-[11px] text-stone-500">
+            These were read but are not in the form yet. Check them, then enter them in the form if they are right.
+          </p>
+          <ul className="mt-2 divide-y divide-orange-100/70 bg-white/60">
+            {readOnly.map(({ definition, result }) => (
+              <ItemShell key={result.fieldId} definition={definition}>
+                <p className="text-xs text-stone-700 break-words">
+                  <span className="font-mono">{formatFieldValue(definition, result.value)}</span>{' '}
+                  <span className="text-stone-500">from {sourceLabel(result)}</span>
+                </p>
+              </ItemShell>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {filled.length > 0 && (
         <div className="px-4 sm:px-5 py-3">
           <button
@@ -437,7 +476,7 @@ export function ReviewPanel(props: ReviewPanelProps) {
         </div>
       )}
 
-      {attention.length === 0 && differs.length === 0 && stillNeeded.length === 0 && !busy && (
+      {attention.length === 0 && differs.length === 0 && stillNeeded.length === 0 && !busy && !nothingRead && (
         <p className="px-4 sm:px-5 py-3 text-xs text-stone-600 flex items-center gap-1.5">
           <AlertTriangle className="w-3.5 h-3.5 text-stone-400" aria-hidden="true" />
           Nothing else to check. Please still read the auto-filled values before you submit.

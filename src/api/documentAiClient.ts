@@ -188,6 +188,13 @@ export const documentAiClient = {
       { method: 'DELETE' }
     ),
 
+  /** Opens a password-protected PDF. The password is sent once, over this request only, and is never kept. */
+  unlockPdf: (sessionId: string, documentId: string, password: string) =>
+    json<DocumentSessionState>(`/sessions/${enc(sessionId)}/documents/${enc(documentId)}/unlock`, {
+      method: 'POST',
+      body: body({ password }),
+    }),
+
   startExtraction: (sessionId: string, request: StartExtractionRequest = {}) =>
     json<StartExtractionResponse>(`/sessions/${enc(sessionId)}/extract`, {
       method: 'POST',

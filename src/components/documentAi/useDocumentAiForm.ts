@@ -933,6 +933,26 @@ export function useDocumentAiForm({
     [startExtraction]
   );
 
+  /**
+   * Opens a password-protected PDF with the typed password, then reads it. Returns an error message for the
+   * file's row, or null on success. The password is passed straight to the server and not kept anywhere.
+   */
+  const unlockDocument = useCallback(
+    async (documentId: string, password: string): Promise<string | null> => {
+      const sid = sessionIdRef.current;
+      try {
+        const state = await documentAiClient.unlockPdf(sid, documentId, password);
+        if (sid !== sessionIdRef.current) return null;
+        if (mountedRef.current) hydrate(state, true);
+        await startExtraction([documentId], true);
+        return null;
+      } catch (error) {
+        return errorMessage(error);
+      }
+    },
+    [hydrate, startExtraction]
+  );
+
   /** Retries every file that failed and can still be read, in one job. */
   const retryFailed = useCallback(() => {
     const ids = (docState?.documents ?? [])
@@ -1009,6 +1029,7 @@ export function useDocumentAiForm({
     removeDocument,
     changeDocumentType,
     retryDocument,
+    unlockDocument,
     retryFailed,
     refresh,
   };

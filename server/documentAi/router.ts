@@ -33,6 +33,7 @@ import { forEachZipEntry, maxUploadBytes, receiveToTempFile, UploadTooLargeError
 import fsp from 'node:fs/promises';
 import { abortDocumentExtraction, JobInProgressError, startExtraction } from './jobs.ts';
 import { readSpreadsheetPreview } from './pipeline.ts';
+import { MAX_PDF_PASSWORD_LENGTH, unlockPdf } from './unlockPdf.ts';
 import {
   addDocument,
   deleteDocumentFile,
@@ -50,6 +51,7 @@ import {
   listDocuments,
   loadSessionState,
   readFileBytes,
+  replaceDocumentBytes,
   sanitizeOriginalName,
   saveSettings,
   overrideDocumentType,
@@ -486,6 +488,36 @@ export function createDocumentAiRouter(options: DocumentAiRouterOptions): expres
     res.setHeader('Cache-Control', 'private, no-store');
     void logActivity({ type: 'file_previewed', actor: actor.email, sessionId, documentId, fileName: doc.originalName });
     res.json(preview);
+  }));
+
+  /**
+   * Opens a password-protected PDF with the password the person typed and keeps the unlocked copy, so the
+   * normal extraction can read it. The password exists only in this request: it is not stored, logged, or echoed.
+   */
+  router.post('/sessions/:sessionId/documents/:documentId/unlock', wrap(async (req, res) => {
+    const actor = getActor(res);
+    const { sessionId, documentId } = req.params;
+    const password = (req.body as { password?: unknown } | undefined)?.password;
+    if (typeof password !== 'string' || password.length === 0 || password.length > MAX_PDF_PASSWORD_LENGTH) {
+      return sendError(res, 400, 'invalid_request', 'Enter the PDF password.');
+    }
+    const doc = await getDocument(sessionId, documentId);
+    if (!doc) return sendError(res, 404, 'not_found', 'Document not found.');
+    if (doc.kind !== 'pdf') return sendError(res, 400, 'invalid_request', 'Only PDF files can be unlocked.');
+    const bytes = await readFileBytes(doc);
+    if (!bytes) return sendError(res, 404, 'file_missing', 'The file is no longer stored.');
+    const result = await unlockPdf(bytes, password);
+    if (!result.ok) {
+      void logActivity({ type: 'pdf_unlock_failed', actor: actor.email, sessionId, documentId, fileName: doc.originalName, code: result.reason });
+      if (result.reason === 'wrong_password') return sendError(res, 422, 'wrong_password', 'That password did not open the PDF.');
+      if (result.reason === 'unsupported') return sendError(res, 422, 'unsupported_encryption', 'This PDF uses protection that cannot be removed here. Upload an unlocked copy.');
+      return sendError(res, 500, 'unlock_failed', 'The PDF could not be unlocked. Try again or upload an unlocked copy.');
+    }
+    const updated = await replaceDocumentBytes(sessionId, documentId, result.bytes);
+    if (!updated) return sendError(res, 404, 'not_found', 'Document not found.');
+    void logActivity({ type: 'pdf_unlocked', actor: actor.email, sessionId, documentId, fileName: doc.originalName });
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.json(await loadSessionState(sessionId));
   }));
 
   router.delete('/sessions/:sessionId/documents/:documentId', wrap(async (req, res) => {

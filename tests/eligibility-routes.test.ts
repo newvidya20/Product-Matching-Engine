@@ -310,8 +310,14 @@ describe('store safety', () => {
   });
 });
 
-describe('continue is enforced by the backend for all four outcomes', () => {
-  beforeEach(restoreRules);
+describe('continue is enforced by the backend for all four outcomes (gate on)', () => {
+  beforeEach(() => {
+    process.env.ELIGIBILITY_ENFORCE_CONTINUE_GATE = 'true';
+    restoreRules();
+  });
+  after(() => {
+    delete process.env.ELIGIBILITY_ENFORCE_CONTINUE_GATE;
+  });
 
   const continueFor = async (input: ReturnType<typeof passingInput>) => {
     const rec = await create({ input });
@@ -364,9 +370,15 @@ describe('continue is enforced by the backend for all four outcomes', () => {
   });
 });
 
-describe('continue re-evaluates against the current rules (stored result is not trusted)', () => {
-  beforeEach(restoreRules);
-  after(restoreRules);
+describe('continue re-evaluates against the current rules (stored result is not trusted) (gate on)', () => {
+  beforeEach(() => {
+    process.env.ELIGIBILITY_ENFORCE_CONTINUE_GATE = 'true';
+    restoreRules();
+  });
+  after(() => {
+    delete process.env.ELIGIBILITY_ENFORCE_CONTINUE_GATE;
+    restoreRules();
+  });
 
   /** Writes a changed copy of the seed rules as the live file. */
   function writeRules(edit: (rules: any) => void) {
@@ -534,5 +546,32 @@ describe('linking is a pure link update', () => {
     const rec = await create();
     const r = await call('PUT', `/records/${rec.id}`, { linkedAssessmentId: 'missing' });
     assert.equal(r.json.code, 'assessment_not_found');
+  });
+});
+
+describe('continue with the gate off (the default): failed mandatory criteria do not block', () => {
+  beforeEach(() => {
+    delete process.env.ELIGIBILITY_ENFORCE_CONTINUE_GATE;
+    restoreRules();
+  });
+
+  const continueFor = async (input: ReturnType<typeof passingInput>) => {
+    const rec = await create({ input });
+    return { rec, res: await call('POST', `/records/${rec.id}/continue`, {}) };
+  };
+
+  it('NOT_ELIGIBLE continues, keeps its result and returns the prefill', async () => {
+    const { rec, res } = await continueFor(passingInput({ businessVintageYears: 0.5 }));
+    assert.equal(rec.result.outcome, 'NOT_ELIGIBLE');
+    assert.equal(res.status, 200, JSON.stringify(res.json));
+    assert.equal(res.json.record.result.outcome, 'NOT_ELIGIBLE');
+    assert.ok(res.json.record.continuedAt);
+    assert.ok(res.json.prefill);
+  });
+
+  it('INCOMPLETE_DOCUMENTS continues too', async () => {
+    const { rec, res } = await continueFor(passingInput({ personalCibilScore: null, promoterCibilScore: null }));
+    assert.equal(rec.result.outcome, 'INCOMPLETE_DOCUMENTS');
+    assert.equal(res.status, 200, JSON.stringify(res.json));
   });
 });

@@ -487,11 +487,14 @@ export function createEligibilityRouter(options: EligibilityRouterOptions): expr
         const { result, changed } = refreshResult(rec, loaded, now);
         // The gate is here, not only in the UI: only ELIGIBLE and CONDITIONALLY_ELIGIBLE proceed.
         // There is no override workflow, so a blocked record stays blocked until it is reassessed.
-        if (result.outcome === 'INCOMPLETE_DOCUMENTS') {
+        // TEMPORARY (requested): by default a finalized check may continue to New Assessment even when a mandatory
+        // criterion failed or information is missing. Set ELIGIBILITY_ENFORCE_CONTINUE_GATE=true to restore the gate.
+        const enforceGate = /^(1|true|yes)$/i.test(process.env.ELIGIBILITY_ENFORCE_CONTINUE_GATE ?? '');
+        if (enforceGate && result.outcome === 'INCOMPLETE_DOCUMENTS') {
           const blocked = new HttpError(409, 'continue_blocked_incomplete', 'Cannot continue: required information is missing. Add the missing documents or values and reassess.');
           return { value: { blocked, refreshed: changed }, write: changed }; // keep the fresh result, then refuse
         }
-        if (result.outcome === 'NOT_ELIGIBLE') {
+        if (enforceGate && result.outcome === 'NOT_ELIGIBLE') {
           const blocked = new HttpError(409, 'continue_blocked_not_eligible', 'Cannot continue: the borrower does not meet a mandatory lender criterion.');
           return { value: { blocked, refreshed: changed }, write: changed };
         }
@@ -515,9 +518,11 @@ export function createEligibilityRouter(options: EligibilityRouterOptions): expr
         log('record_continue_blocked', { id, code: out.blocked.code, refreshed: out.refreshed ? 'yes' : 'no' });
         throw out.blocked;
       }
+      const outcomeNow = out.body.record.result.outcome;
       log('record_continued', {
         id: out.body.record.id,
         code: out.body.existingAssessmentId ? 'existing_assessment' : 'prefill',
+        gate_override: outcomeNow === 'ELIGIBLE' || outcomeNow === 'CONDITIONALLY_ELIGIBLE' ? 'no' : outcomeNow,
         refreshed: out.refreshed ? 'yes' : 'no',
       });
       res.json(out.body);

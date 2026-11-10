@@ -8,6 +8,7 @@ import { DocumentPreviewDrawer } from '../components/documentAi/DocumentPreviewD
 import { DeleteDocumentDialog } from '../components/documentAi/DeleteDocumentDialog';
 import { ReviewPanel } from '../components/documentAi/ReviewPanel';
 import { ELIGIBILITY_DOC_FIELD_IDS, eligibilityFieldForDocField } from '../components/eligibility/docFieldMap';
+import { buildCandidateOptionsMap, type CandidateOption } from '../components/eligibility/candidateOptions';
 import { useDocumentAiForm } from '../components/documentAi/useDocumentAiForm';
 import { createBlankForm } from '../components/documentAi/formModel';
 import { EligibilityError, eligibilityClient } from '../api/eligibilityClient';
@@ -262,7 +263,12 @@ export function EligibilityModule(props: EligibilityModuleProps = {}) {
     ai.acceptCandidate(fieldId, candidateId, origin);
     const field = eligibilityFieldForDocField(fieldId);
     const result = ai.docState?.fields[fieldId];
-    if (!field || !result) return;
+    if (!field) {
+      // Not an Eligibility input (e.g. a Financials value used later in New Assessment): it is kept in the document form.
+      setNotice('Value chosen and saved to the document form. It is not an Eligibility input, so it carries over to New Assessment.');
+      return;
+    }
+    if (!result) return;
     const candidate = result.candidates.find((c) => c.candidateId === candidateId);
     const value = result.status === 'conflict' ? candidate?.value : (result.value ?? candidate?.value);
     if (value === null || value === undefined) return;
@@ -287,6 +293,31 @@ export function EligibilityModule(props: EligibilityModuleProps = {}) {
     }
     return out;
   }, [pending, ai.docState]);
+
+  /** Every document value per input, for the "N values found" dropdown. */
+  const candidateOptions = useMemo(
+    () => buildCandidateOptionsMap(ai.docState?.fields ?? {}, values),
+    [ai.docState, values]
+  );
+
+  /** Dropdown pick: that exact candidate's value, with its own document source. Nothing is guessed. */
+  const pickCandidateOption = (field: EligibilityInputField, option: CandidateOption) => {
+    if (option.isTotal) {
+      // A sum has no single source field, so it is filled as a typed value and said so.
+      handleChange(field, option.value);
+      setPending((current) => current.filter((item) => item.field !== field));
+      setNotice(`Total of ${option.sourceLabel.split(' ')[0]} values from documents`);
+      return;
+    }
+    ai.acceptCandidate(option.docFieldId, option.candidateId, 'resolved_conflict');
+    handleChange(field, option.value);
+    setSources((current) => ({
+      ...current,
+      [field]: { kind: 'document_ai', documentSessionId: ai.sessionId ?? '', fieldId: option.docFieldId },
+    }));
+    setPending((current) => current.filter((item) => item.field !== field));
+    setNotice(`Using ${option.label}.`);
+  };
 
   const confirmProposal = (field: EligibilityInputField) => {
     const docId = ELIGIBILITY_DOC_FIELD_IDS[field];
@@ -341,8 +372,9 @@ export function EligibilityModule(props: EligibilityModuleProps = {}) {
             createdBy: state.currentUser?.displayName || state.currentUser?.email || null,
           });
       loadRecord(res.record);
-      const outcome = res.record.result?.outcome;
-      if (status === 'final' && (outcome === 'ELIGIBLE' || outcome === 'CONDITIONALLY_ELIGIBLE')) {
+      // TEMPORARY (requested): finalizing continues to New Assessment whatever the outcome, including when a mandatory
+      // criterion is not met. The result stays on the record and its failed criteria are carried as conditions.
+      if (status === 'final') {
         try {
           const continuation = await eligibilityClient.continueToAssessment(res.record.id);
           setRecord(continuation.record);
@@ -445,15 +477,11 @@ export function EligibilityModule(props: EligibilityModuleProps = {}) {
 
   // Continue uses the saved record, never the form, so it needs a saved and unchanged check.
   const outcome = record?.result.outcome;
-  const outcomeAllows = outcome === 'ELIGIBLE' || outcome === 'CONDITIONALLY_ELIGIBLE';
   let continueBlocked: string | null = null;
   if (!record) continueBlocked = 'Save this check first. Continue uses the saved record.';
   else if (dirty) continueBlocked = 'The form has unsaved changes. Save them, then continue.';
-  else if (outcome === 'NOT_ELIGIBLE')
-    continueBlocked = 'Not eligible: a mandatory criterion failed, so this borrower cannot continue to New Assessment.';
-  else if (outcome === 'INCOMPLETE_DOCUMENTS')
-    continueBlocked = 'Incomplete documents: supply the missing mandatory inputs, save, and reassess before continuing.';
-  else if (!outcomeAllows) continueBlocked = 'Only Eligible and Conditionally eligible results can continue.';
+  // The outcome no longer blocks Continue (temporary, requested). The server enforces it again only when
+  // ELIGIBILITY_ENFORCE_CONTINUE_GATE=true, and the 409 handler in continueToAssessment still shows its message.
 
   const working = busy !== null;
   const anyFilled = Object.values(values).some((v) => v.trim() !== '');
@@ -507,8 +535,10 @@ export function EligibilityModule(props: EligibilityModuleProps = {}) {
           onPreview={setPreviewDoc}
           onDelete={setDeleteDoc}
           onRetry={(id) => void ai.retryDocument(id)}
+          onUnlock={ai.unlockDocument}
           onRetryFailed={() => void ai.retryFailed()}
           onChangeType={() => undefined}
+          fieldCountByDocument={ai.docState ? Object.fromEntries(ai.documents.map((d) => [d.documentId, Object.values(ai.docState!.fields).filter((f) => f.candidates.some((c) => c.source.documentId === d.documentId)).length])) : undefined}
           onRefresh={() => void ai.refresh()}
         />
         {ai.documents.length > 0 && (
@@ -621,6 +651,8 @@ export function EligibilityModule(props: EligibilityModuleProps = {}) {
             onConfirm={confirmProposal}
             disabled={isFinal || working}
             onChange={handleChange}
+            candidateOptions={candidateOptions}
+            onPickOption={pickCandidateOption}
           />
 
           <p className="text-[11px] text-stone-500">
@@ -711,6 +743,11 @@ export function EligibilityModule(props: EligibilityModuleProps = {}) {
               ) : (
                 <p className="text-[11px] text-stone-500">
                   Opens New Assessment with these values. Conditions still apply for a conditional result.
+                  {(outcome === 'NOT_ELIGIBLE' || outcome === 'INCOMPLETE_DOCUMENTS') && (
+                    <span className="block text-amber-800">
+                      This check did not pass every mandatory criterion. You can still continue; the unmet criteria stay on the record.
+                    </span>
+                  )}
                 </p>
               )}
             </div>

@@ -5,6 +5,7 @@
  * model, or, with no model available, is treated as 'other' (nothing is extracted from it).
  */
 import type { DocumentType } from '../../src/types/documentAi.ts';
+import { isTriangulationReport } from './triangulationReport.ts';
 
 const RULES: Array<{ type: DocumentType; test: (text: string) => boolean }> = [
   {
@@ -109,6 +110,13 @@ const RULES: Array<{ type: DocumentType; test: (text: string) => boolean }> = [
 /** Looks at the start of the text (where titles are) plus the file name. */
 export function classifyLocally(text: string, fileName: string): DocumentType | null {
   const fileLabel = fileName.replace(/[_.-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  // The app's own borrower intake profile (its form printed as label / value rows): recognised by its
+  // title or by several of its labels, since its text also names GST returns, statements and bank accounts.
+  if (isTriangulationReport(text)) return 'triangulation_report';
+  const head = text.slice(0, 8000);
+  const profileLabels = [/legal\s+entity\s+structure/i, /requested\s+facility\s+amount/i, /primary\s+funding\s+purpose/i, /annual\s+revenue/i, /company\s*\/\s*applicant\s+name/i, /business\s+operating\s+vintage/i]
+    .filter((pattern) => pattern.test(head)).length;
+  if (/borrower\s+intake\s+profile/i.test(head.slice(0, 600)) || profileLabels >= 3) return 'loan_application';
   // A borrower's lender / EMI table is recognised by its column headings alone.
   if (/name\s+of\s+(?:the\s+)?bank\s*\/?\s*nbfc/i.test(text.slice(0, 3000)) && /EMI/i.test(text.slice(0, 3000))) {
     return 'existing_sanction_letter';

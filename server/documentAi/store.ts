@@ -436,6 +436,24 @@ export function updateDocument(
   });
 }
 
+/**
+ * Swaps a stored file for its unlocked copy and makes the document ready to be read again (size and hash follow
+ * the new bytes; status and error are cleared). Returns null when the document is gone or its file was deleted.
+ */
+export function replaceDocumentBytes(sessionId: string, documentId: string, bytes: Uint8Array): Promise<StoredDocument | null> {
+  return withSessionLock(sessionId, async () => {
+    const d = await getDocument(sessionId, documentId);
+    if (!d || d.fileDeletedAt) return null;
+    await atomicWrite(bytesFile(sessionId, documentId, d.kind), bytes);
+    d.sizeBytes = bytes.byteLength;
+    d.sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+    d.status = 'uploaded';
+    d.errorCode = null;
+    await writeJson(docFile(sessionId, documentId), d);
+    return d;
+  });
+}
+
 export async function readFileBytes(doc: StoredDocument): Promise<Buffer | null> {
   if (doc.fileDeletedAt) return null;
   try {

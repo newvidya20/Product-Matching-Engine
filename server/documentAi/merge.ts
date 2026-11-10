@@ -221,7 +221,7 @@ export function maskSubjectRef(raw: string | null, documentType: DocumentType): 
     const digits = text.replace(/\D/g, '');
     return digits.length >= 4 ? `XXXX${digits.slice(-4)}` : null;
   }
-  if (documentType !== 'credit_report') return null;
+  if (documentType !== 'credit_report' && documentType !== 'triangulation_report') return null;
   return /\d{4,}|[A-Z]{5}\d{4}[A-Z]/i.test(text) ? null : text.slice(0, 80);
 }
 

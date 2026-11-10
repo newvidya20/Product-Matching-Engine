@@ -2,6 +2,8 @@ import React from 'react';
 import type { EligibilityInputField, EligibilityInputSources, PendingVerificationInput } from '../../types/eligibility';
 import { FIELD_GROUPS, fieldLabel, sourceLabel, type FormValues } from './fieldMeta';
 
+import type { CandidateOption } from './candidateOptions';
+
 const INPUT =
   'w-full px-3.5 py-2 text-sm bg-white border border-stone-300 rounded-lg focus:outline-none focus:border-orange-600 disabled:bg-stone-100 disabled:text-stone-500';
 
@@ -16,9 +18,23 @@ interface Props {
   proposals?: Partial<Record<EligibilityInputField, string>>;
   onConfirm?: (field: EligibilityInputField) => void;
   onChange: (field: EligibilityInputField, value: string) => void;
+  /** Every document value found per field; a dropdown lists them when there are several. */
+  candidateOptions?: Partial<Record<EligibilityInputField, CandidateOption[]>>;
+  onPickOption?: (field: EligibilityInputField, option: CandidateOption) => void;
 }
 
-export function EligibilityInputForm({ values, sources, errors, pending, disabled, proposals = {}, onConfirm, onChange }: Props) {
+export function EligibilityInputForm({
+  values,
+  sources,
+  errors,
+  pending,
+  disabled,
+  proposals = {},
+  onConfirm,
+  onChange,
+  candidateOptions = {},
+  onPickOption,
+}: Props) {
   const pendingByField = new Map(pending.map((p) => [p.field, p]));
   return (
     <div className="space-y-5">
@@ -77,6 +93,44 @@ export function EligibilityInputForm({ values, sources, errors, pending, disable
                   {value !== '' && source && (
                     <p className="text-[11px] text-stone-500">Source: {sourceLabel(source)}</p>
                   )}
+                  {(() => {
+                    const opts = candidateOptions[meta.field];
+                    if (!opts || opts.length === 0) return null;
+                    if (opts.length === 1 || !onPickOption) {
+                      return (
+                        <p className="text-[11px] text-stone-500 break-words">
+                          1 value found in documents: {opts[0].label}
+                        </p>
+                      );
+                    }
+                    const selected = opts.find((o) => o.isCurrent)?.candidateId ?? '';
+                    return (
+                      <div className="space-y-1">
+                        <label htmlFor={`${id}-options`} className="block text-[11px] font-medium text-stone-600">
+                          {opts.length} values found in documents
+                        </label>
+                        <select
+                          id={`${id}-options`}
+                          value={selected}
+                          disabled={disabled}
+                          onChange={(e) => {
+                            const picked = opts.find((o) => o.candidateId === e.target.value);
+                            if (picked) onPickOption(meta.field, picked);
+                          }}
+                          className="w-full px-2.5 py-1.5 text-xs bg-stone-50 border border-stone-300 rounded-lg focus:outline-none focus:border-orange-600 disabled:bg-stone-100 disabled:text-stone-500"
+                        >
+                          <option value="" disabled>
+                            Pick one of the {opts.length} values…
+                          </option>
+                          {opts.map((o) => (
+                            <option key={o.candidateId} value={o.candidateId}>
+                              {o.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    );
+                  })()}
                   {value === '' && held && (
                     <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 space-y-1.5">
                       {proposals[meta.field] !== undefined ? (

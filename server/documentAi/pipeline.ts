@@ -613,6 +613,7 @@ async function runExtraction(input: ExtractDocumentInput): Promise<DocumentExtra
   let modelFields: RawField[] = [];
   let modelMonths: RawBankMonth[] = [];
   let modelSuspicious = false;
+  let modelBlocked: ExtractionErrorCode | null = null;
   const wantsModel =
     fieldsToRequest(documentType).length > 0 && keyFieldsMissing(documentType, local, gstReturnPeriods.length);
   if (wantsModel && !llmUsable(jobId) && jobModelPaused(jobId)) breakerSkipped = true;
@@ -633,9 +634,19 @@ async function runExtraction(input: ExtractDocumentInput): Promise<DocumentExtra
       return { ok: false, documentId, errorCode: extracted.code };
     } else if (!prepared.content) {
       return { ok: false, documentId, errorCode: extracted.code };
+    } else {
+      modelBlocked = extracted.code; // the file has text, but the model could not help (quota, not configured, ...)
     }
   } else if (!prepared.content && !usedModel) {
     return { ok: false, documentId, errorCode: modelUnavailableCode(jobId) };
+  } else if (wantsModel && !usedModel && isLlmConfigured()) {
+    modelBlocked = modelUnavailableCode(jobId); // configured, but paused (quota) or switched off for this job
+  }
+  // The model was needed, could not run, and the server read nothing itself: that is a failed read the person can
+  // retry, never a successful empty one (it would show as "Done" with no values and no reason).
+  // (Not for a server with no model configured at all: there an empty read is the expected, documented outcome.)
+  if (modelBlocked && modelBlocked !== 'llm_not_configured' && !usedModel && !localFound) {
+    return { ok: false, documentId, errorCode: modelBlocked };
   }
   // The breaker kept the model away and the server read nothing itself: fail fast with its code.
   if (breakerSkipped && !usedModel && !localFound) {

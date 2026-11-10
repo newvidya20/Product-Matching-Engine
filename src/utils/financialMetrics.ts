@@ -39,8 +39,6 @@ export function calculateFinancialRatios(
   const tangibleNetWorth = toNumber(profile.tangibleNetWorth);
   const shareholdersEquity = toNumber(profile.shareholdersEquity);
   const totalOutstandingBorrowings = toNumber(profile.totalOutstandingBorrowings);
-  const operatingCashFlow = toNumber(profile.operatingCashFlow);
-  const annualScheduledPrincipalRepayments = toNumber(profile.annualScheduledPrincipalRepayments);
   const existingMonthlyEmi = toNumber(profile.existingMonthlyEmi);
   const averageMonthlyBankingCredits = toNumber(profile.averageMonthlyBankingCredits);
   const averageMonthlyBankingBalance = toNumber(profile.averageMonthlyBankingBalance);
@@ -78,15 +76,19 @@ export function calculateFinancialRatios(
       ? ebit / interestExpense
       : null;
 
-  // DSCR only when all three inputs are stated: a blank principal or EMI is unknown, never 0 (0 is a real value).
-  // Zero or negative debt service gives null, never Infinity.
-  const totalDebtService =
-    annualScheduledPrincipalRepayments !== null && existingMonthlyEmi !== null
-      ? annualScheduledPrincipalRepayments + existingMonthlyEmi * 12
+  // DSCR = (net profit + depreciation + amortisation + interest) / (total monthly EMI x 12). The EMI already holds the
+  // principal and the interest of each loan, so principal is not added again. Only when net profit, depreciation,
+  // interest and EMI are all stated: a blank is unknown, never 0. Zero or negative debt service gives null, never Infinity.
+  const depreciation = toNumber(profile.depreciation);
+  const amortization = toNumber(profile.amortization);
+  const annualDebtService = existingMonthlyEmi !== null ? existingMonthlyEmi * 12 : null;
+  const cashAvailableForDebtService =
+    netProfitAfterTax !== null && depreciation !== null && interestExpense !== null
+      ? netProfitAfterTax + depreciation + (amortization ?? 0) + interestExpense
       : null;
   const dscr =
-    totalDebtService !== null && totalDebtService > 0 && operatingCashFlow !== null
-      ? operatingCashFlow / totalDebtService
+    annualDebtService !== null && annualDebtService > 0 && cashAvailableForDebtService !== null
+      ? cashAvailableForDebtService / annualDebtService
       : null;
 
   const revenueGrowth =

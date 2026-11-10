@@ -26,7 +26,7 @@ export function passingInput(overrides: Partial<EligibilityInput> = {}): Eligibi
     ebitda: 3_000_000,
     ebit: 2_500_000,
     depreciation: 400_000,
-    amortization: 100_000,
+    amortization: null, // not stated separately
     interestExpense: 500_000,
     profitabilityStatus: 'profitable_2plus_years',
     currentAssets: 5_000_000,
@@ -35,7 +35,7 @@ export function passingInput(overrides: Partial<EligibilityInput> = {}): Eligibi
     tangibleNetWorth: 4_000_000,
     annualScheduledPrincipalRepayments: 600_000,
     existingMonthlyEmi: 100_000,
-    operatingCashFlow: 3_600_000, // DSCR 36 lakh / (6 lakh + 1 lakh x 12) = 2.00
+    operatingCashFlow: 3_600_000, // reference only; DSCR = (15 + 4 + 5 lakh) / (1 lakh x 12) = 2.00
     averageMonthlyBankingCredits: 1_500_000,
     gstAnnualTurnover: 18_000_000,
     gstComplianceStatus: 'compliant',

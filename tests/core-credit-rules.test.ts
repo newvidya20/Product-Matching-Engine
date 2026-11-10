@@ -196,15 +196,17 @@ describe('Eligibility Check boundaries for the five core rules', () => {
   });
 
   it('DSCR 1.00 / 1.01 / 1.004 / 1.005 / missing inputs / zero debt service / missing EMI', () => {
-    const dscr = (ocf: number) => crit(run({ operatingCashFlow: ocf, annualScheduledPrincipalRepayments: 100, existingMonthlyEmi: 0 }), 'dscr');
-    assert.equal(dscr(100).status, 'failed'); // 1.00
-    assert.equal(dscr(101).status, 'passed'); // 1.01
-    assert.equal(dscr(100.4).status, 'failed'); // 1.004 rounds to 1.00
-    assert.equal(dscr(100.5).status, 'passed'); // 1.005 rounds half away from zero to 1.01
-    const allMissing = crit(run({ operatingCashFlow: null, annualScheduledPrincipalRepayments: null, existingMonthlyEmi: null }), 'dscr');
+    // DSCR = (net profit + depreciation + interest) / (EMI x 12): net profit = cash, EMI 100 -> denominator 1200.
+    const dscr = (cash: number) =>
+      crit(run({ netProfitAfterTax: cash, depreciation: 0, amortization: null, interestExpense: 0, existingMonthlyEmi: 100 }), 'dscr');
+    assert.equal(dscr(1200).status, 'failed'); // 1.00
+    assert.equal(dscr(1212).status, 'passed'); // 1.01
+    assert.equal(dscr(1204.8).status, 'failed'); // 1.004 rounds to 1.00
+    assert.equal(dscr(1206).status, 'passed'); // 1.005 rounds half away from zero to 1.01
+    const allMissing = crit(run({ netProfitAfterTax: null, depreciation: null, interestExpense: null, existingMonthlyEmi: null }), 'dscr');
     assert.equal(allMissing.status, 'missing');
-    assert.deepEqual(allMissing.missingInputs, ['operatingCashFlow', 'annualScheduledPrincipalRepayments', 'existingMonthlyEmi']);
-    const zero = crit(run({ annualScheduledPrincipalRepayments: 0, existingMonthlyEmi: 0 }), 'dscr');
+    assert.deepEqual(allMissing.missingInputs, ['netProfitAfterTax', 'depreciation', 'interestExpense', 'existingMonthlyEmi']);
+    const zero = crit(run({ existingMonthlyEmi: 0 }), 'dscr');
     assert.equal(zero.status, 'passed');
     assert.equal(zero.actualDisplay, 'No existing debt service');
     const noEmi = crit(run({ existingMonthlyEmi: null }), 'dscr');
@@ -237,14 +239,14 @@ describe('four outcomes under the core rules', () => {
 
   it('INCOMPLETE_DOCUMENTS: a mandatory core input missing (CIBIL, or DSCR inputs)', () => {
     assert.equal(run({ personalCibilScore: null }).outcome, 'INCOMPLETE_DOCUMENTS');
-    const r = run({ operatingCashFlow: null });
+    const r = run({ interestExpense: null });
     assert.equal(r.outcome, 'INCOMPLETE_DOCUMENTS');
-    assert.deepEqual(r.missingMandatoryInputs, ['operatingCashFlow']);
+    assert.deepEqual(r.missingMandatoryInputs, ['interestExpense']);
   });
 
   it('NOT_ELIGIBLE: CIBIL below 700 or DSCR 1.00 or below (mandatory)', () => {
     assert.equal(run({ personalCibilScore: 699 }).outcome, 'NOT_ELIGIBLE');
-    assert.equal(run({ operatingCashFlow: 1_800_000 }).outcome, 'NOT_ELIGIBLE'); // 18 / 18 = 1.00
+    assert.equal(run({ netProfitAfterTax: -400_000 }).outcome, 'NOT_ELIGIBLE'); // (-4 + 4 + 5 lakh) / 12 lakh = 0.42
   });
 
   it('CMR, TOL/TNW and banking turnover are non-mandatory: a failure gives CONDITIONALLY_ELIGIBLE', () => {
@@ -255,19 +257,24 @@ describe('four outcomes under the core rules', () => {
 });
 
 describe('calculateFinancialRatios DSCR and banking turnover (existing formulas, safe missing)', () => {
-  it('DSCR = operatingCashFlow / (principal + EMI x 12) when all three are given', () => {
-    assert.equal(calculateFinancialRatios({ operatingCashFlow: 3_600_000, annualScheduledPrincipalRepayments: 600_000, existingMonthlyEmi: 100_000 }).dscr, 2);
-    assert.equal(calculateFinancialRatios({ operatingCashFlow: 600_000, annualScheduledPrincipalRepayments: 600_000, existingMonthlyEmi: 0 }).dscr, 1);
+  it('DSCR = (net profit + depreciation + interest) / (EMI x 12), principal is not added again', () => {
+    assert.equal(calculateFinancialRatios({ netProfitAfterTax: 1_500_000, depreciation: 400_000, interestExpense: 500_000, existingMonthlyEmi: 100_000 }).dscr, 2);
+    // amortisation is added when stated
+    assert.equal(calculateFinancialRatios({ netProfitAfterTax: 1_500_000, depreciation: 400_000, amortization: 100_000, interestExpense: 500_000, existingMonthlyEmi: 100_000 }).dscr, 2.08);
+    // operating cash flow and principal repayments do not change it
+    assert.equal(calculateFinancialRatios({ netProfitAfterTax: 600_000, depreciation: 0, interestExpense: 0, existingMonthlyEmi: 50_000, operatingCashFlow: 9, annualScheduledPrincipalRepayments: 9_999_999 }).dscr, 1);
   });
 
-  it('DSCR is null when principal or EMI is missing, never computed as if 0', () => {
-    assert.equal(calculateFinancialRatios({ operatingCashFlow: 1_000, annualScheduledPrincipalRepayments: 500 }).dscr, null);
-    assert.equal(calculateFinancialRatios({ operatingCashFlow: 1_000, existingMonthlyEmi: 50 }).dscr, null);
-    assert.equal(calculateFinancialRatios({ annualScheduledPrincipalRepayments: 500, existingMonthlyEmi: 50 }).dscr, null);
+  it('DSCR is null when net profit, depreciation, interest or EMI is missing, never computed as if 0', () => {
+    const full = { netProfitAfterTax: 1_000, depreciation: 100, interestExpense: 50, existingMonthlyEmi: 10 };
+    for (const key of Object.keys(full) as Array<keyof typeof full>) {
+      const { [key]: _omitted, ...rest } = full;
+      assert.equal(calculateFinancialRatios(rest).dscr, null, key);
+    }
   });
 
   it('zero debt service gives null, never Infinity or NaN', () => {
-    const r = calculateFinancialRatios({ operatingCashFlow: 1_000, annualScheduledPrincipalRepayments: 0, existingMonthlyEmi: 0 });
+    const r = calculateFinancialRatios({ netProfitAfterTax: 1_000, depreciation: 0, interestExpense: 0, existingMonthlyEmi: 0 });
     assert.equal(r.dscr, null);
   });
 

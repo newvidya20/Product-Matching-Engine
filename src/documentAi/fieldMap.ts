@@ -223,6 +223,18 @@ type DefinitionInput = Omit<
 
 function field(input: DefinitionInput): FieldDefinition {
   const extractionMode = input.extractionMode ?? 'direct';
+  // The borrower's own intake profile / loan application states these too (it is the app's own form on
+  // paper). Its figures are self-declared, so they sit beside the audited ones and surface as a
+  // disagreement when they differ; they are never trusted over a statement.
+  const own = input.sourceDocumentTypes ?? [];
+  const sources =
+    extractionMode === 'direct' && (input.policy ?? 'stated') === 'stated'
+      ? [
+          ...own,
+          ...(own.includes('loan_application') ? [] : (['loan_application'] as const)),
+          ...(own.includes('triangulation_report') ? [] : (['triangulation_report'] as const)),
+        ]
+      : input.sourceDocumentTypes;
   return {
     allowedValues: [],
     policy: 'stated',
@@ -230,6 +242,7 @@ function field(input: DefinitionInput): FieldDefinition {
     hasVisibleInput: true,
     defaultValue: '',
     ...input,
+    sourceDocumentTypes: sources,
     extractionMode,
     extractable: extractionMode !== 'none',
   };
@@ -428,6 +441,40 @@ export const FIELD_DEFINITIONS: readonly FieldDefinition[] = [
     valueType: 'string',
     target: { kind: 'review_only', key: 'dateOfEstablishment' },
     sourceDocumentTypes: ['registration_certificate', 'gst_certificate', 'financial_statement', 'itr', 'credit_report'],
+    hasVisibleInput: false,
+    defaultValue: null,
+  }),
+
+  // The triangulation report's own printed (provisional) ratios: shown for review, never computed or applied.
+  field({
+    fieldId: 'review.statedDscr',
+    section: '04',
+    label: "DSCR as printed in the report (provisional, review only)",
+    valueType: 'string',
+    target: { kind: 'review_only', key: 'statedDscr' },
+    sourceDocumentTypes: ['triangulation_report'],
+    hasVisibleInput: false,
+    defaultValue: null,
+  }),
+  // The intake profile's "Credit Bureau Score (CIBIL / Commercial)" row: kept for review beside the personal CIBIL,
+  // never merged into it (the two values can differ and the profile does not say whose score it is).
+  field({
+    fieldId: 'review.bureauScore',
+    section: '03',
+    label: 'Credit Bureau Score as printed (review only)',
+    valueType: 'string',
+    target: { kind: 'review_only', key: 'bureauScore' },
+    sourceDocumentTypes: ['loan_application', 'triangulation_report'],
+    hasVisibleInput: false,
+    defaultValue: null,
+  }),
+  field({
+    fieldId: 'review.statedTolTnw',
+    section: '04',
+    label: "TOL / TNW as printed in the report (provisional, review only)",
+    valueType: 'string',
+    target: { kind: 'review_only', key: 'statedTolTnw' },
+    sourceDocumentTypes: ['triangulation_report'],
     hasVisibleInput: false,
     defaultValue: null,
   }),

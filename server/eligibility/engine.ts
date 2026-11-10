@@ -52,22 +52,28 @@ interface DscrComputation {
 }
 
 /**
- * The project formula (src/utils/financialMetrics.ts calculateFinancialRatios), section 4.1:
- * operatingCashFlow / (annualScheduledPrincipalRepayments + existingMonthlyEmi * 12). Computed only when all three
- * are non-null; 0 is a real value, null is missing and never treated as 0.
+ * DSCR = (net profit after tax + depreciation + amortisation + interest) / (total monthly EMI x 12).
+ *
+ * The numerator is the cash earned before servicing debt: profit with the non-cash charges (depreciation, and
+ * amortisation when stated) and the interest paid added back. The denominator is a year of the borrower's total EMI,
+ * which already holds both the principal and the interest part of each loan, so principal is NOT added a second time.
+ * Computed only when net profit, depreciation, interest and EMI are all stated (0 is a real value, null is missing and
+ * never treated as 0). Amortisation is added only when stated. Zero EMI means no existing debt service.
  */
 function computeDscr(input: EligibilityInput): DscrComputation {
   const required = CRITERION_DEFINITIONS.dscr.requiredInputs;
   const missing = required.filter((f) => input[f] === null);
   if (missing.length === 0) {
-    const ocf = input.operatingCashFlow as number;
-    const principal = input.annualScheduledPrincipalRepayments as number;
-    const emi = input.existingMonthlyEmi as number;
-    const denominator = principal + emi * 12; // both validated >= 0, so 0 is the only non-positive case
+    const cashAvailable =
+      (input.netProfitAfterTax as number) +
+      (input.depreciation as number) +
+      (input.amortization ?? 0) +
+      (input.interestExpense as number);
+    const denominator = (input.existingMonthlyEmi as number) * 12; // validated >= 0, so 0 is the only non-positive case
     if (denominator <= 0) {
       return { basis: 'computed', value: null, noDebtService: true, missing: [] };
     }
-    return { basis: 'computed', value: round2(ocf / denominator), noDebtService: false, missing: [] };
+    return { basis: 'computed', value: round2(cashAvailable / denominator), noDebtService: false, missing: [] };
   }
   if (input.dscrStated !== null) {
     return { basis: 'stated', value: round2(input.dscrStated), noDebtService: false, missing: [] };

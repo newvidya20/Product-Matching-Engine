@@ -26,6 +26,7 @@ const DOCUMENT_TYPE_GUIDE: Record<DocumentType, string> = {
   cma_projection: 'CMA data or financial projections',
   collateral_valuation: 'property or asset valuation report',
   quotation_invoice: 'vendor quotation or proforma invoice',
+  triangulation_report: 'LoanBazaar Business Credit Triangulation Report (integrated credit analysis)',
   other: 'anything else',
 };
 
