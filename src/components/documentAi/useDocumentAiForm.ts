@@ -172,7 +172,10 @@ export function useDocumentAiForm({
     if (isEditing) sessionIdRef.current = newSessionId();
     else if (sessionOverride) sessionIdRef.current = sessionOverride.sessionId?.trim() || newSessionId();
     else {
-      sessionIdRef.current = readStoredSession() || newSessionId();
+      // A new form always starts empty: it never resumes an earlier session's files, results or running job.
+      // Those stay in Assessment History. Nothing is read until the person uploads files here.
+      void readStoredSession;
+      sessionIdRef.current = newSessionId();
       writeStoredSession(sessionIdRef.current);
     }
   }
@@ -871,11 +874,17 @@ export function useDocumentAiForm({
         }
       }
       if (!same()) return;
+      let waiting = false;
       if (sessionExistsRef.current) {
-        await refreshSession().catch((error) => setNotice(errorMessage(error)));
+        const state = await refreshSession().catch((error) => {
+          setNotice(errorMessage(error));
+          return null;
+        });
+        // Files stored by an earlier, interrupted upload are "duplicates" now but were never read: read them.
+        waiting = Boolean(state?.documents.some((d) => d.status === 'uploaded' && !d.fileDeletedAt));
         void flushEdits();
       }
-      if (uploaded > 0) await startExtraction();
+      if (uploaded > 0 || waiting) await startExtraction();
     },
     [ensureSession, flushEdits, refreshSession, startExtraction]
   );

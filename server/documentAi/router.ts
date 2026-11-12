@@ -28,6 +28,7 @@ import type {
 } from '../../src/types/documentAi.ts';
 import { logActivity } from './activity.ts';
 import { authStatus, createAuthSession, getActor, logout, requireDocumentAuth, sendError } from './auth.ts';
+import { normalizeLegacyExcel } from './legacyExcel.ts';
 import { isZipUpload, readZipEntries, validateUpload } from './fileValidation.ts';
 import { forEachZipEntry, maxUploadBytes, receiveToTempFile, UploadTooLargeError } from './archiveUpload.ts';
 import fsp from 'node:fs/promises';
@@ -198,7 +199,7 @@ export function createDocumentAiRouter(options: DocumentAiRouterOptions): expres
     if (typeof body.base64 !== 'string' || body.base64.length === 0) {
       return sendError(res, 400, 'invalid_request', 'base64 content is required.');
     }
-    const originalName = sanitizeOriginalName(body.fileName);
+    let originalName = sanitizeOriginalName(body.fileName);
     const reject = (status: number, code: Parameters<typeof sendError>[2], message: string, bytes = 0) => {
       void logActivity({
         type: 'file_rejected',
@@ -217,7 +218,7 @@ export function createDocumentAiRouter(options: DocumentAiRouterOptions): expres
     if (body.base64.length % 4 !== 0 || !BASE64_PATTERN.test(body.base64)) {
       return sendError(res, 400, 'invalid_request', 'base64 content is not valid.');
     }
-    const bytes = Buffer.from(body.base64, 'base64');
+    let bytes = Buffer.from(body.base64, 'base64');
     if (bytes.byteLength === 0) return sendError(res, 400, 'invalid_request', 'The file is empty.');
     if (bytes.byteLength > DOCUMENT_AI_LIMITS.maxFileBytes) {
       return reject(413, 'file_too_large', 'This file is larger than the 12 MB limit.', bytes.byteLength);
@@ -229,7 +230,16 @@ export function createDocumentAiRouter(options: DocumentAiRouterOptions): expres
       const stored: Array<{ document: unknown; duplicate: boolean }> = [];
       const skipped: Array<{ fileName: string; reason: string }> = [];
       for (const entry of unpacked.entries) {
-        const entryName = sanitizeOriginalName(entry.name);
+        let entryName = sanitizeOriginalName(entry.name);
+        const legacy = normalizeLegacyExcel(entryName, entry.bytes);
+        if (legacy === null) {
+          skipped.push({ fileName: entryName, reason: 'This .xls file could not be read. It may be damaged or password protected.' });
+          continue;
+        }
+        if (legacy !== 'unchanged') {
+          entryName = sanitizeOriginalName(legacy.name);
+          entry.bytes = legacy.bytes;
+        }
         const entryValidation = await validateUpload(entryName, entry.bytes);
         if (!entryValidation.ok) {
           skipped.push({ fileName: entryName, reason: entryValidation.message });
@@ -274,6 +284,14 @@ export function createDocumentAiRouter(options: DocumentAiRouterOptions): expres
       return;
     }
 
+    const legacySingle = normalizeLegacyExcel(originalName, bytes);
+    if (legacySingle === null) {
+      return reject(415, 'unsupported_type', 'This .xls file could not be read. It may be damaged or password protected.', bytes.byteLength);
+    }
+    if (legacySingle !== 'unchanged') {
+      originalName = sanitizeOriginalName(legacySingle.name);
+      bytes = Buffer.from(legacySingle.bytes);
+    }
     const validation = await validateUpload(originalName, bytes);
     if (!validation.ok) {
       return reject(validation.status, validation.code, validation.message, bytes.byteLength);
@@ -342,8 +360,18 @@ export function createDocumentAiRouter(options: DocumentAiRouterOptions): expres
     const stored: unknown[] = [];
     const skipped: Array<{ fileName: string; reason: string }> = [];
     let allDuplicate = true;
-    const store = async (name: string, bytes: Buffer) => {
-      const entryName = sanitizeOriginalName(name);
+    const store = async (name: string, rawBytes: Buffer) => {
+      let bytes = rawBytes;
+      let entryName = sanitizeOriginalName(name);
+      const legacy = normalizeLegacyExcel(entryName, bytes);
+      if (legacy === null) {
+        skipped.push({ fileName: entryName, reason: 'This .xls file could not be read. It may be damaged or password protected.' });
+        return;
+      }
+      if (legacy !== 'unchanged') {
+        entryName = sanitizeOriginalName(legacy.name);
+        bytes = legacy.bytes;
+      }
       const validation = await validateUpload(entryName, bytes);
       if (!validation.ok) {
         skipped.push({ fileName: entryName, reason: validation.message });
@@ -405,7 +433,13 @@ export function createDocumentAiRouter(options: DocumentAiRouterOptions): expres
     }
 
     if (stored.length === 0) {
-      const reason = skipped[0]?.reason ?? 'No readable documents were found in this upload.';
+      // Say why, grouped: "12 files: Older Office files (.xls) ... ; 3 files: ...", not just the first reason.
+      const groups = new Map<string, number>();
+      for (const item of skipped) groups.set(item.reason, (groups.get(item.reason) ?? 0) + 1);
+      const reason = skipped.length
+        ? `None of the ${skipped.length} file${skipped.length === 1 ? '' : 's'} could be read. ` +
+          [...groups.entries()].slice(0, 4).map(([why, n]) => `${n} × ${why}`).join(' · ')
+        : 'No readable documents were found in this upload.';
       void logActivity({ type: 'file_rejected', actor: actor.email, sessionId, fileName: originalName, code: 'unsupported_type', counts: { bytes: received.bytes } });
       return sendError(res, 415, 'unsupported_type', reason);
     }

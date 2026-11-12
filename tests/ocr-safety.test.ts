@@ -1,3 +1,4 @@
+process.env.DOCUMENT_AI_LLM_SCOPE = 'all'; // these tests exercise the model fallback on text files; production keeps those local-only
 /**
  * Safety limits around local OCR and page rendering:
  * - every value from OCR text, the model's included, goes to review (H1);

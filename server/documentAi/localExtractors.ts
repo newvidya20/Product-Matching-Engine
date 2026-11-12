@@ -21,9 +21,11 @@ import { bankMonthsFromStatement } from './bankStatements.ts';
 import { readFinancialStatements } from './financialStatements.ts';
 import { readProfileForm } from './profileForm.ts';
 import { readTriangulationReport } from './triangulationReport.ts';
+import { readRepaymentSchedule } from './repaymentSchedule.ts';
+import { readLenderSanction } from './lenderSanction.ts';
 import { readCompanyIdentity } from './companyIdentity.ts';
 import { readCreditReport } from './creditReports.ts';
-import { readObligationSheet, readSanctionLetter } from './debtObligations.ts';
+import { readObligationSheet } from './debtObligations.ts';
 import { readGstr3b, type RawGstReturnPeriod } from './gstr3b.ts';
 import { normalizeFinancialYear, normalizePeriod, parseDate, type AmountUnit } from './validators.ts';
 
@@ -915,7 +917,10 @@ export function extractLocally(input: LocalExtractionInput): LocalExtraction {
       ? []
       : content.kind === 'sheets'
         ? readObligationSheet(content.sheets, confidence)
-        : readSanctionLetter(content.pages, confidence);
+        : [
+            ...readLenderSanction(content.pages, confidence),
+            ...readRepaymentSchedule(content.pages, confidence, new Date().toISOString().slice(0, 10)),
+          ];
   // The app's own intake profile (the form printed as label / value rows).
   const profile = documentType === 'loan_application' && content.kind === 'text' ? readProfileForm(content.pages, confidence) : [];
   const profileIds = new Set(profile.map((field) => field.fieldId));

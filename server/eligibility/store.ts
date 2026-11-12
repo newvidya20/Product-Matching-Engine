@@ -3,6 +3,7 @@
  * the same directory, then rename) behind one in-process promise queue. A file that exists but cannot be parsed
  * is never overwritten: every operation fails until it is fixed, so a read error cannot wipe records.
  */
+import { renameReplace } from '../atomicRename.ts';
 import crypto from 'node:crypto';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
@@ -55,7 +56,7 @@ async function writeRecordsFile(data: RecordsFile): Promise<void> {
   const tmp = `${file}.${crypto.randomBytes(6).toString('hex')}.tmp`;
   try {
     await fsp.writeFile(tmp, JSON.stringify(data, null, 2), { mode: FILE_MODE });
-    await fsp.rename(tmp, file);
+    await renameReplace(tmp, file);
   } catch (err) {
     await fsp.rm(tmp, { force: true }).catch(() => undefined);
     throw err;

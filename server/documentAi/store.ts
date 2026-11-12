@@ -3,6 +3,7 @@
  * Only server-generated IDs and FILE_KIND_EXTENSION build paths. originalName is never part of a path.
  * Nothing here logs or returns document contents; results/ is borrower data.
  */
+import { renameReplace } from '../atomicRename.ts';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
@@ -101,7 +102,7 @@ async function atomicWrite(file: string, data: string | Uint8Array): Promise<voi
   const tmp = `${file}.${crypto.randomBytes(6).toString('hex')}.tmp`;
   try {
     await fsp.writeFile(tmp, data, { mode: FILE_MODE });
-    await fsp.rename(tmp, file);
+    await renameReplace(tmp, file);
   } catch (err) {
     await fsp.rm(tmp, { force: true }).catch(() => undefined);
     throw err;

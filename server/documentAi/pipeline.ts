@@ -543,8 +543,33 @@ export function keyFieldsMissing(documentType: DocumentType, local: LocalExtract
 
 // ------------------------------------------------------------------ One file
 
+/**
+ * Personal ID papers (PAN, Aadhaar, passport) and photos are not used by this app. They are recognised by
+ * file name and skipped before any reading or AI request, so they never spend the AI allowance.
+ */
+const IDENTITY_FILE_NAME = /aadh?aa?r|passport|\bpan\b[\s_.&-]*(card|copy|no\b)|\bpan\b\s*\.[a-z]+$/i;
+const PHOTO_FILE_NAME = /\b(pic|photo|selfie|passport[\s_-]*size)\b/i;
+export function isIgnoredIdentityFile(fileName: string, kind: string): boolean {
+  if (IDENTITY_FILE_NAME.test(fileName)) return true;
+  return (kind === 'jpeg' || kind === 'png' || kind === 'webp') && PHOTO_FILE_NAME.test(fileName);
+}
+
 async function runExtraction(input: ExtractDocumentInput): Promise<DocumentExtractionResult> {
   const { documentId, fileName, kind, bytes, declaredDocumentType, today, signal, jobId } = input;
+
+  if (!declaredDocumentType && isIgnoredIdentityFile(fileName, kind)) {
+    return {
+      ok: true,
+      documentId,
+      documentType: 'other',
+      classificationConfidence: 1,
+      fields: [],
+      bankMonthlyTotals: [],
+      injectionSuspected: false,
+      droppedLowConfidence: 0,
+      model: 'skipped-identity-document',
+    };
+  }
 
   // An /Encrypt mark alone does not mean the file needs a password: many bureau and bank PDFs are
   // encrypted only to stop editing and open freely. Only a file the PDF engine cannot open is refused.
@@ -560,6 +585,11 @@ async function runExtraction(input: ExtractDocumentInput): Promise<DocumentExtra
   }
   // Set when the model would have been asked but this job's breaker is open.
   let breakerSkipped = false;
+  // The AI is for files the server could not read itself (a scan or image local OCR got nothing from).
+  // Anything with readable text or rows (text PDFs, spreadsheets, CSV, Word, OCR text) is read locally only.
+  // DOCUMENT_AI_LLM_SCOPE=all restores the old behaviour of also asking it about files that have text.
+  const aiInScope = !prepared.content || process.env.DOCUMENT_AI_LLM_SCOPE?.trim().toLowerCase() === 'all';
+  const aiUsable = () => aiInScope && llmUsable(jobId);
 
   // Classification: the declared type, then the file's own title, then the model, else `other`.
   let usedModel = false;
@@ -573,7 +603,7 @@ async function runExtraction(input: ExtractDocumentInput): Promise<DocumentExtra
   } else if (localType) {
     documentType = localType;
     classificationConfidence = 0.9;
-  } else if (llmUsable(jobId)) {
+  } else if (aiUsable()) {
     const classified = await tryModel(signal, (s) => classifyWithModel(prepared, s), jobId);
     if (classified.ok) {
       usedModel = true;
@@ -581,7 +611,7 @@ async function runExtraction(input: ExtractDocumentInput): Promise<DocumentExtra
     } else if (!prepared.content || !['llm_quota_exhausted', 'llm_not_configured'].includes(classified.code)) {
       return { ok: false, documentId, errorCode: classified.code };
     }
-  } else if (jobModelPaused(jobId)) {
+  } else if (aiInScope && jobModelPaused(jobId)) {
     breakerSkipped = true;
   }
 
@@ -616,8 +646,8 @@ async function runExtraction(input: ExtractDocumentInput): Promise<DocumentExtra
   let modelBlocked: ExtractionErrorCode | null = null;
   const wantsModel =
     fieldsToRequest(documentType).length > 0 && keyFieldsMissing(documentType, local, gstReturnPeriods.length);
-  if (wantsModel && !llmUsable(jobId) && jobModelPaused(jobId)) breakerSkipped = true;
-  if (wantsModel && llmUsable(jobId)) {
+  if (wantsModel && aiInScope && !llmUsable(jobId) && jobModelPaused(jobId)) breakerSkipped = true;
+  if (wantsModel && aiUsable()) {
     const extracted = await tryModel(signal, (s) => extractWithModel(prepared, documentType, s), jobId);
     if (extracted.ok) {
       usedModel = true;
@@ -639,7 +669,7 @@ async function runExtraction(input: ExtractDocumentInput): Promise<DocumentExtra
     }
   } else if (!prepared.content && !usedModel) {
     return { ok: false, documentId, errorCode: modelUnavailableCode(jobId) };
-  } else if (wantsModel && !usedModel && isLlmConfigured()) {
+  } else if (wantsModel && aiInScope && !usedModel && isLlmConfigured()) {
     modelBlocked = modelUnavailableCode(jobId); // configured, but paused (quota) or switched off for this job
   }
   // The model was needed, could not run, and the server read nothing itself: that is a failed read the person can

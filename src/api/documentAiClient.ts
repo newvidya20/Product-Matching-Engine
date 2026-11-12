@@ -86,7 +86,9 @@ async function parseError(response: Response): Promise<DocumentAiError> {
     body = null;
   }
   const code = (body?.code ?? 'internal_error') as DocumentAiErrorCode;
-  const message = FRIENDLY_MESSAGES[code] ?? body?.error ?? `Request failed (${response.status}).`;
+  // For a rejected file the server's own reason is more useful than the generic line (it names what was wrong).
+  const preferServer = code === 'unsupported_type' && !!body?.error;
+  const message = (preferServer ? body?.error : FRIENDLY_MESSAGES[code]) ?? body?.error ?? `Request failed (${response.status}).`;
   return new DocumentAiError(response.status, code, message, body?.jobId);
 }
 

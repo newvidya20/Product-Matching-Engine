@@ -705,7 +705,7 @@ export const FIELD_DEFINITIONS: readonly FieldDefinition[] = [
     hasVisibleInput: false,
   }),
   money('annualScheduledPrincipalRepayments', 'Annual Scheduled Principal Repayments',
-    ['financial_statement', 'existing_sanction_letter'], { ...ANNUAL, hasVisibleInput: false }),
+    ['financial_statement', 'existing_sanction_letter'], { ...ANNUAL, periodScoped: false, hasVisibleInput: false }),
   money('existingMonthlyEmi', 'Existing Monthly EMI (Financial)',
     ['credit_report', 'existing_sanction_letter', 'loan_application'], {
       hasVisibleInput: false,
