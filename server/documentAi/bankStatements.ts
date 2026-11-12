@@ -537,6 +537,8 @@ export function bankMonthsFromStatement(
     return {
       month: m.month,
       totalCredits: m.credits.toFixed(2),
+      // Same proof as credits: merge only accepts it because `reconciled` is set when it is.
+      totalDebits: statement.reconciled ? m.debits.toFixed(2) : null,
       closingBalance: closing === null ? null : closing.toFixed(2),
       statedUnit: null,
       unitText: null,

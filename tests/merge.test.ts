@@ -570,6 +570,7 @@ describe('scale headers outside the snippet (contract 6.3)', () => {
     const row: RawBankMonth = {
       month: '2025-05',
       totalCredits: '2,40,000.00',
+      totalDebits: null,
       closingBalance: null,
       statedUnit: null,
       unitText: null,
@@ -583,6 +584,19 @@ describe('scale headers outside the snippet (contract 6.3)', () => {
     assert.deepEqual(buildBankMonthlyTotals([row], context(pdfSource('(Rs. in lakhs)', 'Total credits: 2,40,000.00'), 'bank_statement')), []);
     const [kept] = buildBankMonthlyTotals([row], context(pdfSource('Balance Rs. Cr', 'Total credits: 2,40,000.00'), 'bank_statement'));
     assert.equal(kept?.totalCredits, 240000);
+  });
+
+  it('carries totalDebits only when proved or printed in the snippet, never 0 by default', () => {
+    const base: RawBankMonth = {
+      month: '2025-05', totalCredits: '2,40,000.00', totalDebits: '1,10,000.25', closingBalance: null, statedUnit: null, unitText: null,
+      confidence: 0.95, subjectRef: '4321', page: 1, sheetName: null, cellRef: null, snippet: 'Total credits: 2,40,000.00',
+    };
+    const ctx = context(pdfSource('Balance Rs. Cr', 'Total credits: 2,40,000.00'), 'bank_statement');
+    assert.equal(buildBankMonthlyTotals([{ ...base, reconciled: true }], ctx)[0].totalDebits, 110000.25);
+    const [unproved] = buildBankMonthlyTotals([base], ctx);
+    assert.equal(unproved.totalDebits, null);
+    assert.equal(unproved.totalCredits, 240000);
+    assert.equal(buildBankMonthlyTotals([{ ...base, totalDebits: null, reconciled: true }], ctx)[0].totalDebits, null);
   });
 
   it('keeps PDF text by page when it reads a file', async () => {
@@ -670,6 +684,7 @@ describe('source text check (contract 4.2, 12)', () => {
     const row: RawBankMonth = {
       month: '2025-05',
       totalCredits: '2,40,000.00 Cr',
+      totalDebits: null,
       closingBalance: '9,99,999.00 Cr',
       statedUnit: null,
       unitText: null,
@@ -747,6 +762,7 @@ describe('source text check (contract 4.2, 12)', () => {
     const month = (n: number): RawBankMonth => ({
       month: `2025-0${n}`,
       totalCredits: `${n},40,000.00`,
+      totalDebits: null,
       closingBalance: null,
       statedUnit: null,
       unitText: null,
@@ -1191,7 +1207,7 @@ describe('unit checks (contract 6.3)', () => {
 
     it('drops a bank month under a header it was not scaled by', () => {
       const row: RawBankMonth = {
-        month: '2025-05', totalCredits: '2,40,000.00', closingBalance: null, statedUnit: null, unitText: null,
+        month: '2025-05', totalCredits: '2,40,000.00', totalDebits: null, closingBalance: null, statedUnit: null, unitText: null,
         confidence: 0.95, subjectRef: '4321', page: 1, sheetName: null, cellRef: null,
         snippet: "(Rs. in '000) Total credits 2,40,000.00",
       };

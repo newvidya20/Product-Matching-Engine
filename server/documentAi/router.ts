@@ -34,6 +34,7 @@ import { forEachZipEntry, maxUploadBytes, receiveToTempFile, UploadTooLargeError
 import fsp from 'node:fs/promises';
 import { abortDocumentExtraction, JobInProgressError, startExtraction } from './jobs.ts';
 import { readSpreadsheetPreview } from './pipeline.ts';
+import { summarizeSessionTotals } from './totals.ts';
 import { MAX_PDF_PASSWORD_LENGTH, unlockPdf } from './unlockPdf.ts';
 import {
   addDocument,
@@ -41,6 +42,7 @@ import {
   findSessionByAssessment,
   getDocument,
   getJob,
+  getResult,
   getSession,
   getSettings,
   isDisabledByEnv,
@@ -449,6 +451,18 @@ export function createDocumentAiRouter(options: DocumentAiRouterOptions): expres
   router.get('/sessions/:sessionId/documents', wrap(async (req, res) => {
     if (!(await getSession(req.params.sessionId))) return sendError(res, 404, 'not_found', 'Session not found.');
     res.json({ documents: await listDocuments(req.params.sessionId) });
+  }));
+
+  router.get('/sessions/:sessionId/totals', wrap(async (req, res) => {
+    const { sessionId } = req.params;
+    if (!isSessionId(sessionId) || !(await getSession(sessionId))) return sendError(res, 404, 'not_found', 'Session not found.');
+    const results = [];
+    for (const d of await listDocuments(sessionId)) {
+      if (d.status !== 'extracted') continue;
+      const r = await getResult(sessionId, d.documentId);
+      if (r && r.ok) results.push(r);
+    }
+    res.json(summarizeSessionTotals(results));
   }));
 
   router.patch('/sessions/:sessionId/documents/:documentId', wrap(async (req, res) => {

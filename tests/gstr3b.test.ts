@@ -1,4 +1,3 @@
-process.env.DOCUMENT_AI_LLM_SCOPE = 'all'; // these tests exercise the model fallback on text files; production keeps those local-only
 /**
  * GSTR-3B and ITR-V read with no AI, the monthly-to-annual GST derivation, the per-job model circuit
  * breaker, the memory gate's diagnostics, and the PDF engine's load time not counting against a file.

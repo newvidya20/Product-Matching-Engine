@@ -617,6 +617,7 @@ async function processDocument(
     const saved = await saveResultAndRemerge(sessionId, documentId, result, (d) => {
       d.status = 'extracted';
       d.errorCode = null;
+      d.valuesRead = result.fields.length + result.bankMonthlyTotals.length + (result.gstReturnPeriods?.length ?? 0);
       if (!d.documentTypeOverridden) d.documentType = result.documentType;
     });
     if (!saved) {

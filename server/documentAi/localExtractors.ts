@@ -21,6 +21,7 @@ import { bankMonthsFromStatement } from './bankStatements.ts';
 import { readFinancialStatements } from './financialStatements.ts';
 import { readProfileForm } from './profileForm.ts';
 import { readTriangulationReport } from './triangulationReport.ts';
+import { readCompanyProfile } from './companyProfile.ts';
 import { readRepaymentSchedule } from './repaymentSchedule.ts';
 import { readLenderSanction } from './lenderSanction.ts';
 import { readCompanyIdentity } from './companyIdentity.ts';
@@ -759,9 +760,10 @@ function bankRow(
   closing: string | null,
   location: { page: number | null; sheetName: string | null; cellRef: string | null; snippet: string },
   confidence: number,
-  subjectRef: string | null
+  subjectRef: string | null,
+  debits: string | null = null
 ): RawBankMonth {
-  return { ...location, month, totalCredits: credits, closingBalance: closing, statedUnit: null, unitText: null, confidence, subjectRef };
+  return { ...location, month, totalCredits: credits, totalDebits: debits, closingBalance: closing, statedUnit: null, unitText: null, confidence, subjectRef };
 }
 
 function bankMonthsFromText(pages: ReadonlyArray<readonly string[]>, confidence: number, complete = true): RawBankMonth[] {
@@ -800,7 +802,8 @@ function bankMonthsFromText(pages: ReadonlyArray<readonly string[]>, confidence:
         closing >= 0 ? figures[closing] : null,
         { page, sheetName: null, cellRef: null, snippet: snip(text) },
         confidence,
-        subjectRef
+        subjectRef,
+        columns.indexOf('debits') >= 0 ? figures[columns.indexOf('debits')] : null
       )
     );
   }
@@ -842,6 +845,7 @@ function bankMonthsFromSheets(fileKind: 'xlsx' | 'csv', sheets: readonly ParsedS
     let monthColumn = -1;
     let creditsColumn = -1;
     let closingColumn = -1;
+    let debitsColumn = -1;
     let subjectRef: string | null = null;
     for (const row of sheet.rows) {
       subjectRef = row.cells.map((cell) => cell.text).join(' ').match(ACCOUNT_NUMBER)?.[1] ?? subjectRef;
@@ -849,6 +853,7 @@ function bankMonthsFromSheets(fileKind: 'xlsx' | 'csv', sheets: readonly ParsedS
       if (month) {
         monthColumn = month.column;
         creditsColumn = row.cells.find((c) => /^(?:total\s+)?(?:credits?|deposits?)(?:\s+amount)?$/i.test(c.text.trim()))?.column ?? -1;
+        debitsColumn = row.cells.find((c) => /^(?:total\s+)?(?:debits?|withdrawals?)(?:\s+amount)?$/i.test(c.text.trim()))?.column ?? -1;
         closingColumn = row.cells.find((c) => /^(?:closing|month[\s-]*end|eod)\s+balance$/i.test(c.text.trim()))?.column ?? -1;
         continue;
       }
@@ -862,6 +867,7 @@ function bankMonthsFromSheets(fileKind: 'xlsx' | 'csv', sheets: readonly ParsedS
       };
       const credits = creditsColumn >= 0 ? at(creditsColumn) : null;
       const closing = closingColumn >= 0 ? at(closingColumn) : null;
+      const debits = debitsColumn >= 0 ? at(debitsColumn) : null;
       if (!credits && !closing) continue;
       if (rows.has(key)) {
         rows.delete(key);
@@ -880,7 +886,8 @@ function bankMonthsFromSheets(fileKind: 'xlsx' | 'csv', sheets: readonly ParsedS
             snippet: snip(row.cells.map((c) => c.text).join(' | ')),
           },
           confidence,
-          subjectRef
+          subjectRef,
+          debits?.text.trim() ?? null
         )
       );
     }
@@ -923,6 +930,7 @@ export function extractLocally(input: LocalExtractionInput): LocalExtraction {
           ];
   // The app's own intake profile (the form printed as label / value rows).
   const profile = documentType === 'loan_application' && content.kind === 'text' ? readProfileForm(content.pages, confidence) : [];
+  const narrative = documentType === 'loan_application' && content.kind === 'text' && profile.length === 0 ? readCompanyProfile(content.pages, confidence) : [];
   const profileIds = new Set(profile.map((field) => field.fieldId));
   const identity = content.kind === 'text' ? readCompanyIdentity(content.pages, confidence) : [];
   const credit = documentType === 'credit_report' && content.kind === 'text' ? readCreditReport(content.pages, confidence) : null;
@@ -937,6 +945,7 @@ export function extractLocally(input: LocalExtractionInput): LocalExtraction {
     .filter((field) => !generic.some((g) => g.fieldId === field.fieldId && g.rawValue === field.rawValue))
     .concat(statements)
     .concat(profile)
+    .concat(narrative)
     .concat(documentType === 'triangulation_report' && content.kind === 'text' ? readTriangulationReport(content.pages, confidence) : []);
   const seen = new Set<string>();
   const fields = [

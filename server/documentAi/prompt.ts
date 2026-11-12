@@ -92,7 +92,7 @@ export function buildExtractionInstruction(documentType: DocumentType): string {
     '10. confidence is your certainty from 0 to 1 that rawValue is read correctly and belongs to this field.',
     '11. Bank statement credits are never turnover. An existing facility is never a requested amount. commercialCmrRank is a 1 to 10 rank, not a score.',
     '12. For a credit report on an individual, use financialProfile.personalCibilScore.',
-    '13. bankMonthlyTotals: only monthly totals printed in the statement, one row per month and account. Do not add transactions up yourself. Leave the array empty if none are printed.',
+    '13. bankMonthlyTotals: only monthly totals printed in the statement, one row per month and account. Do not add transactions up yourself. Leave the array empty if none are printed. totalDebits is the total of all debits/withdrawals in the month exactly as printed, or null.',
     '14. Report only the fields listed below.',
     '15. A figure on a row that says loss, deficit, negative or similar is reported exactly as printed, with no sign added or removed, and with that row label in the snippet. Never present a loss as a profit.',
     '',
@@ -161,6 +161,7 @@ export const EXTRACTION_SCHEMA: Schema = {
         properties: {
           month: { type: Type.STRING, description: 'YYYY-MM' },
           totalCredits: nullableString('As printed'),
+          totalDebits: nullableString('Total of all debits/withdrawals in the month exactly as printed, or null'),
           closingBalance: nullableString('As printed'),
           statedUnit: { type: Type.STRING, nullable: true, enum: [...AMOUNT_UNITS] },
           unitText: nullableString('The unit header, quoted verbatim'),
@@ -249,6 +250,8 @@ export interface RawBankMonth extends RawLocation {
   partial?: boolean;
   month: string;
   totalCredits: string | null;
+  /** Total of all debits/withdrawals in the month, exactly as printed or proved from rows; null otherwise. */
+  totalDebits: string | null;
   closingBalance: string | null;
   statedUnit: AmountUnit | null;
   unitText: string | null;
@@ -332,6 +335,7 @@ function readBankMonth(item: unknown): RawBankMonth | null {
     ...location,
     month: record.month,
     totalCredits: optionalString(record.totalCredits),
+    totalDebits: optionalString(record.totalDebits),
     closingBalance: optionalString(record.closingBalance),
     statedUnit: readStatedUnit(record.statedUnit),
     unitText: optionalString(record.unitText),

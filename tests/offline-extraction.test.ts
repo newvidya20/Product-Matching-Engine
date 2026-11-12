@@ -1,4 +1,3 @@
-process.env.DOCUMENT_AI_LLM_SCOPE = 'all'; // these tests exercise the model fallback on text files; production keeps those local-only
 /**
  * The whole pipeline with no AI quota: every accepted format ends in a result (done or failed),
  * scans and images are read by local OCR, and a model that reports its daily quota used up leaves

@@ -21,6 +21,7 @@ import {
   type UploadDocumentRequest,
   type UploadDocumentResponse,
 } from '../types/documentAi';
+import type { SessionTotals } from '../types/totals';
 
 /** Error from a Document AI route. The message never carries borrower data. */
 export class DocumentAiError extends Error {
@@ -88,24 +89,42 @@ async function parseError(response: Response): Promise<DocumentAiError> {
   const code = (body?.code ?? 'internal_error') as DocumentAiErrorCode;
   // For a rejected file the server's own reason is more useful than the generic line (it names what was wrong).
   const preferServer = code === 'unsupported_type' && !!body?.error;
+  if (TRANSIENT_STATUSES.has(response.status) && !body?.error) {
+    return new DocumentAiError(response.status, code, 'The server is busy or restarting. Wait a minute and press Retry.', body?.jobId);
+  }
   const message = (preferServer ? body?.error : FRIENDLY_MESSAGES[code]) ?? body?.error ?? `Request failed (${response.status}).`;
   return new DocumentAiError(response.status, code, message, body?.jobId);
 }
+
+/** A busy or restarting server (the host's proxy answers 429/502/503/504) is retried a few times, not shown at once. */
+const TRANSIENT_STATUSES = new Set([429, 502, 503, 504]);
+const RETRY_DELAYS_MS = [1500, 4000, 9000, 15000, 25000];
+const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 async function send(path: string, init: RequestInit = {}, retried = false): Promise<Response> {
   const headers = new Headers(init.headers);
   if (init.body !== undefined && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
-  let response: Response;
-  try {
-    response = await fetch(`${DOCUMENT_AI_API_BASE}${path}`, {
-      ...init,
-      headers,
-      credentials: 'same-origin',
-    });
-  } catch {
-    throw new DocumentAiError(0, 'network', FRIENDLY_MESSAGES.network ?? 'Network error.');
+  let response: Response | null = null;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      response = await fetch(`${DOCUMENT_AI_API_BASE}${path}`, {
+        ...init,
+        headers,
+        credentials: 'same-origin',
+      });
+    } catch {
+      response = null;
+      if (attempt >= RETRY_DELAYS_MS.length) {
+        throw new DocumentAiError(0, 'network', FRIENDLY_MESSAGES.network ?? 'Network error.');
+      }
+      await pause(RETRY_DELAYS_MS[attempt]);
+      continue;
+    }
+    if (!TRANSIENT_STATUSES.has(response.status) || attempt >= RETRY_DELAYS_MS.length) break;
+    const retryAfter = Number(response.headers.get('Retry-After'));
+    await pause(Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter * 1000, 30000) : RETRY_DELAYS_MS[attempt]);
   }
   if (response.ok) return response;
   const error = await parseError(response);
@@ -155,6 +174,7 @@ export const documentAiClient = {
       throw error;
     }
   },
+  getTotals: (sessionId: string) => json<SessionTotals>(`/sessions/${enc(sessionId)}/totals`),
   linkSession: (sessionId: string, assessmentId: string) =>
     json<DocumentSessionState>(`/sessions/${enc(sessionId)}/link`, {
       method: 'POST',

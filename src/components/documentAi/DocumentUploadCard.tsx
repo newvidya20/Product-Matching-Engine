@@ -64,7 +64,7 @@ function StatusChip({ doc, inRunningJob, fieldCount }: { doc: StoredDocument; in
         fieldCount === 0 ? (
           <span className={`${base} text-amber-800`}>
             <AlertCircle className="w-3 h-3 shrink-0" aria-hidden="true" /> Read, but no values were taken from this
-            file. The file type may have no built-in reader here. Enter its values manually, or use Retry all failed
+            file. The file type may have no built-in reader here. Enter its values manually, or use Retry all unread
             once the AI service is available.
           </span>
         ) : (
@@ -112,6 +112,8 @@ interface Props {
   onUnlock?: (documentId: string, password: string) => Promise<string | null>;
   /** Retries every failed file in one job. The retry-all button is hidden when this is not passed. */
   onRetryFailed?: () => void;
+  /** Reads every file again, to pick up values a newer reader can take (needs nothing re-uploaded). */
+  onRereadAll?: () => void;
   onChangeType: (documentId: string, type: DocumentType) => void;
   /** Fields read from each document, by document ID. 0 shows a "no fields" message; omitted = no count shown. */
   fieldCountByDocument?: Record<string, number>;
@@ -197,7 +199,9 @@ export function DocumentUploadCard(props: Props) {
   const remainingCount = readable.filter(
     (d) => d.status === 'queued' || d.status === 'extracting' || (d.status === 'uploaded' && running)
   ).length;
-  const retryable = failedDocs.filter((d) => d.errorCode !== 'password_protected' && !d.fileDeletedAt);
+  // Failed files, and files "read" with no values taken: both can be tried again without uploading anything.
+  const emptyDocs = readable.filter((d) => d.status === 'extracted' && !d.fileDeletedAt && (props.fieldCountByDocument?.[d.documentId] ?? 1) === 0);
+  const retryable = [...failedDocs.filter((d) => d.errorCode !== 'password_protected' && !d.fileDeletedAt), ...emptyDocs];
 
   const takeFiles = (list: FileList | null) => {
     if (!list || list.length === 0) return;
@@ -243,7 +247,18 @@ export function DocumentUploadCard(props: Props) {
               title={running ? 'Wait for the current reading to finish' : undefined}
               className="inline-flex items-center gap-1 ml-auto font-semibold text-orange-700 hover:text-orange-800 disabled:opacity-50 cursor-pointer"
             >
-              <RefreshCw className="w-3 h-3" aria-hidden="true" /> Retry all failed ({retryable.length})
+              <RefreshCw className="w-3 h-3" aria-hidden="true" /> Retry all unread ({retryable.length})
+            </button>
+          )}
+          {doneCount > 0 && props.onRereadAll && (
+            <button
+              type="button"
+              disabled={running}
+              onClick={props.onRereadAll}
+              title="Reads every stored file again. Nothing needs to be uploaded."
+              className={`inline-flex items-center gap-1 font-semibold text-stone-600 hover:text-stone-800 disabled:opacity-50 cursor-pointer ${retryable.length > 0 && props.onRetryFailed ? '' : 'ml-auto'}`}
+            >
+              <RefreshCw className="w-3 h-3" aria-hidden="true" /> Re-read all files
             </button>
           )}
         </div>

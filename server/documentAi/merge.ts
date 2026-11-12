@@ -561,10 +561,12 @@ export function buildBankMonthlyTotals(rows: RawBankMonth[], ctx: DocumentContex
     if (!monthStart || monthStart > ctx.today) continue;
     const totalCredits = parseBankAmount(row.totalCredits, row, verify);
     const closingBalance = parseBankAmount(row.closingBalance, row, verify);
+    const totalDebits = parseBankAmount(row.totalDebits ?? null, row, verify);
     if (totalCredits === null && closingBalance === null) continue;
     totals.push({
       month,
       totalCredits,
+      totalDebits,
       closingBalance,
       subjectRef: maskSubjectRef(row.subjectRef, ctx.documentType),
       source: buildSource(row, ctx),

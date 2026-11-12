@@ -585,10 +585,10 @@ async function runExtraction(input: ExtractDocumentInput): Promise<DocumentExtra
   }
   // Set when the model would have been asked but this job's breaker is open.
   let breakerSkipped = false;
-  // The AI is for files the server could not read itself (a scan or image local OCR got nothing from).
-  // Anything with readable text or rows (text PDFs, spreadsheets, CSV, Word, OCR text) is read locally only.
-  // DOCUMENT_AI_LLM_SCOPE=all restores the old behaviour of also asking it about files that have text.
-  const aiInScope = !prepared.content || process.env.DOCUMENT_AI_LLM_SCOPE?.trim().toLowerCase() === 'all';
+  // Local readers always go first. The AI is only the fallback for a file they could not classify or whose key
+  // fields they did not find (see the gates below), so a file a local reader handles never spends an AI request.
+  // DOCUMENT_AI_LLM_SCOPE=local restricts the AI to files the server could read nothing from at all.
+  const aiInScope = !prepared.content || process.env.DOCUMENT_AI_LLM_SCOPE?.trim().toLowerCase() !== 'local';
   const aiUsable = () => aiInScope && llmUsable(jobId);
 
   // Classification: the declared type, then the file's own title, then the model, else `other`.

@@ -7,6 +7,7 @@ import { DocumentUploadCard } from '../components/documentAi/DocumentUploadCard'
 import { DocumentPreviewDrawer } from '../components/documentAi/DocumentPreviewDrawer';
 import { DeleteDocumentDialog } from '../components/documentAi/DeleteDocumentDialog';
 import { ReviewPanel } from '../components/documentAi/ReviewPanel';
+import { TotalsSummary } from '../components/documentAi/TotalsSummary';
 import { ELIGIBILITY_DOC_FIELD_IDS, eligibilityFieldForDocField } from '../components/eligibility/docFieldMap';
 import { buildCandidateOptionsMap, type CandidateOption } from '../components/eligibility/candidateOptions';
 import { useDocumentAiForm } from '../components/documentAi/useDocumentAiForm';
@@ -537,12 +538,14 @@ export function EligibilityModule(props: EligibilityModuleProps = {}) {
           onRetry={(id) => void ai.retryDocument(id)}
           onUnlock={ai.unlockDocument}
           onRetryFailed={() => void ai.retryFailed()}
+          onRereadAll={() => void ai.rereadAll()}
           onChangeType={() => undefined}
-          fieldCountByDocument={ai.docState ? Object.fromEntries(ai.documents.map((d) => [d.documentId, Object.values(ai.docState!.fields).filter((f) => f.candidates.some((c) => c.source.documentId === d.documentId)).length])) : undefined}
+          fieldCountByDocument={ai.docState ? Object.fromEntries(ai.documents.map((d) => [d.documentId, Math.max(Object.values(ai.docState!.fields).filter((f) => f.candidates.some((c) => c.source.documentId === d.documentId)).length, d.valuesRead ?? 0)])) : undefined}
           onRefresh={() => void ai.refresh()}
         />
         {ai.documents.length > 0 && (
-          <div className="p-4 sm:p-6">
+          <div className="p-4 sm:p-6 space-y-4">
+            <TotalsSummary sessionId={ai.sessionId} extractedCount={ai.documents.filter((d) => d.status === 'extracted').length} />
             <ReviewPanel
               form={ai.form}
               fields={ai.docState?.fields ?? {}}

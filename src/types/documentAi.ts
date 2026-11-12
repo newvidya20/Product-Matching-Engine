@@ -280,6 +280,8 @@ export interface FieldResult {
 export interface BankMonthlyTotal {
   month: string; // YYYY-MM
   totalCredits: number | null;
+  /** Total debits/withdrawals; null when not proved. Results stored before this field read as null. */
+  totalDebits: number | null;
   closingBalance: number | null;
   /** From the model, 0 to 1. A derived value takes the lowest among its inputs. */
   confidence: number;
@@ -414,6 +416,8 @@ export interface StoredDocument {
   /** Set once bytes are gone; provenance may remain. */
   fileDeletedAt: string | null;
   fileDeletedReason: 'user' | 'retention' | null;
+  /** Values the last read took from this file: fields plus bank-statement months plus GST return periods. */
+  valuesRead?: number;
 }
 
 export type EditOrigin =

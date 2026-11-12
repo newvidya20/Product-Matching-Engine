@@ -20,6 +20,7 @@ import {
   type EditedFieldEntry,
   type ExtractionJob,
   type FieldResult,
+  type StoredDocument,
   type UpdateEditsRequest,
 } from '../../types/documentAi';
 import type { BorrowerAssessment } from '../../types/domain';
@@ -962,10 +963,33 @@ export function useDocumentAiForm({
     [hydrate, startExtraction]
   );
 
-  /** Retries every file that failed and can still be read, in one job. */
+  /** Values a file gave: its fields in the session, or what its last read recorded (bank months, GST periods). */
+  const valuesFrom = useCallback(
+    (d: StoredDocument) =>
+      Math.max(
+        Object.values(docState?.fields ?? {}).filter((f) => f.candidates.some((c) => c.source.documentId === d.documentId)).length,
+        d.valuesRead ?? 0
+      ),
+    [docState]
+  );
+
+  /** Retries every file that failed, and every file that was read but gave nothing, in one job. */
   const retryFailed = useCallback(() => {
     const ids = (docState?.documents ?? [])
-      .filter((d) => d.status === 'failed' && d.errorCode !== 'password_protected' && !d.fileDeletedAt)
+      .filter(
+        (d) =>
+          !d.fileDeletedAt &&
+          ((d.status === 'failed' && d.errorCode !== 'password_protected') || (d.status === 'extracted' && valuesFrom(d) === 0))
+      )
+      .map((d) => d.documentId);
+    if (ids.length === 0) return Promise.resolve();
+    return startExtraction(ids, true);
+  }, [docState, startExtraction, valuesFrom]);
+
+  /** Reads every stored file again (for example to pick up values a newer reader takes, like debit totals). */
+  const rereadAll = useCallback(() => {
+    const ids = (docState?.documents ?? [])
+      .filter((d) => !d.fileDeletedAt && d.status !== 'queued' && d.status !== 'extracting' && d.errorCode !== 'password_protected')
       .map((d) => d.documentId);
     if (ids.length === 0) return Promise.resolve();
     return startExtraction(ids, true);
@@ -1040,6 +1064,7 @@ export function useDocumentAiForm({
     retryDocument,
     unlockDocument,
     retryFailed,
+    rereadAll,
     refresh,
   };
 }

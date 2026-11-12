@@ -675,7 +675,7 @@ export const FIELD_DEFINITIONS: readonly FieldDefinition[] = [
     defaultValue: 'audited',
     periodScoped: true,
   }),
-  money('annualRevenue', 'Annual Revenue', STATEMENT_SOURCES, ANNUAL),
+  money('annualRevenue', 'Annual Revenue', [...STATEMENT_SOURCES, 'loan_application'], ANNUAL),
   money('previousAnnualRevenue', 'Previous FY Revenue', STATEMENT_SOURCES, ANNUAL),
   money('netProfitAfterTax', 'PAT', STATEMENT_SOURCES, { ...ANNUAL, signPolicy: 'signed' }),
   money('ebitda', 'EBITDA', BALANCE_SOURCES, { ...ANNUAL, signPolicy: 'signed' }),

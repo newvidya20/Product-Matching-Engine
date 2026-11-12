@@ -65,4 +65,18 @@ describe('bank statement reader', () => {
     const { months } = bankMonthsFromStatement([lines], 0.9);
     assert.equal(months[0].partial, true);
   });
+
+  it('emits totalDebits to the paisa only when the rows are proved', () => {
+    const proved = bankMonthsFromStatement([SBI_STYLE], 0.9);
+    assert.equal(proved.statement.reconciled, true);
+    const debitSum = proved.statement.transactions.reduce((a, t) => a + Math.round(t.debit * 100), 0) / 100;
+    assert.equal(proved.months[0].totalDebits, debitSum.toFixed(2));
+    assert.equal(proved.months[0].totalDebits, '20000.00');
+    assert.equal(proved.months[0].totalCredits, '650000.50', 'credits unchanged');
+
+    const broken = AXIS_STYLE.map((l) => (l === '4,000.00 5,000.00 MIDC, MUMBAI [MH]' ? '4,000.00 9,000.00 MIDC, MUMBAI [MH]' : l));
+    const unproved = bankMonthsFromStatement([broken], 0.9);
+    assert.equal(unproved.statement.reconciled, false);
+    for (const m of unproved.months) assert.equal(m.totalDebits, null);
+  });
 });
