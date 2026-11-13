@@ -158,8 +158,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const renderSidebarContent = (isCollapsed = false) => (
     <div className="flex flex-col h-full bg-white text-slate-700">
       <div
-        className={`h-20 ${
-          isCollapsed ? 'px-2 justify-center' : 'px-4 justify-between'
+        className={`${
+          isCollapsed ? 'min-h-20 py-3 px-2 flex-col justify-center' : 'h-20 px-4 justify-between'
         } border-b border-slate-200 flex items-center gap-2`}
       >
         <button
@@ -187,9 +187,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <button
           type="button"
           onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}
-          className={`hidden lg:inline-flex p-1.5 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-md cursor-pointer shrink-0 ${
-            isCollapsed ? 'absolute top-5 left-[3.15rem] z-10' : ''
-          }`}
+          className={`hidden lg:inline-flex p-1.5 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-md cursor-pointer shrink-0`}
           aria-label={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
           title={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
           aria-expanded={!isCollapsed}
